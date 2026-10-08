@@ -59,7 +59,7 @@ class Enricher:
     def version(self) -> str:
         parts = [
             "p%d" % PIPELINE_VERSION, "ip%d" % IP_VERSION, "s%d" % sessions.SESSIONS_VERSION,
-            "id%d" % identity.IDENTITY_VERSION, "ua%s" % ua.UA_VERSION, "bot%s" % bots.BOTS_VERSION,
+            "id%d" % identity.IDENTITY_VERSION, "ua%s" % ua.current_parser_version(), "bot%s" % bots.BOTS_VERSION,
             "src%s" % sources.SOURCES_VERSION, "geo:" + self.geo.version(),
             "cfg:" + self._config_fingerprint(),
         ]

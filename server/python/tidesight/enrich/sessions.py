@@ -125,9 +125,10 @@ def rebuild_one(conn: sqlite3.Connection, cfg: Config, key: str, reader: Any,
     geo = best_geo(conn, req.get("client_ip"))
     hints = {k: v for k, v in headers.items() if k.startswith("sec-ch-ua")}
     ua_string = ctx.get("ua") or headers.get("user-agent")
-    js_hints = ctx.get("uad") if isinstance(ctx.get("uad"), dict) else None
-    if js_hints is not None and ctx.get("tp") is not None:
-        js_hints = dict(js_hints, max_touch_points=ctx.get("tp"))
+    js_hints = dict(ctx["uad"]) if isinstance(ctx.get("uad"), dict) else {}
+    if ctx.get("tp") is not None:  # also without userAgentData: iPadOS in desktop mode is only visible this way
+        js_hints["max_touch_points"] = ctx.get("tp")
+    js_hints = js_hints or None
     ua_id = enricher.ua_id(conn, ua_string, hints, js_hints) if (ua_string or hints or js_hints) else req.get("ua_id")
     device = conn.execute("SELECT * FROM ua WHERE id = ?", (ua_id,)).fetchone() if ua_id else None
     device = dict(device) if device is not None else {}
