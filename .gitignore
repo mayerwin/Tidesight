@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Node / Playwright
+node_modules/
+tracker/test-results/
+tracker/playwright-report/
+tracker/blob-report/
+
+# Local data and configuration (never commit real data or secrets)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.mmdb
+config/tidesight.toml
+config/*.local.toml
+.env
+.env.*
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

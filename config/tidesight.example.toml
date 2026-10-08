@@ -1,0 +1,139 @@
+# Tidesight configuration — annotated example.
+#
+# Copy this file (e.g. to ~/tidesight/tidesight.toml), edit it, and point the
+# collector and jobs at it with the TIDESIGHT_CONFIG environment variable or
+# the --config option. Every key is optional: the values shown are the
+# defaults unless a comment says otherwise. Full reference:
+# docs/configuration.md.
+
+[server]
+data_dir = "/home/USER/tidesight-data"   # REQUIRED in production; keep it outside the web root
+storage_mode = "sqlite"                  # "sqlite", or "spool" (append-only files loaded by cron)
+journal_mode = "wal"                     # "wal" or "delete" (pick what the Phase 0 test passes with)
+synchronous = "normal"                   # "normal" or "full"
+busy_timeout_ms = 10000                  # how long a writer waits for the lock
+max_payload_kb = 64                      # max /collect body on the wire
+max_chunk_kb = 1024                      # max /chunk body (replay, mouse movement)
+max_decompressed_kb = 4096               # max body after gzip decompression
+max_events_per_request = 500
+rate_limit_per_minute = 600              # requests per IP per minute; 0 disables
+cors = "reflect"                         # "reflect" any Origin on ingest endpoints, or "allowed" origins only
+accept_ch = true                         # send Accept-CH so browsers supply Client Hints
+public_url = ""                          # e.g. "https://stats.example.com"; used in generated snippets
+secret = ""                              # REQUIRED: long random string (cookieless-hash salts, share links)
+static_dir = ""                          # serve tracker/dashboard files from the app when no web server does
+store_raw_body = false                   # also keep the raw body of requests that parsed fine
+log_file = ""                            # error log; stderr when empty
+
+[headers]
+secret_patterns = ["*token*", "*key*", "*secret*", "*password*"]   # values replaced by "[redacted]"
+drop = []                                # header names never stored (case-insensitive)
+cookie_names = ["ts_*"]                  # cookie values kept from the Cookie header
+
+[privacy]                                # all off by default; can be overridden per site (see docs/privacy.md)
+hash_ip = false                          # store a keyed hash of the IP instead of the IP
+truncate_ip = false                      # store the /24 (IPv4) or /48 (IPv6) network only
+honour_dnt = false                       # tracker stays silent and collector drops hits when DNT: 1
+honour_gpc = false                       # same for Sec-GPC: 1
+drop_fingerprint = false                 # never collect fingerprint components
+
+[retention]                              # days to keep, applied by `jobs.py privacy-clean`; 0 keeps forever
+raw_days = 0
+replay_days = 0
+mouse_days = 0
+
+[enrich]
+geo_dir = ""                             # folder with GeoLite2-City.mmdb, GeoLite2-ASN.mmdb, dbip-city-lite.mmdb, ...
+ip_header = "auto"                       # which address is the visitor: "auto", "remote_addr", "x-forwarded-for",
+                                         # "x-real-ip", "cf-connecting-ip", "forwarded"
+trusted_proxies = []                     # CIDRs whose forwarding headers are trusted with ip_header = "auto"
+bot_list = ""                            # optional path to crawler-user-agents.json
+internal_ips = []                        # CIDRs flagged as internal traffic (e.g. your office)
+
+[dashboard]
+# Users for HTTP Basic auth. Create a hash with:
+#   python -m tidesight.jobs hash-password
+users = {}                               # e.g. { admin = "pbkdf2_sha256$600000$...$..." }
+
+# Settings applied to every site. Any key below can be overridden per site.
+[defaults]
+timezone = "UTC"                         # IANA zone; sessions split at midnight in this zone
+session_timeout_min = 30
+split_session_at_midnight = true
+cookie_domain = "auto"                   # "auto" = registrable domain, "" = current host, or ".example.com"
+cookie_days = 400
+server_cookie_domain = ""                # e.g. ".example.com": the collector also sets ts_svid there
+hash_mode = "route"                      # which #hash changes are pageviews: "route" (#/ and #!), "all", "off"
+spa_replace = "path"                     # replaceState counts as a pageview when: "path" changes, "all", "off"
+heartbeat_sec = 30                       # engagement heartbeat while the page is in use; 0 disables
+flush_sec = 5                            # how often queued events are sent
+search_params = ["q", "s", "search", "query", "keyword"]
+exclude_paths = []                       # glob patterns the tracker ignores, e.g. ["/admin/*"]
+download_extensions = ["pdf", "zip", "dmg", "exe", "msi", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+                       "csv", "txt", "rtf", "odt", "ods", "odp", "epub", "mp3", "mp4", "mov", "avi",
+                       "wav", "gz", "tgz", "rar", "7z", "apk", "iso", "pkg", "deb", "rpm", "xml", "json"]
+public = false                           # publish a public stats page for this site
+public_metrics = ["visitors", "pageviews", "pages", "sources", "countries", "devices"]
+
+[defaults.features]
+pageviews = true
+spa = true                               # History API route changes
+engagement = true                        # visible-and-focused time, heartbeats
+context = true                           # screen, locale, preferences, hardware, network, browser state
+bot_signals = true                       # navigator.webdriver and headless hints
+adblock = false                          # ad-blocker detection
+fingerprint = true                       # device/browser signals + combined hash
+canvas_fingerprint = true
+webgl_fingerprint = true
+audio_fingerprint = true
+font_fingerprint = false
+clicks = true                            # every click: coordinates, selector, text, href
+outbound = true                          # outbound links (also when clicks = false)
+downloads = true                         # file downloads (also when clicks = false)
+heatmap_clicks = true                    # element-relative click positions
+rage_clicks = true
+dead_clicks = true
+error_clicks = true
+scroll = true
+forms = true                             # field focus/time/abandonment; values are never captured
+vitals = true                            # LCP, CLS, INP, FCP, TTFB
+navigation_timing = true
+long_tasks = false
+errors = true                            # JS errors and unhandled rejections
+resource_errors = true                   # failed image/script/stylesheet loads
+resize = true
+visibility = true
+copy_paste = false
+text_selection = false
+site_search = true
+not_found = true                         # pages flagged with <meta name="ts:status" content="404">
+ecommerce = false
+mouse_moves = false                      # heavy: stored in replay.db
+replay = false                           # heavy: rrweb session replay
+dom_snapshots = false                    # heavy: DOM snapshots for heatmap backgrounds
+
+# Per-feature options. Every behaviour plugin accepts sample_rate (0..1, decided per session).
+[defaults.replay]
+sample_rate = 0.1
+mask_all_inputs = true                   # password fields are always masked
+mask_text_class = "ts-mask"              # text inside these elements is masked
+block_class = "ts-block"                 # these elements are not recorded at all
+record_canvas = false
+max_minutes = 30
+
+[defaults.mouse_moves]
+sample_rate = 0.1
+interval_ms = 100
+max_points = 3000                        # per page
+
+[defaults.dom_snapshots]
+sample_rate = 0.01
+
+# One table per site. The table name is the site id used by the tracker (data-site="example").
+[sites.example]
+name = "Example"
+origins = ["https://example.com", "https://www.example.com"]
+timezone = "Pacific/Tahiti"
+features.replay = false
+replay.sample_rate = 0.1
+replay.mask_all_inputs = true

@@ -1,0 +1,98 @@
+# Design principles and decisions
+
+This document records **why** Tidesight is built the way it is. Read it before changing behaviour, storage, the wire protocol or defaults. `AGENTS.md` turns these principles into working rules; `docs/architecture.md` describes how the pieces fit together.
+
+## What Tidesight is for
+
+Tidesight is a self-hosted web analytics system for any number of sites:
+
+- **Collect.** A small JavaScript tracker records what visitors do.
+- **Ingest.** A small server-side script receives each hit and appends it to a SQLite database. Python comes first, because it runs on Dreamhost shared hosting; other connectors (PHP, Node, Cloudflare Worker) speak the same wire protocol and write the same schema.
+- **Analyse.** Re-runnable enrichment jobs derive sessions, geography, devices, bots and identity from the raw data, and a dashboard presents it.
+
+The goals, in the owner's words:
+
+- **Record every useful data point** that the leading tools record (Google Analytics 4, Matomo, Plausible, Umami, PostHog, Hotjar, Microsoft Clarity, Fathom): request headers, client environment, behaviour, performance, errors, and optionally session replay and heatmaps.
+- **Store it simply**, in SQLite, through a small ingest script.
+- **Keep the raw data forever**, so all derived data can be recomputed.
+- **Make everything configurable** per site and per feature, with a privacy mode for later.
+- **Show it in a dashboard**, once collection is solid.
+
+Tidesight is generic. Cap Côtier was the first motivation, but it is just one client: nothing may assume a particular site.
+
+## Principles
+
+### 1. Raw first, derive later
+
+Every hit is stored as received: raw IP, request headers and the full client payload. Everything else is derived by re-runnable jobs: geolocation, user-agent parsing, sessions, visitor identity, bot flags, channels.
+
+*Why:* parsers, geo databases and bot lists improve over time, and analysis questions change. If ingest stored only derived values, history could never be recomputed. Storage is cheap; lost raw data is gone for good.
+
+*Consequences:*
+- Ingest never depends on enrichment. It parses only enough to validate and to fill a few indexed columns.
+- Raw fields are never discarded at ingest unless a config switch says so.
+- Every derived row carries the version of the job that produced it, so a parser change triggers a recompute.
+- Derived data lives in its own database file (`derived.db`) that can be deleted and rebuilt at any time.
+
+### 2. Collect what the leading tools collect
+
+GA4, Matomo, Plausible, Umami, PostHog, Hotjar/Clarity and Fathom are the reference for data points, identity techniques and behavioural features. If one of them records something useful for reliable tracking, Tidesight should be able to record it. The full catalogue is in `docs/datapoints.md`.
+
+### 3. Everything is configurable
+
+Every data-point family and every heavy feature (session replay, heatmaps, mouse movement, rage clicks, Web Vitals, error capture…) has a per-site switch, and behaviour plugins have a per-site sampling rate. Defaults are **data-rich**: everything useful is on, and only heavy or invasive features are off or sampled.
+
+### 4. Privacy mode exists, but is off by default
+
+Raw IPs, the persistent visitor ID (cookie + localStorage) and fingerprint signals are **on by default**. GDPR and consent are not a concern for now. A privacy mode (config) plus clean-up jobs can later hash or drop IPs, drop fingerprints, purge replay data, apply retention windows and honour DNT/GPC, mirroring what Plausible, Matomo and GA do.
+
+*Why:* the owner wants maximum insight today, but a site may grow large enough to need privacy controls. Building features so that privacy mode is "a config change plus a script" avoids a rewrite later.
+
+### 5. Ingestion never loses data and never breaks the host site
+
+- The tracker fails silently. No exception may ever reach the host page.
+- The collector answers fast (no enrichment, no network calls inline), validates and bounds input, and appends.
+- Malformed requests, unknown sites and wrong origins are still **stored and flagged**, never silently dropped. The only deliberate refusals are oversize bodies (their metadata is kept) and per-IP rate limiting (counted).
+- The tracker queues events, retries from localStorage, and every event carries a unique id so that duplicates from retries are removed at enrichment, not at ingest.
+
+### 6. Runs on cheap shared hosting
+
+The Python collector uses the **standard library only** (`sqlite3`, `json`, `gzip`, `wsgiref`) and runs under Passenger WSGI or CGI. There are no long-running daemons: background work runs from cron. Optional heavier libraries (geo readers, UA parsers) are only used by enrichment jobs and degrade gracefully when absent; Tidesight ships pure-Python fallbacks for the important ones.
+
+### 7. Neutral, friendly naming in anything a visitor can see
+
+Script names, cookie names, storage keys and endpoints use the neutral `ts` prefix (`ts.js`, `ts_vid`, `/collect`). Nothing that sounds like surveillance.
+
+## Decision log
+
+Decisions taken by the owner during planning (2026-10-08), with the reasoning behind them.
+
+| Topic | Decision | Reasoning |
+|---|---|---|
+| Name | **Tidesight**: traffic ebbs and flows like a tide, and "sight" means insight. Used everywhere (repo, package, docs). | |
+| Storage | **SQLite.** A Phase 0 hosting test verifies it on Dreamhost (`tools/sqlite_host_test.py`). | Zero administration, single file, fast enough for append-heavy workloads; no database server on shared hosting. |
+| Storage fallback | If SQLite fails the hosting test, the collector appends one JSON line per hit to a spool file and a cron job loads it into SQLite. It is a config switch (`storage_mode = "spool"`). | Appending to a file never contends for a lock. Per-process spool files avoid interleaving even on network filesystems. |
+| First connector | **Python, standard library only**, via Passenger WSGI (CGI as a fallback). | Runs on Dreamhost without installing anything. |
+| Raw IP | **Stored by default.** An option hashes or drops it (privacy mode). | Raw first; geolocation and bot detection improve if the IP is kept. |
+| Persistent visitor ID | **On by default:** first-party cookie + localStorage, each restoring the other. | Same approach as GA's `_ga`; survives third-party-cookie blocking. |
+| Cookieless ID | Also computed, at enrichment: a daily-salted hash of IP + UA + site, as Plausible does. | Links hits from visitors whose storage is blocked or cleared. |
+| Fingerprinting | **Allowed.** Device and browser signals plus optional canvas/WebGL/audio hashes, each switchable. | Reliable identity stitching, as leading tools do. |
+| Headers | Capture **all** request headers, except the values of secrets (`Cookie` other than Tidesight's own, `Authorization`, configurable secret patterns). | Don't throw away potentially useful data; never store credentials. |
+| Heavy features | Session replay, mouse-movement heatmaps, click heatmaps, rage and dead clicks: all supported, each configurable and sampleable. | Parity with Hotjar/Clarity without making every site pay the cost. |
+| GDPR / consent | Not a concern for now. An easy privacy mode plus clean-up scripts come later. | See principle 4. |
+| Scope | Generic and multi-site. | Tidesight serves any number of sites from one deployment. |
+| Licence | MIT (suggested during planning; adopted provisionally). | Compatible with rrweb (MIT). GeoLite2 data has its own licence and is never bundled. |
+
+## Design choices made during implementation
+
+These follow from the principles above. Each one is a trade-off worth knowing before changing it.
+
+- **Three database files.** `events.db` holds raw requests and hits and is written only by the collector. `replay.db` holds heavy chunks (replay, mouse movement) so the main database stays small. `derived.db` holds everything the jobs compute and can be rebuilt from scratch. Separate files also mean an enrichment job never holds the write lock the collector needs.
+- **One row per request plus one row per event.** `raw_requests` keeps what arrived over HTTP (IP, headers, envelope); `raw_hits` keeps each event of a batch as received, with a few typed columns for indexing. Shared request data is stored once per batch rather than once per event.
+- **Client IP decided at enrichment.** Ingest stores `REMOTE_ADDR` and every forwarding header; which one is the visitor's address depends on the deployment and is decided later (`enrich.ip_header`, `enrich.trusted_proxies`).
+- **CORS reflects the origin on ingest endpoints.** The ingest endpoints are write-only and return nothing sensitive, so reflecting any `Origin` lets the tracker read status codes (and retry on 5xx) even when a site's allowed-origins list is out of date. The hit is still flagged when its origin is not allowed. `server.cors = "allowed"` restricts this.
+- **`text/plain` bodies.** The tracker posts JSON as `text/plain` (optionally gzip, detected by magic bytes), so browsers never send a CORS preflight.
+- **Tracker core plus lazy plugins.** The core (pageviews, identity, sessions, engagement, delivery, context) stays small; each behaviour feature is a separate file loaded only when the site's config enables it and the session is sampled in. A single-file bundle is also built for sites that prefer one request.
+- **Sampling per session.** A plugin's sampling decision is a deterministic function of the session id, so a session is entirely in or entirely out.
+- **Session ids from the client, rebuilt on the server.** The tracker keeps a session id (30-minute idle timeout, optional split at midnight in the site's time zone); enrichment trusts it when present and rebuilds sessions from the cookieless hash for hits without one (pixel hits).
+- **Fingerprints are evidence, not identity.** Identity stitching links ids through the persistent visitor id and known user ids first; fingerprint and cookieless hashes only link visitors together with other evidence, and every link carries a confidence score.
