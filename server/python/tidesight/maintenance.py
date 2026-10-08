@@ -1,0 +1,388 @@
+"""Maintenance jobs: backup, vacuum, privacy clean-up, archiving, export.
+
+Every destructive job is a dry run unless told to apply, and privacy-clean
+takes a backup first. See docs/privacy.md.
+"""
+
+from __future__ import annotations
+
+import csv
+import gzip
+import io
+import json
+import os
+import shutil
+import sqlite3
+import sys
+import time
+from typing import Any, Dict, IO, Iterable, List, Optional, Tuple
+
+from .anonymize import IP_HEADERS, anonymize_headers, anonymize_ip
+from .config import Config
+from .storage import EVENTS_MIGRATIONS, REPLAY_MIGRATIONS, connect, migrate
+
+DB_FILES = ("events.db", "replay.db", "derived.db")
+DAY_MS = 86400000
+
+
+def _db(cfg: Config, name: str, readonly: bool = False) -> Optional[sqlite3.Connection]:
+    path = os.path.join(cfg.data_dir, name)
+    if not os.path.exists(path):
+        return None
+    if readonly:
+        conn = connect(path, readonly=True, busy_timeout_ms=cfg.server["busy_timeout_ms"])
+    else:
+        conn = connect(path, cfg.server["journal_mode"], cfg.server["synchronous"], max(30000, cfg.server["busy_timeout_ms"]))
+        if name == "events.db":
+            migrate(conn, EVENTS_MIGRATIONS)
+        elif name == "replay.db":
+            migrate(conn, REPLAY_MIGRATIONS)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _utc_day_start(day: str) -> int:
+    import calendar
+    return calendar.timegm(time.strptime(day, "%Y-%m-%d")) * 1000
+
+
+# ---------------------------------------------------------------------------
+# Backup
+# ---------------------------------------------------------------------------
+
+def backup(cfg: Config, dest: Optional[str] = None, keep: int = 7, with_replay: bool = False,
+           with_derived: bool = False) -> Dict[str, Any]:
+    """Consistent online copies (SQLite backup API), gzip-compressed, rotated."""
+    root = dest or os.path.join(cfg.data_dir, "backups")
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    target = os.path.join(root, stamp)
+    os.makedirs(target, exist_ok=True)
+    names = ["events.db"] + (["replay.db"] if with_replay else []) + (["derived.db"] if with_derived else [])
+    done = []
+    for name in names:
+        src_path = os.path.join(cfg.data_dir, name)
+        if not os.path.exists(src_path):
+            continue
+        tmp = os.path.join(target, name)
+        src = sqlite3.connect(src_path, timeout=60)
+        dst = sqlite3.connect(tmp)
+        try:
+            src.backup(dst, pages=4096, sleep=0.01)  # in steps, so the collector keeps writing
+        finally:
+            dst.close()
+            src.close()
+        with open(tmp, "rb") as fin, gzip.open(tmp + ".gz", "wb", compresslevel=6) as fout:
+            shutil.copyfileobj(fin, fout, 1024 * 1024)
+        os.remove(tmp)
+        done.append({"file": name, "gz_mb": round(os.path.getsize(tmp + ".gz") / 1e6, 2)})
+    # Rotation: keep the newest `keep` backup folders.
+    folders = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)) and d[:8].isdigit())
+    removed = []
+    for old in folders[:-keep] if keep > 0 else []:
+        shutil.rmtree(os.path.join(root, old), ignore_errors=True)
+        removed.append(old)
+    return {"backup": target, "files": done, "removed": removed}
+
+
+# ---------------------------------------------------------------------------
+# Vacuum / optimise
+# ---------------------------------------------------------------------------
+
+def vacuum(cfg: Config) -> Dict[str, Any]:
+    out = {}
+    for name in DB_FILES:
+        conn = _db(cfg, name)
+        if conn is None:
+            continue
+        before = os.path.getsize(os.path.join(cfg.data_dir, name))
+        conn.execute("PRAGMA optimize")
+        conn.execute("VACUUM")
+        if cfg.server["journal_mode"] == "wal":
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+        out[name] = {"mb_before": round(before / 1e6, 2),
+                     "mb_after": round(os.path.getsize(os.path.join(cfg.data_dir, name)) / 1e6, 2)}
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Privacy clean-up
+# ---------------------------------------------------------------------------
+
+def _mark_derived_stale(cfg: Config) -> None:
+    """Make the next `enrich` run rebuild derived.db from the cleaned raw data."""
+    conn = _db(cfg, "derived.db")
+    if conn is None:
+        return
+    try:
+        conn.execute("UPDATE job_state SET version = 'stale' WHERE job = 'enrich'")
+    except sqlite3.Error:
+        pass
+    conn.close()
+
+
+def _annotate_geo(cfg: Config, econn: sqlite3.Connection) -> int:
+    """Before anonymising IPs, keep each request's derived geolocation in raw_requests.geo."""
+    dconn = _db(cfg, "derived.db", readonly=True)
+    if dconn is None:
+        return 0
+    n = 0
+    try:
+        rows = econn.execute("SELECT id FROM raw_requests WHERE geo IS NULL AND ip IS NOT NULL AND ip NOT LIKE 'h:%'").fetchall()
+        for start in range(0, len(rows), 1000):
+            ids = [r["id"] for r in rows[start:start + 1000]]
+            marks = ",".join("?" * len(ids))
+            found = dconn.execute(
+                "SELECT r.request_id, g.* FROM requests r JOIN ip_geo g ON g.ip = r.client_ip "
+                "WHERE r.request_id IN (%s) AND g.provider != ''" % marks, ids).fetchall()
+            notes: Dict[int, Dict[str, Any]] = {}
+            for g in found:
+                rec = {k: g[k] for k in g.keys() if k not in ("request_id", "ip", "provider") and g[k] is not None}
+                notes.setdefault(g["request_id"], {})[g["provider"]] = rec
+            econn.execute("BEGIN IMMEDIATE")
+            for rid, note in notes.items():
+                econn.execute("UPDATE raw_requests SET geo = ? WHERE id = ?", (json.dumps(note), rid))
+                n += 1
+            econn.execute("COMMIT")
+    finally:
+        dconn.close()
+    return n
+
+
+def privacy_clean(cfg: Config, hash_ip: bool = False, truncate_ip: bool = False, drop_fingerprint: bool = False,
+                  drop_replay: bool = False, drop_mouse: bool = False, apply_retention: bool = False,
+                  apply: bool = False, backup_first: bool = True, now_ms: Optional[int] = None) -> Dict[str, Any]:
+    """Each step is opt-in; nothing changes without apply=True."""
+    if not any((hash_ip, truncate_ip, drop_fingerprint, drop_replay, drop_mouse, apply_retention)):
+        return {"note": "nothing to do: pass --hash-ip, --truncate-ip, --drop-fingerprint, --drop-replay, "
+                        "--drop-mouse and/or --retention"}
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    report: Dict[str, Any] = {"dry_run": not apply, "steps": {}}
+    econn = _db(cfg, "events.db")
+    rconn = _db(cfg, "replay.db")
+    try:
+        if apply and backup_first:
+            report["backup"] = backup(cfg, with_replay=rconn is not None and (drop_replay or drop_mouse or apply_retention))
+        if hash_ip or truncate_ip:
+            report["steps"]["ip"] = _clean_ips(cfg, econn, rconn, hash_ip, truncate_ip, apply)
+        if drop_fingerprint and econn is not None:
+            n = econn.execute("SELECT COUNT(*) FROM raw_hits WHERE type = 'fp'").fetchone()[0]
+            if apply and n:
+                econn.execute("BEGIN IMMEDIATE")
+                econn.execute("DELETE FROM raw_hits WHERE type = 'fp'")
+                econn.execute("COMMIT")
+            report["steps"]["fingerprint"] = {"fp_hits": n}
+        for flag, kinds in ((drop_replay, ("replay", "snapshot")), (drop_mouse, ("mouse",))):
+            if flag and rconn is not None:
+                marks = ",".join("?" * len(kinds))
+                n = rconn.execute("SELECT COUNT(*) FROM chunks WHERE kind IN (%s)" % marks, kinds).fetchone()[0]
+                if apply and n:
+                    rconn.execute("BEGIN IMMEDIATE")
+                    rconn.execute("DELETE FROM chunks WHERE kind IN (%s)" % marks, kinds)
+                    rconn.execute("COMMIT")
+                report["steps"]["chunks_" + kinds[0]] = {"chunks": n}
+        if apply_retention:
+            report["steps"]["retention"] = _retention(cfg, econn, rconn, apply, now_ms)
+        if apply:
+            for conn in (econn, rconn):
+                if conn is not None:
+                    conn.execute("VACUUM")
+            _mark_derived_stale(cfg)
+            report["note"] = "derived.db will be rebuilt by the next enrich run"
+        else:
+            report["note"] = "dry run: re-run with --apply to change data"
+    finally:
+        for conn in (econn, rconn):
+            if conn is not None:
+                conn.close()
+    return report
+
+
+def _clean_ips(cfg: Config, econn: Optional[sqlite3.Connection], rconn: Optional[sqlite3.Connection],
+               do_hash: bool, do_truncate: bool, apply: bool) -> Dict[str, Any]:
+    secret = cfg.secret
+    out: Dict[str, Any] = {"requests": 0, "chunks": 0}
+    if econn is not None:
+        rows = econn.execute("SELECT id, ip, headers FROM raw_requests WHERE ip IS NOT NULL AND ip NOT LIKE 'h:%'").fetchall()
+        out["requests"] = len(rows)
+        if apply and rows:
+            out["geo_annotated"] = _annotate_geo(cfg, econn)
+            for start in range(0, len(rows), 1000):
+                econn.execute("BEGIN IMMEDIATE")
+                for r in rows[start:start + 1000]:
+                    headers = json.loads(r["headers"] or "{}")
+                    headers = anonymize_headers(headers, do_hash, do_truncate, secret)
+                    econn.execute("UPDATE raw_requests SET ip = ?, headers = ? WHERE id = ?",
+                                  (anonymize_ip(r["ip"], do_hash, do_truncate, secret),
+                                   json.dumps(headers, ensure_ascii=False, separators=(",", ":")), r["id"]))
+                econn.execute("COMMIT")
+    if rconn is not None:
+        rows = rconn.execute("SELECT id, ip FROM chunks WHERE ip IS NOT NULL AND ip NOT LIKE 'h:%'").fetchall()
+        out["chunks"] = len(rows)
+        if apply and rows:
+            rconn.execute("BEGIN IMMEDIATE")
+            for r in rows:
+                rconn.execute("UPDATE chunks SET ip = ? WHERE id = ?",
+                              (anonymize_ip(r["ip"], do_hash, do_truncate, secret), r["id"]))
+            rconn.execute("COMMIT")
+    return out
+
+
+def _retention(cfg: Config, econn: Optional[sqlite3.Connection], rconn: Optional[sqlite3.Connection],
+               apply: bool, now_ms: int) -> Dict[str, Any]:
+    r = cfg.retention
+    out: Dict[str, Any] = {}
+    if r["raw_days"] and econn is not None:
+        cutoff = now_ms - r["raw_days"] * DAY_MS
+        n = econn.execute("SELECT COUNT(*) FROM raw_requests WHERE received_at < ?", (cutoff,)).fetchone()[0]
+        if apply and n:
+            econn.execute("BEGIN IMMEDIATE")
+            econn.execute("DELETE FROM raw_hits WHERE request_id IN (SELECT id FROM raw_requests WHERE received_at < ?)",
+                          (cutoff,))
+            econn.execute("DELETE FROM raw_requests WHERE received_at < ?", (cutoff,))
+            econn.execute("COMMIT")
+        out["raw_requests"] = n
+    if rconn is not None:
+        for key, kinds in (("replay_days", ("replay", "snapshot")), ("mouse_days", ("mouse",))):
+            if r[key]:
+                cutoff = now_ms - r[key] * DAY_MS
+                marks = ",".join("?" * len(kinds))
+                n = rconn.execute("SELECT COUNT(*) FROM chunks WHERE received_at < ? AND kind IN (%s)" % marks,
+                                  (cutoff,) + kinds).fetchone()[0]
+                if apply and n:
+                    rconn.execute("BEGIN IMMEDIATE")
+                    rconn.execute("DELETE FROM chunks WHERE received_at < ? AND kind IN (%s)" % marks, (cutoff,) + kinds)
+                    rconn.execute("COMMIT")
+                out[key] = n
+    if not out:
+        out["note"] = "no [retention] window is set"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Archiving: old raw data into yearly databases
+# ---------------------------------------------------------------------------
+
+def archive(cfg: Config, before: str, apply: bool = False, batch: int = 5000) -> Dict[str, Any]:
+    """Move raw requests (and their hits) received before `before` (UTC date) to archive/events-YYYY.db.
+
+    Enrichment reads the archives too, so derived data and rebuilds are unaffected.
+    """
+    cutoff = _utc_day_start(before)
+    econn = _db(cfg, "events.db")
+    if econn is None:
+        return {"note": "no events.db"}
+    years = econn.execute(
+        "SELECT strftime('%Y', received_at / 1000, 'unixepoch') AS y, COUNT(*) AS n FROM raw_requests "
+        "WHERE received_at < ? GROUP BY y ORDER BY y", (cutoff,)).fetchall()
+    report: Dict[str, Any] = {"dry_run": not apply, "years": {r["y"]: r["n"] for r in years}}
+    if not apply:
+        econn.close()
+        return report
+    arch_dir = os.path.join(cfg.data_dir, "archive")
+    os.makedirs(arch_dir, exist_ok=True)
+    for r in years:
+        year = r["y"]
+        path = os.path.join(arch_dir, "events-%s.db" % year)
+        aconn = connect(path, "delete", "full")
+        migrate(aconn, EVENTS_MIGRATIONS)
+        aconn.close()
+        start = _utc_day_start("%s-01-01" % year)
+        end = min(cutoff, _utc_day_start("%d-01-01" % (int(year) + 1)))
+        econn.execute("ATTACH DATABASE ? AS arch", (path,))
+        try:
+            cols_r = [c[1] for c in econn.execute("PRAGMA main.table_info(raw_requests)")]
+            cols_h = [c[1] for c in econn.execute("PRAGMA main.table_info(raw_hits)")]
+            while True:
+                ids = [x[0] for x in econn.execute(
+                    "SELECT id FROM raw_requests WHERE received_at >= ? AND received_at < ? ORDER BY id LIMIT ?",
+                    (start, end, batch))]
+                if not ids:
+                    break
+                marks = ",".join("?" * len(ids))
+                econn.execute("BEGIN IMMEDIATE")
+                econn.execute("INSERT OR REPLACE INTO arch.raw_requests(%s) SELECT %s FROM main.raw_requests WHERE id IN (%s)"
+                              % (",".join(cols_r), ",".join(cols_r), marks), ids)
+                econn.execute("INSERT OR REPLACE INTO arch.raw_hits(%s) SELECT %s FROM main.raw_hits WHERE request_id IN (%s)"
+                              % (",".join(cols_h), ",".join(cols_h), marks), ids)
+                econn.execute("DELETE FROM main.raw_hits WHERE request_id IN (%s)" % marks, ids)
+                econn.execute("DELETE FROM main.raw_requests WHERE id IN (%s)" % marks, ids)
+                econn.execute("COMMIT")
+        finally:
+            econn.execute("DETACH DATABASE arch")
+    econn.execute("VACUUM")
+    econn.close()
+    report["archive_dir"] = arch_dir
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Export
+# ---------------------------------------------------------------------------
+
+EXPORTS = {
+    "sessions": ("derived.db", "SELECT * FROM sessions WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY started_at"),
+    "pageviews": ("derived.db", "SELECT * FROM pageviews WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY ts"),
+    "events": ("derived.db", "SELECT * FROM events WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY ts"),
+    "errors": ("derived.db", "SELECT * FROM errors WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY ts"),
+    "vitals": ("derived.db", "SELECT * FROM vitals WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY ts"),
+    "clicks": ("derived.db", "SELECT * FROM clicks WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY ts"),
+    "forms": ("derived.db", "SELECT * FROM forms WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY ts"),
+    "daily": ("derived.db", "SELECT * FROM daily WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY day"),
+    "visitors": ("derived.db", "SELECT * FROM visitors WHERE site_id = ? AND date(last_seen / 1000, 'unixepoch') "
+                               "BETWEEN ? AND ? ORDER BY last_seen"),
+    "raw": ("events.db", "SELECT h.*, r.ip, r.headers, r.envelope, r.site_status, r.endpoint FROM raw_hits h "
+                         "JOIN raw_requests r ON r.id = h.request_id WHERE h.site_id = ? AND "
+                         "date(h.received_at / 1000, 'unixepoch') BETWEEN ? AND ? ORDER BY h.id"),
+}
+
+
+def iter_export(cfg: Config, site: str, what: str, start: Optional[str], end: Optional[str]) -> Tuple[List[str], Iterable[Tuple]]:
+    db, sql = EXPORTS[what]
+    conn = _db(cfg, db, readonly=True)
+    if conn is None:
+        return [], iter(())
+    cur = conn.execute(sql, (site, start or "0000-00-00", end or "9999-99-99"))
+    cols = [d[0] for d in cur.description]
+
+    def rows() -> Iterable[Tuple]:
+        try:
+            for row in cur:
+                yield tuple(row)
+        finally:
+            conn.close()
+    return cols, rows()
+
+
+def write_export(cols: List[str], rows: Iterable[Tuple], fmt: str, fh: IO[str]) -> int:
+    n = 0
+    if fmt == "csv":
+        w = csv.writer(fh)
+        w.writerow(cols)
+        for row in rows:
+            w.writerow(["" if v is None else (v.hex() if isinstance(v, bytes) else v) for v in row])
+            n += 1
+    elif fmt == "jsonl":
+        for row in rows:
+            fh.write(json.dumps(dict(zip(cols, row)), ensure_ascii=False, default=lambda b: b.hex()) + "\n")
+            n += 1
+    else:
+        fh.write("[")
+        for row in rows:
+            fh.write(("," if n else "") + "\n" + json.dumps(dict(zip(cols, row)), ensure_ascii=False,
+                                                              default=lambda b: b.hex()))
+            n += 1
+        fh.write("\n]\n")
+    return n
+
+
+def export(cfg: Config, site: str, what: str, start: Optional[str], end: Optional[str], fmt: str = "csv",
+           out: str = "-") -> Dict[str, Any]:
+    cols, rows = iter_export(cfg, site, what, start, end)
+    if out == "-":
+        n = write_export(cols, rows, fmt, sys.stdout)
+        sys.stdout.flush()
+        return {}
+    with open(out, "w", encoding="utf-8", newline="") as fh:
+        n = write_export(cols, rows, fmt, fh)
+    return {"rows": n, "file": out}

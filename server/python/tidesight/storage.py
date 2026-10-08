@@ -98,6 +98,10 @@ EVENTS_MIGRATIONS: List[Tuple[int, List[str]]] = [
         )""",
         "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
     ]),
+    # Privacy annotations: the geolocation derived before an IP was anonymised (JSON {provider: record}).
+    (2, [
+        "ALTER TABLE raw_requests ADD COLUMN geo TEXT",
+    ]),
 ]
 
 REPLAY_MIGRATIONS: List[Tuple[int, List[str]]] = [

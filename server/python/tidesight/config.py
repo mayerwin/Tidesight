@@ -451,6 +451,30 @@ class Config:
         return cfg
 
 
+    # -- resolved configuration for other connectors -----------------------------
+
+    def resolved(self) -> Dict[str, Any]:
+        """Everything a connector needs, with defaults and layering already applied.
+
+        Other connectors (PHP, Node, Worker) read this JSON instead of the TOML file:
+        `python -m tidesight.jobs config-json > tidesight.json`. See docs/connectors.md.
+        """
+        def site_doc(site: SiteConfig) -> Dict[str, Any]:
+            return {"name": site.name, "origins": site.origins, "timezone": site.timezone,
+                    "server_cookie_domain": site.settings["server_cookie_domain"],
+                    "cookie_days": site.settings["cookie_days"], "privacy": site.privacy}
+        return {
+            "format": "tidesight-resolved-config/1",
+            "server": dict(self.server, secret=self.secret),
+            "headers": self.headers,
+            "privacy": self.privacy,
+            "sites": {sid: site_doc(s) for sid, s in self.sites.items()},
+            "default_site": site_doc(self._default_site),
+            "public": {sid: self.public_site_config(sid) for sid in self.sites},
+            "public_default": self.public_site_config(""),
+        }
+
+
 def _load_or_create_secret(data_dir: str) -> str:
     path = os.path.join(data_dir, ".secret")
     try:

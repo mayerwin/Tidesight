@@ -6,6 +6,7 @@ Options for the browser tests:
     --static DIR --static-port N   also serve a static site (e.g. the tracker's fixture site) on another port,
                                    so tracker and collector run on different origins as in production
     --test-api                     expose /__test/* endpoints to inspect and reset stored data (never in production)
+    --no-auth                      open the dashboard (/dashboard/) without a password (never in production)
 """
 
 from __future__ import annotations
@@ -153,10 +154,11 @@ def main(argv: List[str] = None) -> None:
     ap.add_argument("--static", help="directory to serve as a static site on --static-port")
     ap.add_argument("--static-port", type=int, default=8788)
     ap.add_argument("--test-api", action="store_true", help="enable /__test/* endpoints (tests only)")
+    ap.add_argument("--no-auth", action="store_true", help="serve the dashboard without a password (local only)")
     args = ap.parse_args(argv)
 
     holder = ConfigHolder(args.config)
-    app = create_app(args.config)
+    app = create_app(args.config, auth=not args.no_auth)
     if args.test_api:
         app = test_api(app, holder)
     servers = [serve(app, args.host, args.port)]
