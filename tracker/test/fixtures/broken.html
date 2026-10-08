@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><title>Hostile environment</title>
+  <script>
+    // Break everything the tracker relies on, then check that the page still works.
+    Storage.prototype.getItem = function () { throw new Error('storage blocked'); };
+    Storage.prototype.setItem = function () { throw new Error('storage blocked'); };
+    Object.defineProperty(document, 'cookie', { get: function () { throw new Error('cookies blocked'); }, set: function () { throw new Error('cookies blocked'); } });
+    navigator.sendBeacon = undefined;
+    window.fetch = undefined;
+    window.CompressionStream = undefined;
+    Intl.DateTimeFormat = function () { throw new Error('no Intl'); };
+  </script>
+  <script src="/loader.js"></script>
+</head>
+<body>
+  <button id="track" onclick="tidesight('track', 'x', {a: 1}); tidesight.track(null); tidesight('nope'); var o = {}; o.self = o; tidesight('track', 'circular', o); tidesight('identify'); tidesight('page'); window.clicked = true;">Track</button>
+</body>
+</html>

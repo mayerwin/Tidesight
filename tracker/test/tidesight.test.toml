@@ -1,0 +1,61 @@
+# Configuration used by the Playwright tests (devserver.py --test-api).
+[server]
+data_dir = "data"          # tracker/test/data, git-ignored
+rate_limit_per_minute = 0
+
+[defaults]
+timezone = "Europe/Paris"
+flush_sec = 1
+heartbeat_sec = 2
+exclude_paths = ["/excluded/*"]
+
+# Everything on, as in production defaults (plugin tests).
+[sites.test]
+name = "Fixture site"
+origins = ["http://127.0.0.1:8788", "http://localhost:8788"]
+features.mouse_moves = true
+mouse_moves.sample_rate = 1.0
+mouse_moves.interval_ms = 50
+features.copy_paste = true
+features.text_selection = true
+features.long_tasks = true
+features.adblock = true
+
+# Session replay on for every session.
+[sites.replay]
+origins = ["http://127.0.0.1:8788"]
+features.replay = true
+replay.sample_rate = 1.0
+
+# Core only: every plugin feature off.
+[sites.core]
+origins = ["http://127.0.0.1:8788", "http://localhost:8788"]
+features.fingerprint = false
+features.bot_signals = false
+features.clicks = false
+features.outbound = false
+features.downloads = false
+features.heatmap_clicks = false
+features.rage_clicks = false
+features.dead_clicks = false
+features.error_clicks = false
+features.scroll = false
+features.forms = false
+features.vitals = false
+features.navigation_timing = false
+features.errors = false
+features.resource_errors = false
+features.resize = false
+features.visibility = false
+
+[sites.private]
+origins = ["http://127.0.0.1:8788"]
+privacy.honour_dnt = true
+features.fingerprint = false
+features.bot_signals = false
+
+[sites.scookie]
+origins = ["http://127.0.0.1:8788"]
+server_cookie_domain = "127.0.0.1"
+features.fingerprint = false
+features.bot_signals = false

@@ -71,9 +71,15 @@ def test_api(app: Callable[..., Iterable[bytes]], holder: ConfigHolder) -> Calla
         qs = {k: v[0] for k, v in parse_qs(environ.get("QUERY_STRING", "")).items()}
         since = int(qs.get("since", "0") or 0)
         if path == "/__test/hits":
+            where, params = ["h.id > ?"], [since]
+            for key, col in (("vid", "h.visitor_id"), ("site", "h.site_id"), ("type", "h.type"), ("sid", "h.session_id")):
+                if qs.get(key):
+                    where.append("%s = ?" % col)
+                    params.append(qs[key])
             out = rows("events.db", "SELECT h.*, r.ip, r.headers, r.cookies, r.envelope, r.site_status, "
-                       "r.endpoint FROM raw_hits h JOIN raw_requests r ON r.id = h.request_id "
-                       "WHERE h.id > ? ORDER BY h.id", (since,))
+                       "r.endpoint, r.body_encoding, r.content_type FROM raw_hits h "
+                       "JOIN raw_requests r ON r.id = h.request_id WHERE " + " AND ".join(where) +
+                       " ORDER BY h.id", tuple(params))
             for r in out:
                 r["data"] = json.loads(r["data"])
                 for k in ("headers", "cookies", "envelope"):

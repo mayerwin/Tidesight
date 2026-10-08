@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>SPA home</title><script src="/loader.js"></script></head>
+<body>
+  <nav>
+    <button id="go-about" onclick="go('/spa/about', 'About')">About</button>
+    <button id="go-contact" onclick="go('/spa/contact', 'Contact')">Contact</button>
+    <button id="tab2" onclick="history.replaceState({}, '', location.pathname + qs('tab=2'))">Tab 2 (replace, same path)</button>
+    <button id="replace-other" onclick="document.title = 'Other'; history.replaceState({}, '', '/spa/other' + qs())">Replace to other</button>
+    <button id="redirect" onclick="document.title = 'B'; history.pushState({}, '', '/spa/a' + qs()); history.replaceState({}, '', '/spa/b' + qs())">Redirect</button>
+  </nav>
+  <main id="view">home</main>
+  <script>
+    // Keep ?site=… across routes; optionally add extra parameters.
+    function qs(extra) {
+      var p = new URLSearchParams(location.search);
+      var site = p.get('site');
+      var parts = [];
+      if (site) parts.push('site=' + site);
+      if (extra) parts.push(extra);
+      return parts.length ? '?' + parts.join('&') : '';
+    }
+    function go(path, title) {
+      document.title = title;
+      document.getElementById('view').textContent = title;
+      history.pushState({}, '', path + qs());
+    }
+  </script>
+</body>
+</html>

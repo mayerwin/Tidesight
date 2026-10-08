@@ -102,6 +102,7 @@ SITE_DEFAULTS: Dict[str, Any] = {
     "hash_mode": "route",              # route | all | off
     "spa_replace": "path",             # path | all | off
     "heartbeat_sec": 30,
+    "idle_sec": 300,                   # engagement stops after this long without input
     "flush_sec": 5,
     "search_params": ["q", "s", "search", "query", "keyword"],
     "exclude_paths": [],
@@ -302,8 +303,10 @@ class Config:
         self.enrich: Dict[str, Any] = sections["enrich"]
         self.dashboard: Dict[str, Any] = sections["dashboard"]
 
-        data_dir = self.server["data_dir"] or os.path.join(base_dir, "data")
-        self.data_dir = os.path.abspath(os.path.expanduser(data_dir))
+        data_dir = os.path.expanduser(self.server["data_dir"] or "data")
+        if not os.path.isabs(data_dir):  # relative paths are relative to the config file
+            data_dir = os.path.join(base_dir, data_dir)
+        self.data_dir = os.path.abspath(data_dir)
         self.server["data_dir"] = self.data_dir
 
         defaults = raw.get("defaults", {})
@@ -431,9 +434,11 @@ class Config:
             "timezone": s["timezone"],
             "cookie_domain": s["cookie_domain"],
             "cookie_days": s["cookie_days"],
+            "server_cookie": bool(s["server_cookie_domain"]),
             "hash_mode": s["hash_mode"],
             "spa_replace": s["spa_replace"],
             "heartbeat_sec": s["heartbeat_sec"],
+            "idle_sec": s["idle_sec"],
             "flush_sec": s["flush_sec"],
             "search_params": s["search_params"],
             "exclude_paths": s["exclude_paths"],
@@ -489,6 +494,8 @@ def find_config_path(explicit: Optional[str] = None) -> Optional[str]:
 
 
 def loads(text: str, path: Optional[str] = None) -> Config:
+    if text.startswith("﻿"):  # tolerate a UTF-8 byte-order mark (TOML parsers reject it)
+        text = text[1:]
     try:
         raw = _toml_impl.loads(text)
     except Exception as exc:  # TOMLDecodeError from any implementation

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Home</title>
+  <link rel="canonical" href="http://127.0.0.1:8788/canonical-home">
+  <script src="/loader.js"></script>
+</head>
+<body>
+  <h1 id="top">Fixture home</h1>
+  <p><a id="to-page2" href="/page2.html">Page 2</a></p>
+  <p><a id="to-page2-site" href="#" onclick="location.href='/page2.html' + location.search; return false;">Page 2 (same site)</a></p>
+  <button id="track" onclick="tidesight('track', 'clicked_button', {color: 'blue', n: 3}, 9.5)">Track</button>
+  <button id="identify" onclick="tidesight('identify', 'user-42', {plan: 'pro'})">Identify</button>
+  <button id="many" onclick="for (var i = 0; i < 30; i++) tidesight('track', 'bulk', {i: i, pad: 'x'.repeat(80)})">Many</button>
+</body>
+</html>

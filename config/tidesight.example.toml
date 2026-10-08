@@ -66,6 +66,7 @@ server_cookie_domain = ""                # e.g. ".example.com": the collector al
 hash_mode = "route"                      # which #hash changes are pageviews: "route" (#/ and #!), "all", "off"
 spa_replace = "path"                     # replaceState counts as a pageview when: "path" changes, "all", "off"
 heartbeat_sec = 30                       # engagement heartbeat while the page is in use; 0 disables
+idle_sec = 300                           # engagement time stops after this long without input
 flush_sec = 5                            # how often queued events are sent
 search_params = ["q", "s", "search", "query", "keyword"]
 exclude_paths = []                       # glob patterns the tracker ignores, e.g. ["/admin/*"]

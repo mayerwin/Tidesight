@@ -1,0 +1,18 @@
+{
+  "name": "tidesight-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tidesight browser tracker (core + plugins). Built files in build/ are committed and deployed as-is.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "pretest": "node build.mjs",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "esbuild": "^0.25.10"
+  }
+}
