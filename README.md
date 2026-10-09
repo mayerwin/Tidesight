@@ -104,7 +104,7 @@ Besides the Python collector, connectors for **PHP**, **Node** and **Cloudflare 
 
 ## Status
 
-Every phase of the plan is built and tested: collector, tracker, enrichment, behaviour plugins, session replay, dashboard and API, privacy mode and maintenance jobs, and the PHP, Node and Worker connectors. Still open: running the hosting test on the production Dreamhost account, and trying the PHP and Worker connectors on live hosts. See [`docs/roadmap.md`](docs/roadmap.md).
+Every phase of the plan is built and tested: collector, tracker, enrichment, behaviour plugins, session replay, dashboard and API, privacy mode and maintenance jobs, and the PHP, Node and Worker connectors. The hosting test passed on the production Dreamhost account (SQLite with WAL). Still open: the first deployment, and trying the PHP and Worker connectors on live hosts. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Development
 

@@ -4,11 +4,11 @@ Status of each phase and what remains. Update this file when a roadmap item land
 
 Legend: ✅ done · 🚧 in progress · ⬜ not started
 
-## Phase 0 — Hosting test 🚧
+## Phase 0 — Hosting test ✅
 
 ✅ `tools/sqlite_host_test.py`: single file, standard library only (Python 3.6+), runnable over SSH, as CGI or under Passenger (token-protected). It reports Python and SQLite versions and features (JSON1, FTS5, UPSERT, window functions, RETURNING, STRICT), the data directory's filesystem (local or network), WAL and DELETE journal modes (and WAL persistence), multi-process insert concurrency with a concurrent reader in both modes (errors, lock retries, throughput, p50/p95/p99 latency), integrity and row counts, concurrent spool appends, whether the data directory is served over HTTP, runtime modules, outbound HTTPS, and a PASS/WARN/FAIL summary with the recommended `storage_mode` and `journal_mode`. Verified locally (Windows, NTFS: PASS with WAL).
 
-⬜ **Run it on the Dreamhost account** (see `docs/deploy-dreamhost.md`, step 2), record the result here, and set `storage_mode` / `journal_mode` in the production configuration.
+✅ **Run on the Dreamhost account** (2026-10-09, shared server `iad1-shared-b8-02`): Python 3.12.3, SQLite 3.45.1 (JSON1, FTS5, upsert, window functions, `RETURNING`, strict tables), data directory on a local XFS filesystem (not NFS) with 699 GB free, outside the web roots; cron and outbound HTTPS available. WAL: 8 writer processes and a reader, 16,000 rows at 1,819 rows/s, p99 78 ms, no lock errors, integrity ok. DELETE journal mode works but is slower (312 rows/s, 13 lock retries: the only warning). Concurrent spool appends intact. **Recommendation: `storage_mode = "sqlite"`, `journal_mode = "wal"`** (the defaults). Still to confirm in the Dreamhost panel when deploying: Passenger for the collector's domain (CGI works otherwise).
 
 ## Phase 1 — Collector + core tracker ✅
 
@@ -58,7 +58,7 @@ rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `re
 
 ## Open questions for the owner
 
-1. **Dreamhost:** the collector subdomain, SSH credentials for running the Phase 0 test, and confirmation that Passenger is available.
+1. **Dreamhost:** which subdomain hosts the collector (e.g. `stats.erwinmayer.com`), and Passenger switched on for it in the panel (SSH access works; the hosting test passed).
 2. **Dashboard authentication:** HTTP Basic is in place; are several users with different rights needed later?
 3. **Public stats page:** which metrics should be public by default, per site?
 4. **Licence:** MIT adopted provisionally (rrweb is MIT; GeoLite2 and DB-IP data are never bundled).
