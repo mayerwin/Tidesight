@@ -42,7 +42,7 @@ export function text(el, max, own) {
     t = own ? [].map.call(el.childNodes, (n) => (n.nodeType === 3 ? n.nodeValue : '')).join('') : el.textContent;
   }
   t = /\S/.test(t || '') ? t : el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('title') || '';
-  return String(t).replace(/\s+/g, ' ').trim().slice(0, max || 100) || undefined;
+  return String(t).replace(/\s+/g, ' ').trim().slice(0, max || 100).replace(/[\ud800-\udbff]$/, '') || undefined; // never half an emoji
 }
 
 // addEventListener with the handler wrapped by api.safe, so nothing can throw into the host page.
