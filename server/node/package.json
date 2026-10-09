@@ -1,0 +1,16 @@
+{
+  "name": "tidesight-collector-node",
+  "version": "0.1.0",
+  "description": "Tidesight ingest connector for Node.js: the wire protocol of docs/protocol.md, stored raw in SQLite (node:sqlite).",
+  "private": true,
+  "type": "module",
+  "main": "server.mjs",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.mjs",
+    "check": "node --check server.mjs && node --check core/collector.mjs"
+  },
+  "license": "MIT"
+}

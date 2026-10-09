@@ -1,0 +1,41 @@
+# Tidesight collector on Cloudflare Workers + D1. Copy to wrangler.toml and fill in the database ids
+# (from `npx wrangler d1 create ...`, see README.md). Run wrangler from this directory (server/worker).
+
+name = "tidesight"
+main = "src/index.mjs"
+compatibility_date = "2025-09-01"
+
+# Where the collector answers. Its own (sub)domain is simplest:
+routes = [{ pattern = "stats.example.com", custom_domain = true }]
+# ...or a path on the site itself (first-party), together with TIDESIGHT_BASE_PATH below:
+# routes = [{ pattern = "www.example.com/_ts/*", zone_name = "example.com" }]
+
+# Raw storage: the schemas of events.db and replay.db (migrations/, applied with `wrangler d1 migrations apply`).
+[[d1_databases]]
+binding = "EVENTS"
+database_name = "tidesight-events"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations/events"
+
+[[d1_databases]]
+binding = "REPLAY"
+database_name = "tidesight-replay"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations/replay"
+
+# The configuration is the resolved JSON from `python -m tidesight.jobs config-json`. It contains the deployment
+# secret, so store it as a secret rather than a [vars] entry:
+#   npx wrangler secret put TIDESIGHT_CONFIG < tidesight.json
+
+[vars]
+# TIDESIGHT_BASE_PATH = "/_ts"   # when routed under a path (the endpoints become /_ts/collect, /_ts/p.gif, ...)
+
+# Optional: serve the tracker (/ts.js, /ts/*.js) from the same host. Cloudflare serves matching files directly;
+# with a base path, set run_worker_first so the Worker maps /_ts/ts.js to the asset /ts.js.
+# [assets]
+# directory = "../../tracker/build"
+# binding = "ASSETS"
+# run_worker_first = true
+
+[observability]
+enabled = true
