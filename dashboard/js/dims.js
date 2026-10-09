@@ -12,7 +12,8 @@ export const DIM_GROUPS = [
   { label: 'Technology', dims: [['device', 'Device'], ['browser', 'Browser'], ['browser_version', 'Browser version'],
     ['os', 'Operating system'], ['os_version', 'OS version'], ['screen', 'Screen size'], ['brand', 'Device brand'],
     ['model', 'Device model']] },
-  { label: 'Behaviour', dims: [['event', 'Event'], ['goal', 'Goal'], ['new', 'New or returning'], ['hour', 'Hour of day']] },
+  { label: 'Behaviour', dims: [['event', 'Event'], ['goal', 'Goal'], ['new', 'New or returning'], ['hour', 'Hour of day'],
+    ['weekday', 'Day of week']] },
   { label: 'People', dims: [['visitor', 'Visitor'], ['uid', 'User id'], ['bot', 'Bot name']] },
 ];
 export const DIM_LABEL = Object.fromEntries(DIM_GROUPS.flatMap((g) => g.dims));
@@ -31,7 +32,10 @@ export const OPS = [
   { id: 'starts_with', label: 'starts with', short: 'starts with' },
 ];
 export const OP_LABEL = Object.fromEntries(OPS.map((o) => [o.id, o.label]));
-export const EXACT_ONLY = new Set(['hour', 'new', 'goal']);
+export const EXACT_ONLY = new Set(['hour', 'new', 'goal', 'weekday']);
+// Day names, Monday first; the API numbers days from Sunday (0) to Saturday (6).
+const dayName = new Intl.DateTimeFormat(undefined, { weekday: 'long' });
+export const WEEKDAYS = [1, 2, 3, 4, 5, 6, 0].map((d) => ({ value: String(d), label: dayName.format(new Date(2024, 0, 7 + d)) }));
 
 const DEVICE = { desktop: 'Desktop', mobile: 'Mobile', tablet: 'Tablet', tv: 'TV', console: 'Console', wearable: 'Wearable',
   car: 'Car', bot: 'Bot', unknown: 'Unknown' };
@@ -54,6 +58,7 @@ export function labelFor(dim, value, row, goals) {
     case 'country': return fmt.country(value);
     case 'device': return DEVICE[value] || value;
     case 'hour': return String(value).padStart(2, '0') + ':00';
+    case 'weekday': { const d = WEEKDAYS.find((w) => w.value === String(value)); return d ? d.label : String(value); }
     case 'new': return String(value) === '1' ? 'New visitor' : 'Returning visitor';
     case 'language': { const name = fmt.language(value); return name && name !== value ? name + ' (' + value + ')' : value; }
     case 'goal': return (goals && goals[value]) || value;

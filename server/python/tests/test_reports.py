@@ -69,6 +69,16 @@ def test_filter_operators(api):
         assert e.value.status == 400
 
 
+def test_day_of_week(api):
+    rows = {r["value"]: r["sessions"] for r in api.call("breakdown", dict(RANGE, dim="weekday"))["rows"]}
+    assert rows == {"1": 3, "2": 2}  # 2026-06-01 is a Monday (0 = Sunday)
+    assert total(api, filters=flt(("weekday", "is", ["1"]))) == 3
+    grid = api.call("breakdown", dict(RANGE, dim="weekday", dim2="hour"))["rows"]
+    assert sum(r["sessions"] for r in grid) == 5
+    with pytest.raises(ApiError):
+        api.call("overview", dict(RANGE, filters=flt(("weekday", "contains", ["1"]))))
+
+
 def test_bots_and_goal_filters(api):
     assert total(api, bots="include") == 6 and total(api, bots="1") == 6 and total(api, bots="only") == 1
     assert total(api, filters=flt(("goal", "is", ["signup"]))) == 1

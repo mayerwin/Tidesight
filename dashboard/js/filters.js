@@ -1,6 +1,6 @@
 // Filters, segments and the traffic (bots) setting: the report bar's controls.
 import { send } from './api.js';
-import { DIM_GROUPS, DIM_LABEL, EXACT_ONLY, labelFor, OP_LABEL, OPS, prefixFor, scopeOf } from './dims.js';
+import { DIM_GROUPS, DIM_LABEL, EXACT_ONLY, labelFor, OP_LABEL, OPS, prefixFor, scopeOf, WEEKDAYS } from './dims.js';
 import { el, icon } from './dom.js';
 import * as fmt from './fmt.js';
 import { sameFilters, state } from './state.js';
@@ -120,7 +120,8 @@ export function openFilterBuilder(anchor, ctx, { initial = null, index = null } 
       };
       const fixed = dim === 'goal' ? ctx.goals.map((g) => ({ value: g.id, label: g.name }))
         : dim === 'new' ? [{ value: '1', label: 'New visitor' }, { value: '0', label: 'Returning visitor' }]
-          : dim === 'hour' ? Array.from({ length: 24 }, (_, h) => ({ value: String(h), label: String(h).padStart(2, '0') + ':00' })) : null;
+          : dim === 'hour' ? Array.from({ length: 24 }, (_, h) => ({ value: String(h), label: String(h).padStart(2, '0') + ':00' }))
+            : dim === 'weekday' ? WEEKDAYS : null;
       let token = 0;
       const load = async () => {
         const q = search.value.trim();

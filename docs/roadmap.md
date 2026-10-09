@@ -42,7 +42,7 @@ rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `re
 - ✅ **Filters and segments:** any dimension, `is`/`is not`/`contains`/`does not contain`/`starts with`, several values, value suggestions with counts, editable chips, clicks on rows to filter in or out, goal filters; saved segments (per property or for all). The traffic setting reads "Humans only / Humans and bots / Bots only".
 - ✅ **Periods:** presets with keyboard shortcuts, a two-month range calendar, previous/next period, and comparisons (previous period, a year before, custom) drawn dashed in charts, with changes in tiles, lists and tables.
 - ✅ **Report tables:** server-side sort, search and paging, totals, shares of the total, a second dimension, a column chooser, row actions (filter, exclude, open the report, open the page, heatmap), plotting up to five rows over time, and exports of every matching row (Excel, CSV, TSV, JSON, or copy); every other table exports what it shows. An Explorer for any dimension.
-- ✅ **Goals and annotations:** goals per property (events or pages, `*` wildcards) with conversions, rates and values, a goal's conversions in every report; notes on charts.
+- ✅ **Goals and annotations:** goals per property (events or pages, `*` wildcards) with conversions, rates and values, a goal's conversions in every report; notes on charts; a day-of-week × hour grid of visits (the `weekday` dimension).
 - ✅ **Export dialog** that says what each download holds: the reports on screen, and each raw dataset with its description, columns and number of rows.
 - ✅ Sign-in page with sessions (instead of the browser's password prompt), a command palette (Ctrl/⌘ K), shortcuts, a freshness indicator, dark mode throughout. Browser tests: `npm run test:dashboard` in `tracker/`.
 
@@ -62,7 +62,7 @@ rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `re
 
 - Custom channel groupings (e.g. AI traffic beyond GA4's list).
 - Managing dashboard users from the dashboard (they are in the configuration file); email reports and alerts (traffic drops, error spikes).
-- Funnels saved per property and built from goals; a day-of-week × hour heatmap.
+- Funnels saved per property and built from goals.
 - An optional consent mode in the tracker (wait for a consent call before setting identifiers).
 - Faster enrichment for very large sites (bulk inserts, parallel rebuilds).
 

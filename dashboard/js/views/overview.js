@@ -1,8 +1,8 @@
 // Overview: KPI tiles (choose the charted metric), the trend with the comparison period and annotations, then the
 // main breakdowns, each linking to its full report.
 import { send } from '../api.js';
-import { barList, card, el, icon, sparkline, table, worldMap } from '../charts.js';
-import { metric } from '../dims.js';
+import { barList, card, el, heatTable, icon, sparkline, table, worldMap } from '../charts.js';
+import { metric, WEEKDAYS } from '../dims.js';
 import { hint } from '../dom.js';
 import { registerReport } from '../export.js';
 import * as fmt from '../fmt.js';
@@ -108,6 +108,22 @@ export async function render(root, ctx) {
     root.appendChild(breakdownCard(ctx, { title: 'Events', span: ctx.goals.length && !ctx.public ? 6 : 12, metric: 'count', tabs: [{ dim: 'event', label: 'Custom events', metric: 'count' }] }));
   }
   if (!ctx.public && ctx.goals.length) root.appendChild(goalsCard(ctx));
+  if (!ctx.public) root.appendChild(dayTimeCard(ctx));
+}
+
+// When visits happen: day of the week by hour, in the property's time zone.
+function dayTimeCard(ctx) {
+  const c = card({ title: 'Day and time', span: 12, info: 'Visits by day of the week and hour of the day, in the property’s time zone.' });
+  ctx.api('breakdown', { dim: 'weekday', dim2: 'hour', limit: 200 }, { compare: false }).then((res) => {
+    const visits = {};
+    for (const r of res.rows) visits[r.value + ':' + r.value2] = r.sessions;
+    heatTable(c.body, {
+      colLabels: Array.from({ length: 24 }, (_, h) => String(h).padStart(2, '0')),
+      rows: WEEKDAYS.map((w) => ({ label: w.label, cells: Array.from({ length: 24 }, (_, h) => visits[w.value + ':' + h] || 0) })),
+      format: fmt.compact,
+    });
+  }).catch((e) => c.body.replaceChildren(el('div', { class: 'empty', text: e.message })));
+  return c.root;
 }
 
 function goalsCard(ctx) {

@@ -29,10 +29,11 @@ SESSION_DIMS = {
     "visitor": "visitor_key", "uid": "uid", "asn": "as_org", "brand": "device_brand", "model": "device_model",
     "browser_version": "browser || ' ' || COALESCE(browser_version, '')", "os_version": "os || ' ' || COALESCE(os_version, '')",
     "hour": "hour", "new": "is_new", "bot": "bot_name", "category": "source_category",
+    "weekday": "CAST(strftime('%w', day) AS INTEGER)",  # 0 = Sunday, of the site's local day
 }
 PAGE_DIMS = {"page": "path", "title": "title"}
 EVENT_DIMS = {"event": "name"}
-NUMERIC_DIMS = {"hour", "new"}
+NUMERIC_DIMS = {"hour", "new", "weekday"}
 OPS = ("is", "is_not", "contains", "not_contains", "starts_with")
 MAX_FILTERS = 20
 MAX_VALUES = 200
@@ -47,7 +48,7 @@ DIM_LABELS = {
     "device": "Device", "browser": "Browser", "os": "Operating system", "screen": "Screen size", "language": "Language",
     "timezone": "Time zone", "entry": "Entry page", "exit": "Exit page", "visitor": "Visitor", "uid": "User id",
     "asn": "Network", "brand": "Device brand", "model": "Device model", "browser_version": "Browser version",
-    "os_version": "OS version", "hour": "Hour of day", "new": "New visitor", "bot": "Bot", "category": "Source category",
+    "os_version": "OS version", "hour": "Hour of day", "weekday": "Day of week", "new": "New visitor", "bot": "Bot", "category": "Source category",
     "page": "Page", "title": "Page title", "event": "Event", "goal": "Goal",
 }
 
@@ -322,7 +323,7 @@ class Query:
         expr = SESSION_DIMS[name]
         if re.match(r"^\w+$", expr):
             return prefix + expr
-        return re.sub(r"\b(browser|browser_version|os|os_version)\b", lambda m: prefix + m.group(1), expr)
+        return re.sub(r"\b(browser|browser_version|os|os_version|day)\b", lambda m: prefix + m.group(1), expr)
 
     def session_where(self, alias: str = "s", scope: str = "session") -> Tuple[str, List[Any]]:
         """Conditions on the joined session. In a page or an event scope, the filters on that scope's own
