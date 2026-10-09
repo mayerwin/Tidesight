@@ -18,28 +18,47 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 log = logging.getLogger("tidesight.config")
 
 FILE = "properties.json"
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\Z")  # used with match(): \Z, not $, so "id\n" fails
+
+
+class PropertiesError(Exception):
+    """properties.json exists but cannot be read or parsed: nothing may be written over it."""
 
 
 def path(data_dir: str) -> str:
     return os.path.join(data_dir, FILE)
 
 
-def load_tables(data_dir: str) -> Dict[str, Dict[str, Any]]:
-    """The managed site tables, {} when there are none (a broken file is reported and ignored)."""
+def read_tables(data_dir: str) -> Dict[str, Dict[str, Any]]:
+    """The managed site tables ({} when the file does not exist). A file that exists but cannot be read (a
+    passing lock on Windows is retried) or parsed raises PropertiesError."""
     p = path(data_dir)
-    try:
-        with open(p, "r", encoding="utf-8") as fh:
-            doc = json.load(fh)
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError) as exc:
-        log.error("%s could not be read (%s): its properties are ignored", p, exc)
-        return {}
+    for attempt in range(20):
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+            break
+        except FileNotFoundError:
+            return {}
+        except PermissionError as exc:  # Windows: being replaced at this very moment
+            if attempt == 19:
+                raise PropertiesError("%s could not be read: %s" % (p, exc))
+            time.sleep(0.05)
+        except (OSError, ValueError, RecursionError) as exc:
+            raise PropertiesError("%s could not be read: %s" % (p, exc))
     sites = doc.get("sites") if isinstance(doc, dict) else None
     if not isinstance(sites, dict):
-        return {}
+        raise PropertiesError("%s has no \"sites\" table" % p)
     return {k: v for k, v in sites.items() if isinstance(k, str) and isinstance(v, dict)}
+
+
+def load_tables(data_dir: str) -> Dict[str, Dict[str, Any]]:
+    """The managed site tables, {} when there are none or the file is broken (reported)."""
+    try:
+        return read_tables(data_dir)
+    except PropertiesError as exc:
+        log.error("%s: its properties are ignored", exc)
+        return {}
 
 
 def save_tables(data_dir: str, tables: Dict[str, Dict[str, Any]]) -> None:
@@ -106,7 +125,7 @@ def update(data_dir: str, change: Callable[[Dict[str, Dict[str, Any]]], Any]) ->
     """Read the tables, let `change` modify them in place, write them back: under the lock, from the file as it is
     now (not from a configuration loaded earlier), so concurrent edits are not lost."""
     with locked(data_dir):
-        tables = load_tables(data_dir)
+        tables = read_tables(data_dir)  # a file that cannot be read is never written over
         result = change(tables)
         save_tables(data_dir, tables)
         return result

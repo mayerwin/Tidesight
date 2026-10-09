@@ -156,19 +156,22 @@ test('the export dialog says what each download holds', async ({ page }) => {
 });
 
 test('properties: add one, change its settings and goals, delete it', async ({ page }) => {
+  // A fresh name each run: a deleted property's id stays taken until the next cron run deletes its data.
+  const n = String(Date.now() % 1000000);
+  const id = 'shop' + n + '-example-org';
   await open(page, '#/properties');
   await page.getByRole('button', { name: 'Add property' }).click();
-  await page.locator('.wizard input').first().fill('Shop.Example.org');
+  await page.locator('.wizard input').first().fill('Shop' + n + '.Example.org');
   await page.locator('.dialog-foot .btn.primary').click();
   await page.locator('.preset', { hasText: 'Privacy-first' }).click();
   await page.locator('.dialog-foot .btn.primary').click();
-  await expect(page.locator('.snippet pre').first()).toContainText('data-site="shop-example-org"');
+  await expect(page.locator('.snippet pre').first()).toContainText('data-site="' + id + '"');
   await expect(page.locator('.wait-box')).toContainText('Waiting for the first visit');
   await page.locator('.dialog-foot .btn.primary').click(); // open its reports
-  await expect.poll(() => hashParams(page).get('site')).toBe('shop-example-org');
-  await expect(page.locator('.site-btn')).toContainText('shop.example.org');
+  await expect.poll(() => hashParams(page).get('site')).toBe(id);
+  await expect(page.locator('.site-btn')).toContainText('shop' + n + '.example.org');
   // Settings: a name, a goal.
-  await page.goto(OPEN + '#/property?site=shop-example-org');
+  await page.goto(OPEN + '#/property?site=' + id);
   await page.locator('.field', { hasText: 'Name' }).locator('input').fill('The Shop');
   await page.getByRole('button', { name: 'Save changes' }).click();
   await expect(page.locator('.toast', { hasText: /^Saved$/ })).toBeVisible();
@@ -189,26 +192,34 @@ test('properties: add one, change its settings and goals, delete it', async ({ p
   await page.locator('.tabs a', { hasText: 'Delete' }).click();
   await page.getByRole('button', { name: 'Delete property…' }).click();
   await page.locator('.dialog .segmented button', { hasText: 'Delete its data' }).click();
-  await page.locator('.dialog input.mono').fill('shop-example-org');
+  await page.locator('.dialog input.mono').fill(id);
   await page.locator('.dialog .btn.danger').click();
   await expect.poll(() => new URL(page.url()).hash).toMatch(/^#\/properties/);
   await expect(page.locator('.prop-card')).toHaveCount(1);
-  await expect(page.locator('.notice.warn')).toContainText('shop-example-org');
+  await expect(page.locator('.notice.warn', { hasText: id })).toBeVisible();
 });
 
 test('segments: save the filters, apply them again', async ({ page }) => {
-  await open(page, '#/overview?filters=' + encodeURIComponent(JSON.stringify([['device', 'is', ['mobile']]])));
+  const n = String(Date.now() % 1000000); // segments outlive a run: a fresh name and filters each time
+  const name = 'Mobile visits ' + n;
+  const filters = [['device', 'is', ['mobile']], ['page', 'not_contains', ['/never-' + n]]];
+  await open(page, '#/overview?filters=' + encodeURIComponent(JSON.stringify(filters)));
   await page.getByRole('button', { name: 'Segments' }).click();
   await page.getByRole('menuitem', { name: /Save current filters/ }).click();
-  await page.locator('.dialog input').first().fill('Mobile visits');
+  await page.locator('.dialog input').first().fill(name);
   await page.locator('.dialog .btn.primary').click();
   await expect(page.locator('.toast', { hasText: 'Segment saved' })).toBeVisible();
-  await expect(page.locator('.bar-right .ctl.active')).toContainText('Mobile visits');
-  await page.locator('.chip-x').click();
+  await expect(page.locator('.bar-right .ctl.active')).toContainText(name);
+  await page.locator('.chips .link-btn', { hasText: 'Clear all' }).click();
   await expect(page.locator('.chip')).toHaveCount(0);
   await page.getByRole('button', { name: 'Segments' }).click();
-  await page.getByRole('menuitemradio', { name: /Mobile visits/ }).click();
-  await expect(page.locator('.chip')).toContainText('Device is');
+  await page.getByRole('menuitemradio', { name: new RegExp(name) }).click();
+  await expect(page.locator('.chip').first()).toContainText('Device is');
+  await expect(page.locator('.chip')).toHaveCount(2);
+  // Clean up through the API (a change needs the X-Tidesight header).
+  const list = await (await page.request.get(OPEN + 'api/segments?site=demo')).json();
+  const mine = list.segments.find((x) => x.name === name);
+  expect((await page.request.delete(OPEN + 'api/segment?id=' + mine.id, { headers: { 'X-Tidesight': '1' } })).status()).toBe(200);
 });
 
 test('the command palette goes anywhere', async ({ page }) => {

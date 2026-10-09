@@ -192,7 +192,8 @@ class Api:
         if public:
             allowed = public_dims(q.site)
             # A public page must not single anyone out: only its own dimensions, exact values, one at a time.
-            if any(f.dim not in allowed or f.op != "is" for f in q.filters):
+            # One exact value: a group with and without a small value would reveal the small one's count.
+            if any(f.dim not in allowed or f.op != "is" or len(f.values) != 1 for f in q.filters):
                 raise ApiError(403, "this filter is not public")
             if len(q.filters) > 1:  # combining filters narrows a public view down to one person
                 raise ApiError(400, "public pages take one filter at a time")
@@ -218,7 +219,9 @@ class Api:
         for s in sites:
             s["first_day"] = first.get(s["id"])
         if public:
-            sites = [dict(s, origins=[], domains=[], goals=[]) for s in sites if s["id"] == params.get("site")]
+            # A public page names its site by its name or id, never by a host name the origins would reveal.
+            sites = [dict(s, origins=[], domains=[], goals=[], label=s["name"] or s["id"]) for s in sites
+                     if s["id"] == params.get("site")]
             return {"sites": sites, "version": __version__}
         return {"sites": sites, "version": __version__, "freshness": self._freshness()}
 
@@ -327,7 +330,10 @@ class Api:
                 raise ApiError(400, "values must be a JSON list of texts")
             goal = q.goal()
             sort, desc, offset = params.get("sort"), params.get("dir", "desc") != "asc", q.offset()
-        limit = q.limit(10, 100000 if params.get("format") in ("csv", "tsv", "json") else 1000)
+        if public:
+            limit = q.limit(10, 100)
+        else:
+            limit = q.limit(10, 100000 if params.get("format") in ("csv", "tsv", "json", "xlsx") else 1000)
         conn = self.derived()
         try:
             result = breakdown(conn, q, dim, dim2, sort=sort, desc=desc, limit=limit, offset=offset, search=search,

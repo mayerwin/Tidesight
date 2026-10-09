@@ -25,7 +25,7 @@ export async function render(root, ctx) {
     root.appendChild(c.root);
     return;
   }
-  const res = await ctx.api('goals', { interval: ctx.params.get('interval') || undefined });
+  const res = await ctx.api('goals', { interval: ctx.params.get('interval') || undefined, goal: ctx.goal });
   registerReport({ label: 'Goals', endpoint: 'goals', params: ctx.query({}) });
   const selected = res.selected;
   const list = card({ title: 'Goals', span: 12, info: 'Conversions are visits that completed the goal; the rate is conversions per visit.' });

@@ -290,7 +290,7 @@ def test_the_cookie_path_follows_a_folder_install():
     assert _dashboard_path({"REQUEST_URI": "/tidesight/dashboard/api/login", "SCRIPT_NAME": "/tidesight/collect.cgi",
                             "PATH_INFO": "/dashboard/api/login"}) == "/tidesight/dashboard/"
     assert _dashboard_path({"SCRIPT_NAME": "", "PATH_INFO": "/dashboard/api/login"}) == "/dashboard/"
-    assert _dashboard_path({"REQUEST_URI": "/x;y/dashboard/api/login"}) == "/"  # nothing odd in a Set-Cookie
+    assert _dashboard_path({"REQUEST_URI": "/x;y/dashboard/api/login"}) == "/dashboard/"  # nothing odd in a Set-Cookie
 
 
 def test_sign_in_guessing_is_throttled_across_processes(world):  # noqa: F811
@@ -300,6 +300,35 @@ def test_sign_in_guessing_is_throttled_across_processes(world):  # noqa: F811
     fresh = create_app(config=world)  # another process (CGI starts one per request): web.db remembers
     assert _login(fresh).code == 429
     assert _login(fresh, remote_addr="198.51.100.20").code == 200
+
+
+def test_concurrent_guesses_stop_at_the_limit(world, monkeypatch):  # noqa: F811
+    import threading
+    import time as _time
+    from tidesight import auth
+    calls = []
+    real = auth.verify_password
+
+    def slow(password, encoded):
+        calls.append(1)
+        _time.sleep(0.005)
+        return real(password, encoded)
+    monkeypatch.setattr(auth, "verify_password", slow)
+    shared = auth.SharedThrottle(auth.Throttle(), world.data_dir)
+    a = auth.Authenticator({"admin": hash_password("pw", iterations=1000)}, shared)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(a.login("admin", "guess", "client-1")[1])) for _ in range(40)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(calls) == 10 and results.count("denied") == 10 and results.count("throttled") == 30
+    # Another process (CGI) sees the same count; a right password gives its attempt back.
+    other = auth.Authenticator({"admin": hash_password("pw", iterations=1000)},
+                               auth.SharedThrottle(auth.Throttle(), world.data_dir))
+    assert other.login("admin", "pw", "client-1")[1] == "throttled"
+    assert other.login("admin", "pw", "client-2")[1] == "ok"
+    assert WebDB(world.data_dir).throttle_blocked("client-2", 1, 600) is False
 
 
 def test_changes_need_the_header_and_this_origin(world):  # noqa: F811
@@ -459,3 +488,126 @@ def test_display_names():
     assert properties.display_name("x", "", []) == "x"
     assert properties.origin_from_domain("Bücher.de") == "https://xn--bcher-kva.de"
     assert not properties.ORIGIN_RE.match(properties.origin_from_domain("javascript:alert(1)"))
+
+
+# -- hardening (security review) ---------------------------------------------------------------------
+
+def test_public_filters_take_one_exact_value(world):  # noqa: F811
+    pipeline.run(world)
+    site = world.site("example")
+    site.settings["public"] = True
+    api = Api(world)
+    # GB alone is shown, GB with SE would reveal SE's hidden count by difference: refused.
+    with pytest.raises(ApiError) as e:
+        api.call("overview", dict(RANGE, filters=flt(("country", "is", ["GB", "SE"]))), public_site="example")
+    assert e.value.status == 403
+    rows = api.call("breakdown", dict(RANGE, dim="page", limit="100000", format="csv"), public_site="example")["rows"]
+    assert len(rows) <= 100
+    site.settings["origins"] = ["https://staging.internal.example.com"]
+    shown = api.call("sites", {"site": "example"}, public_site="example")["sites"][0]
+    assert shown["label"] == "example" and shown["domains"] == []
+
+
+def test_an_unreadable_properties_file_is_never_overwritten(world, tmp_path):  # noqa: F811
+    from tidesight.config import ConfigHolder
+    app = _app(world)
+    h = dict(WRITE, Cookie=_cookie(_login(app)))
+
+    def add(domain):
+        return call(app, "POST", "/dashboard/api/properties", headers=h, body=json.dumps({"domains": [domain]}).encode())
+    assert add("a.example.net").code == 201 and add("b.example.net").code == 201
+    holder = ConfigHolder(config=world, check_interval=0)
+    assert holder.reload().site("a-example-net") is not None
+    path = properties.path(world.data_dir)
+    good = open(path, encoding="utf-8").read()
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("{broken")
+    r = add("c.example.net")
+    assert r.code == 503 and "nothing was written" in r.json()["error"]
+    assert open(path, encoding="utf-8").read() == "{broken"
+    # A process that sees the broken file keeps serving the properties it had.
+    os.utime(path, (1, 1))
+    assert holder.get().site("a-example-net") is not None
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(good)
+    os.utime(path, (2, 2))
+    assert holder.get().site("b-example-net") is not None
+
+
+def test_only_the_dashboard_itself_calls_its_api(world):  # noqa: F811
+    app = _app(world)
+    cookie = _cookie(_login(app))
+    q = "site=example&what=raw&from=2026-06-01&to=2026-06-02"
+    sibling = {"Cookie": cookie, "Sec-Fetch-Site": "same-site"}
+    assert call(app, "GET", "/dashboard/api/export", query=q, headers=sibling).code == 403
+    assert call(app, "GET", "/dashboard/api/export", query=q, headers={"Cookie": cookie}).code == 200
+    assert call(app, "GET", "/dashboard/api/logout", headers={"Cookie": cookie}).code == 405
+    assert call(app, "GET", "/dashboard/api/me", headers={"Cookie": cookie}).code == 200  # still signed in
+    # Two ts_login cookies (one planted by a sibling subdomain): neither is trusted.
+    assert call(app, "GET", "/dashboard/api/me", headers={"Cookie": cookie + "; ts_login=planted"}).code == 401
+    # Dates are dates (a newline would end up in a header).
+    for bad in ("2026-13-01", "2026-06-01\n", "2026-06-01%0A"):
+        r = call(app, "GET", "/dashboard/api/export", query="site=example&what=raw&from=" + bad + "&to=2026-06-02",
+                 headers={"Cookie": cookie})
+        assert r.code == 400, bad
+
+
+def test_the_dashboard_folder_serves_its_own_files_only(world):  # noqa: F811
+    app = _app(world)
+    assert call(app, "GET", "/dashboard/package.json").code == 404
+    assert call(app, "GET", "/dashboard/vendor.mjs").code == 404
+    assert call(app, "GET", "/dashboard/node_modules/x/package.json").code == 404
+    assert call(app, "GET", "/dashboard/js/main.js").code == 200
+    icon = call(app, "GET", "/dashboard/favicon.svg")
+    assert icon.code == 200 and "sandbox" in icon.headers["content-security-policy"]
+    assert call(app, "GET", "/dashboard/properties").code == 200  # a route: the page
+
+
+def test_segments_and_notes_change_only_by_their_author_or_an_admin(world):  # noqa: F811
+    app = _app(world, admins=["admin"])
+    admin = dict(WRITE, Cookie=_cookie(_login(app)))
+    viewer = dict(WRITE, Cookie=_cookie(_login(app, "viewer", "v")))
+    seg = call(app, "POST", "/dashboard/api/segments", headers=admin, body=json.dumps(
+        {"name": "Admin's", "site": "example", "filters": [{"dim": "country", "op": "is", "values": ["GB"]}]}).encode()).json()
+    assert call(app, "DELETE", "/dashboard/api/segment", query="id=%d" % seg["id"], headers=viewer).code == 403
+    assert call(app, "PUT", "/dashboard/api/segment", query="id=%d" % seg["id"], headers=viewer,
+                body=b'{"name": "mine now"}').code == 403
+    own = call(app, "POST", "/dashboard/api/segments", headers=viewer, body=json.dumps(
+        {"name": "Viewer's", "filters": [{"dim": "device", "op": "is", "values": ["mobile"]}]}).encode()).json()
+    assert call(app, "DELETE", "/dashboard/api/segment", query="id=%d" % own["id"], headers=viewer).code == 200
+    note = call(app, "POST", "/dashboard/api/annotations", headers=admin,
+                body=json.dumps({"site": "example", "day": "2026-06-01", "text": "launch"}).encode()).json()
+    assert call(app, "DELETE", "/dashboard/api/annotation", query="id=%d&site=example" % note["id"], headers=viewer).code == 403
+    assert call(app, "DELETE", "/dashboard/api/annotation", query="id=%d&site=example" % note["id"], headers=admin).code == 200
+
+
+def test_throttles_never_store_an_address(world):  # noqa: F811
+    app = _app(world)
+    _login(app, password="nope", remote_addr="198.51.100.77")
+    rows = query_db(os.path.join(world.data_dir, "web.db"), "SELECT client FROM throttle")
+    assert rows and all("198.51.100" not in r["client"] for r in rows)
+
+
+def test_without_sign_in_the_dashboard_answers_on_localhost_only(world):  # noqa: F811
+    pipeline.run(world)
+    app = create_app(config=world, auth=False)
+    assert call(app, "GET", "/dashboard/api/sites", headers={"Host": "127.0.0.1:8790"}).code == 200
+    assert call(app, "GET", "/dashboard/api/sites", headers={"Host": "rebind.attacker.example"}).code == 403
+
+
+def test_public_calls_are_counted_across_processes(world):  # noqa: F811
+    pipeline.run(world)
+    world.site("example").settings["public"] = True
+    world.raw.setdefault("sites", {}).setdefault("example", {})["public"] = True
+    from wsgiref.util import setup_testing_defaults
+    counts = []
+    for _ in range(4):  # a new app per request, as CGI runs one process per request
+        app = create_app(config=world)
+        app.SHARE_API_PER_MINUTE = 3
+        environ = {}
+        setup_testing_defaults(environ)
+        environ.update({"PATH_INFO": "/share/example/api/sites", "REMOTE_ADDR": "198.51.100.40", "wsgi.run_once": True})
+        status = []
+        b"".join(app(environ, lambda s, h, e=None: status.append(s)))
+        counts.append(int(status[0].split()[0]))
+    assert counts == [200, 200, 200, 429]

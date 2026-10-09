@@ -23,7 +23,6 @@ import os
 import re
 import threading
 import time
-from http.cookies import CookieError, SimpleCookie
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
@@ -42,14 +41,20 @@ _STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "application/javasc
                  ".json": "application/json; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
                  ".ico": "image/x-icon", ".woff2": "font/woff2", ".map": "application/json; charset=utf-8",
                  ".txt": "text/plain; charset=utf-8"}
-_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SAFE_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # with fullmatch: no trailing newline
 SECURITY_HEADERS = [("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "SAMEORIGIN"),
                     ("Referrer-Policy", "same-origin"), ("X-Robots-Tag", "noindex, nofollow")]
 COOKIE = "ts_login"
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 ADMIN_READS = ("properties", "property")
 REPORT_EXPORTS = ("breakdown", "overview", "goals")
-_COOKIE_PATH = re.compile(r"^/[A-Za-z0-9._~%/-]*$")
+_COOKIE_PATH = re.compile(r"/[A-Za-z0-9._~%/-]*")  # with fullmatch
+# What the dashboard folder serves (package.json, node_modules and the like are not for anyone).
+DASHBOARD_FILES = {"index.html", "app.css", "favicon.svg"}
+DASHBOARD_DIRS = {"js", "vendor"}
+# Files other than pages run nothing: an SVG opened on its own cannot run a script.
+ASSET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; sandbox"
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 
 
 def _respond(start_response: StartResponse, status: str, headers: List[Tuple[str, str]], body: bytes = b"",
@@ -96,20 +101,20 @@ def _dashboard_path(environ: Dict[str, Any]) -> str:
     i = path.find("/dashboard/")
     prefix = path[:i] if i >= 0 else environ.get("SCRIPT_NAME", "").rstrip("/")
     cookie_path = prefix + "/dashboard/"
-    return cookie_path if _COOKIE_PATH.match(cookie_path) and len(cookie_path) < 300 else "/"
+    return cookie_path if _COOKIE_PATH.fullmatch(cookie_path) and len(cookie_path) < 300 else "/dashboard/"
 
 
 def _cookie(environ: Dict[str, Any], name: str) -> Optional[str]:
+    """The value of a cookie sent exactly once. Two values mean another site of the same domain (a sibling
+    subdomain) planted one: neither is trusted."""
     raw = environ.get("HTTP_COOKIE")
-    if not raw or len(raw) > 8192:
+    if not raw or len(raw) > 65536:
         return None
-    try:
-        jar = SimpleCookie()
-        jar.load(raw)
-    except CookieError:
+    found = [part.split("=", 1)[1].strip() for part in raw.split(";")
+             if "=" in part and part.split("=", 1)[0].strip() == name]
+    if len(found) != 1 or not found[0] or len(found[0]) > 200:
         return None
-    morsel = jar.get(name)
-    return morsel.value if morsel is not None else None
+    return found[0]
 
 
 class App:
@@ -139,9 +144,18 @@ class App:
         return self._auth
 
     def _client(self, cfg: Config, environ: Dict[str, Any]) -> str:
-        return self.collector._rate_key(cfg, environ) or "-"
+        """The client in throttles: a keyed hash of its address (web.db never holds an address)."""
+        return self.collector._client_id(cfg, environ)
 
-    def _share_allowed(self, client: str) -> bool:
+    def _share_allowed(self, cfg: Config, environ: Dict[str, Any], client: str) -> bool:
+        """Public API calls per client and minute: counted in memory, and in web.db when each request is its own
+        process (CGI), where memory forgets everything between requests."""
+        if environ.get("wsgi.run_once"):
+            from .webdb import WebDB
+            try:
+                return WebDB(cfg.data_dir).count_call(client, int(time.time() // 60), self.SHARE_API_PER_MINUTE)
+            except Exception:
+                return True
         minute = int(time.time() // 60)
         with self._share_lock:
             if self._share_minute != minute:
@@ -244,6 +258,8 @@ class App:
 
     def logout(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         from .webdb import WebDB
+        if environ.get("REQUEST_METHOD", "GET").upper() != "POST":
+            return _json(start_response, "405 Method Not Allowed", {"error": "POST to sign out"})
         token = _cookie(environ, COOKIE)
         if token:
             try:
@@ -282,6 +298,12 @@ class App:
 
     def dashboard(self, environ: Dict[str, Any], start_response: StartResponse, path: str) -> Iterable[bytes]:
         cfg = self.holder.get()
+        if not self.require_auth:  # --no-auth (dev server): only for this computer, not for a rebinding DNS name
+            host = (environ.get("HTTP_HOST") or environ.get("SERVER_NAME") or "").lower()
+            name = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]", 1)[0] + "]"
+            if name not in LOCAL_HOSTS:
+                return _respond(start_response, "403 Forbidden", [("Content-Type", "text/plain")],
+                                b"The dashboard without sign-in only answers on localhost.\n")
         if path == "/dashboard":
             return _respond(start_response, "301 Moved Permanently", [("Location", "dashboard/")])
         if path.startswith("/dashboard/api/"):
@@ -293,6 +315,11 @@ class App:
         # The page and its scripts hold no data: they load signed out too (the sign-in form). Only a signed-in
         # page gets the CSP that lists the sites' origins (replays and heatmaps load their assets).
         rel = path[len("/dashboard/"):]
+        parts = [s for s in rel.split("/") if s]
+        own = (not parts or parts[0] in DASHBOARD_DIRS  # its scripts and vendored files
+               or (len(parts) == 1 and ("." not in parts[0] or parts[0] in DASHBOARD_FILES)))  # a page, a route
+        if not own:  # package.json, node_modules and the like are not served
+            return _respond(start_response, "404 Not Found", [("Content-Type", "text/plain")], b"not found\n")
         signed_out = False
         if os.path.splitext(rel)[1].lower() in ("", ".html"):
             signed_out = self.require_auth and self.session_user(cfg, environ) is None
@@ -301,7 +328,9 @@ class App:
     def dashboard_api(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse,
                       endpoint: str) -> Iterable[bytes]:
         method = environ.get("REQUEST_METHOD", "GET").upper()
-        if environ.get("HTTP_SEC_FETCH_SITE") == "cross-site":  # another site making the browser ask (CSRF)
+        # Only the dashboard's own pages (or a typed address, or a script) may call it: not another site, nor a
+        # sibling subdomain, which SameSite cookies do not keep out.
+        if environ.get("HTTP_SEC_FETCH_SITE", "same-origin") not in ("same-origin", "none"):
             return _json(start_response, "403 Forbidden", {"error": "cross-site request"})
         if method in WRITE_METHODS:
             problem = self._write_problem(cfg, environ)
@@ -368,7 +397,7 @@ class App:
                     if given:
                         throttle.failed("share:" + client)
                     return _json(start_response, "403 Forbidden", {"error": "a valid share token is needed"})
-            if not self._share_allowed(client):
+            if not self._share_allowed(cfg, environ, client):
                 return _json(start_response, "429 Too Many Requests", {"error": "too many requests"},
                              [("Retry-After", "60")])
             return self.api(cfg, environ, start_response, rest[4:], site.id)
@@ -431,12 +460,26 @@ class App:
                                                    ("Cache-Control", "no-store")] + SECURITY_HEADERS, body)
 
     def export(self, cfg: Config, start_response: StartResponse, params: Dict[str, str]) -> Iterable[bytes]:
+        from datetime import datetime
+
         from .maintenance import EXPORTS, iter_export
         what, fmt = params.get("what", "sessions"), params.get("format", "csv")
-        days_ok = all(not params.get(k) or re.match(r"^\d{4}-\d{2}-\d{2}$", params[k]) for k in ("from", "to"))
+
+        def day_ok(value: Optional[str]) -> bool:
+            if not value:
+                return True
+            try:
+                return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)) and datetime.strptime(value, "%Y-%m-%d") is not None
+            except ValueError:
+                return False
+        days_ok = day_ok(params.get("from")) and day_ok(params.get("to"))
         if what not in EXPORTS or fmt not in ("csv", "json", "jsonl") or cfg.site(params.get("site")) is None or not days_ok:
             return _json(start_response, "400 Bad Request", {"error": "bad export parameters"})
-        cols, rows = iter_export(cfg, params["site"], what, params.get("from"), params.get("to"))
+        try:
+            cols, rows = iter_export(cfg, params["site"], what, params.get("from"), params.get("to"))
+        except Exception:
+            ERRORS.exception("export of %s failed", what)
+            return _json(start_response, "500 Internal Server Error", {"error": "the export failed"})
         ctype = {"csv": "text/csv", "json": "application/json", "jsonl": "application/x-ndjson"}[fmt]
         name = "tidesight-%s-%s%s.%s" % (params["site"], what,
                                          "-%s_%s" % (params["from"], params["to"]) if params.get("from") and params.get("to") else "",
@@ -450,7 +493,7 @@ class App:
                share: bool = False) -> Iterable[bytes]:
         root = cfg.server["dashboard_dir"] or os.path.join(_REPO_ROOT, "dashboard")
         segments = [s for s in rel.split("/") if s]
-        if not all(_SAFE_SEGMENT.match(s) for s in segments):
+        if not all(_SAFE_SEGMENT.fullmatch(s) for s in segments):
             return _respond(start_response, "404 Not Found", [("Content-Type", "text/plain")], b"not found\n")
         file_path = os.path.join(root, *segments) if segments else os.path.join(root, "index.html")
         ext = os.path.splitext(file_path)[1].lower()
@@ -469,6 +512,8 @@ class App:
         if ext == ".html":
             headers.append(("Content-Security-Policy", SHARE_CSP if share else content_security_policy(cfg)))
             headers.append(("Vary", "Cookie"))
+        else:
+            headers.append(("Content-Security-Policy", ASSET_CSP))
         if environ.get("HTTP_IF_NONE_MATCH") == etag and ext != ".html":
             start_response("304 Not Modified", [h for h in headers if h[0] != "Content-Type"])
             return [b""]
@@ -480,7 +525,7 @@ class App:
 
 # An origin for the CSP: a host name, or a wildcard over the subdomains of a name with at least two labels
 # ("https://*.example.com"; never "https://*" or "https://*.com", which would allow almost anything).
-_CSP_SOURCE = re.compile(r"^https?://(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]{1,5})?$|^https?://localhost(:[0-9]{1,5})?$")
+_CSP_SOURCE = re.compile(r"https?://(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]{1,5})?|https?://localhost(:[0-9]{1,5})?")
 
 # Public share pages and the signed-out dashboard show charts, tables and a form only (no replays, no framed
 # pages): no foreign origin at all, and the configured sites (some private) are not listed.
@@ -499,7 +544,7 @@ def content_security_policy(cfg: Config) -> str:
     sources: List[str] = []
     for origin in [o for s in cfg.sites.values() for o in s.origins] + list(cfg.dashboard.get("asset_origins") or []):
         o = str(origin).strip().lower().rstrip("/")
-        if _CSP_SOURCE.match(o) and o not in sources:
+        if _CSP_SOURCE.fullmatch(o) and o not in sources:
             sources.append(o)
     extra = (" " + " ".join(sources)) if sources else ""
     return ("default-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; "

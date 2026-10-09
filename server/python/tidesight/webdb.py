@@ -56,6 +56,14 @@ MIGRATIONS = [
             requested_at INTEGER NOT NULL
         )""",
     ]),
+    (3, [
+        """CREATE TABLE IF NOT EXISTS calls (
+            client TEXT PRIMARY KEY,
+            minute INTEGER NOT NULL,
+            n      INTEGER NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS calls_minute ON calls(minute)",
+    ]),
 ]
 
 
@@ -164,10 +172,69 @@ class WebDB:
         finally:
             conn.close()
 
+    def throttle_reserve(self, client: str, max_failures: int, window_s: float) -> bool:
+        """Count an attempt unless the client is at its limit, in one write transaction (atomic across processes)."""
+        now = _now()
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM throttle WHERE since < ?", (now - int(window_s * 1000),))
+            if conn.execute("SELECT COUNT(*) FROM throttle").fetchone()[0] > 20000:
+                conn.execute("DELETE FROM throttle WHERE client IN (SELECT client FROM throttle ORDER BY since LIMIT 1000)")
+            row = conn.execute("SELECT failures FROM throttle WHERE client = ?", (client,)).fetchone()
+            if row is not None and row["failures"] >= max_failures:
+                conn.execute("COMMIT")
+                return False
+            if row is None:
+                conn.execute("INSERT INTO throttle(client, failures, since) VALUES (?, 1, ?)", (client, now))
+            else:
+                conn.execute("UPDATE throttle SET failures = failures + 1 WHERE client = ?", (client,))
+            conn.execute("COMMIT")
+            return True
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+    def throttle_forgive(self, client: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute("UPDATE throttle SET failures = failures - 1 WHERE client = ? AND failures > 0", (client,))
+        finally:
+            conn.close()
+
     def throttle_reset(self, client: str) -> None:
         conn = self._conn()
         try:
             conn.execute("DELETE FROM throttle WHERE client = ?", (client,))
+        finally:
+            conn.close()
+
+    # -- public API calls per client and minute (CGI: no memory between requests) ----------------------
+
+    def count_call(self, client: str, minute: int, limit: int) -> bool:
+        """Count one call; False beyond `limit` this minute. Old minutes are deleted as they pass."""
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM calls WHERE minute < ?", (minute,))
+            row = conn.execute("SELECT n FROM calls WHERE client = ?", (client,)).fetchone()
+            n = (row["n"] if row else 0) + 1
+            if row is None:
+                if conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0] >= 50000:
+                    conn.execute("COMMIT")
+                    return True  # bounded: a flood of identities is not tracked one by one
+                conn.execute("INSERT INTO calls(client, minute, n) VALUES (?, ?, 1)", (client, minute))
+            else:
+                conn.execute("UPDATE calls SET n = ? WHERE client = ?", (n, client))
+            conn.execute("COMMIT")
+            return n <= limit
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()
 
@@ -189,6 +256,21 @@ class WebDB:
                 item["filters"] = []
             out.append(item)
         return out
+
+    def segment(self, seg_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._conn()
+        try:
+            row = conn.execute("SELECT id, site_id, name, created_by FROM segments WHERE id = ?", (seg_id,)).fetchone()
+        finally:
+            conn.close()
+        return dict(row) if row else None
+
+    def count_segments(self, site_id: Optional[str]) -> int:
+        conn = self._conn()
+        try:
+            return conn.execute("SELECT COUNT(*) FROM segments WHERE site_id IS ?", (site_id,)).fetchone()[0]
+        finally:
+            conn.close()
 
     def add_segment(self, site_id: Optional[str], name: str, filters: List[Dict[str, Any]], user: Optional[str]) -> int:
         conn = self._conn()
@@ -223,6 +305,22 @@ class WebDB:
             return [dict(r) for r in conn.execute(
                 "SELECT id, day, text, created_by, created_at FROM annotations WHERE site_id = ? AND day BETWEEN ? AND ? "
                 "ORDER BY day, id", (site_id, start, end))]
+        finally:
+            conn.close()
+
+    def annotation(self, ann_id: int, site_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._conn()
+        try:
+            row = conn.execute("SELECT id, site_id, day, text, created_by FROM annotations WHERE id = ? AND site_id = ?",
+                               (ann_id, site_id)).fetchone()
+        finally:
+            conn.close()
+        return dict(row) if row else None
+
+    def count_annotations(self, site_id: str) -> int:
+        conn = self._conn()
+        try:
+            return conn.execute("SELECT COUNT(*) FROM annotations WHERE site_id = ?", (site_id,)).fetchone()[0]
         finally:
             conn.close()
 

@@ -119,10 +119,11 @@ The dashboard's own state, apart from the analytics data (only the Python app re
 | Table | Contents |
 |---|---|
 | `sessions(token_hash, user, pw_tag, created, expires)` | Sign-in sessions: the SHA-256 of the `ts_login` cookie (never the token), the user, a digest of the user's password hash at sign-in (the session ends when it changes), creation and expiry. At most 100 per user. |
-| `throttle(client, failures, since)` | Failed sign-ins and share-token guesses per client key (the same keyed hash as the collector's allowances), within the 10-minute window; bounded to 20,000 rows. |
+| `throttle(client, failures, since)` | Sign-in attempts (counted before the password check, given back when it was right) and share-token guesses per client key (the same keyed hash as the collector's allowances), within the 10-minute window; bounded to 20,000 rows. |
 | `segments(id, site_id, name, filters, created_by, created_at)` | Saved filter sets; `site_id` NULL for every property. `filters` is the API's JSON list. |
 | `annotations(id, site_id, day, text, created_by, created_at)` | Notes shown on a property's charts. |
 | `purges(site_id, requested_by, requested_at)` | *(migration 2)* Properties deleted with their data: `jobs.py cron` deletes everything stored under the id (raw and archived hits, recordings, derived rows, segments, notes), then the row. |
+| `calls(client, minute, n)` | *(migration 3)* Public share-page API calls per client (keyed hash) in the current minute, when each request is its own process (CGI); older minutes are deleted as they pass. |
 
 Properties added in the dashboard are not in a database: they are `data_dir/properties.json` (`{"format": "tidesight-properties/1", "sites": {id: table}}`), loaded with the configuration file.
 

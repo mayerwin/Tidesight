@@ -63,7 +63,9 @@ class Throttle:
     """Failed attempts per client, in memory (per process).
 
     A client that failed `max_failures` times within `window` seconds is refused without a password check
-    until the window ends, so passwords cannot be guessed at speed."""
+    until the window ends, so passwords cannot be guessed at speed. A password check first reserves an attempt
+    (`reserve`: counted before the check, so concurrent guesses cannot all slip past the limit) and gives it back
+    when the password was right (`forgive`)."""
 
     MAX_CLIENTS = 20000  # beyond, the oldest entries are forgotten: memory and time stay bounded under a flood
 
@@ -92,6 +94,26 @@ class Throttle:
             self._expire(now)
             count, since = self._failures.pop(client, (0, now))
             self._failures[client] = (count + 1, since)  # re-inserted last: entries stay in order of `since`
+
+    def reserve(self, client: str) -> bool:
+        """Count an attempt now, unless the client is at its limit (then False): atomic, so a burst of concurrent
+        attempts cannot all pass before any of them is counted."""
+        with self._lock:
+            now = time.monotonic()
+            self._expire(now)
+            count, since = self._failures.get(client, (0, now))
+            if count >= self.max_failures:
+                return False
+            self._failures.pop(client, None)
+            self._failures[client] = (count + 1, since)
+            return True
+
+    def forgive(self, client: str) -> None:
+        """Give back one reserved attempt (the password was right)."""
+        with self._lock:
+            if client in self._failures:
+                count, since = self._failures[client]
+                self._failures[client] = (max(0, count - 1), since)
 
 
 _DUMMY_HASH: List[str] = []
@@ -130,9 +152,21 @@ class SharedThrottle:
         except Exception:
             pass
 
-    def reset(self, client: str) -> None:
+    def reserve(self, client: str) -> bool:
+        if not self.memory.reserve(client):
+            return False
         try:
-            self.web.throttle_reset(client)
+            if self.web.throttle_reserve(client, self.max_failures, self.window):
+                return True
+        except Exception:  # web.db unavailable: the in-memory count still applies
+            return True
+        self.memory.forgive(client)
+        return False
+
+    def forgive(self, client: str) -> None:
+        self.memory.forgive(client)
+        try:
+            self.web.throttle_forgive(client)
         except Exception:
             pass
 
@@ -174,17 +208,20 @@ class Authenticator:
         token = hashlib.sha256(("%s\0%s\0%s" % (user, password, encoded or "")).encode("utf-8")).hexdigest()
         if self._cached(user, token, encoded):
             return user, "ok"
-        if self.throttle.blocked(client):
+        # The attempt counts before the (slow) check: a burst of concurrent guesses stops at the limit.
+        if not self.throttle.reserve(client):
             return None, "throttled"
         if not self._checking.acquire(timeout=self.wait_seconds):
+            self.throttle.forgive(client)  # not checked: not an attempt
             return None, "throttled"
         try:
-            if self._cached(user, token, encoded):  # checked by a concurrent request meanwhile
-                return user, "ok"
-            if verify_password(password, encoded or _dummy_hash()) and encoded:
+            ok = self._cached(user, token, encoded)  # checked by a concurrent request meanwhile
+            if not ok and verify_password(password, encoded or _dummy_hash()) and encoded:
                 self._ok[user] = token
-                return user, "ok"
+                ok = True
         finally:
             self._checking.release()
-        self.throttle.failed(client)
+        if ok:
+            self.throttle.forgive(client)
+            return user, "ok"
         return None, "denied"

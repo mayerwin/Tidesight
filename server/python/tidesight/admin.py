@@ -27,14 +27,16 @@ from .query import ApiError, parse_filters
 from .webdb import WebDB
 
 MAX_BODY = 64 * 1024
+MAX_SEGMENTS = 200      # per property, and for every property together
+MAX_ANNOTATIONS = 2000  # per property
 PUBLIC_METRICS = ("visitors", "pageviews", "pages", "sources", "countries", "devices", "events", "realtime")
 # Site settings the dashboard may change (features, privacy and per-feature options besides).
 EDITABLE = ("name", "origins", "timezone", "public", "public_metrics", "share_token", "goals", "max_hits_per_day",
             "exclude_paths", "redact_paths", "redact_params", "search_params", "session_timeout_min", "hash_mode",
             "spa_replace")
 _TEXT_LISTS = ("exclude_paths", "redact_paths", "redact_params", "search_params")
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
-_TZ_RE = re.compile(r"^(UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2})$")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")  # always with fullmatch (a "$" lets a trailing newline in)
+_TZ_RE = re.compile(r"UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2}")
 # Starting points for a new property's data collection (docs/datapoints.md has every default).
 PRESETS: Dict[str, Dict[str, Any]] = {
     "standard": {},
@@ -45,7 +47,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 
 
 def valid_timezone(name: str) -> bool:
-    if not isinstance(name, str) or not _TZ_RE.match(name):
+    if not isinstance(name, str) or not _TZ_RE.fullmatch(name):
         return False
     if name == "UTC":
         return True
@@ -324,6 +326,8 @@ class Admin:
             result = properties.update(self.cfg.data_dir, change)
         except TimeoutError as exc:
             raise ApiError(503, str(exc))
+        except properties.PropertiesError as exc:
+            raise ApiError(503, "%s: fix or restore it before changing properties (nothing was written)" % exc)
         except OSError as exc:
             raise ApiError(503, "properties.json could not be saved (%s): try again" % (exc.strerror or exc))
         self.cfg = self.holder.reload()
@@ -410,7 +414,7 @@ class Admin:
                 return secrets.token_urlsafe(18)
             if value == "":
                 return ""
-            if not isinstance(value, str) or not _TOKEN_RE.match(value):
+            if not isinstance(value, str) or not _TOKEN_RE.fullmatch(value):
                 raise ApiError(400, "a share token has 16 to 128 letters, digits, - and _ (or ask to generate one)")
             return value
         if key == "goals":
@@ -476,8 +480,19 @@ class Admin:
         if site_id is not None and self.cfg.site(site_id) is None:
             raise ApiError(404, "unknown property")
         fields = self._segment_fields(body, partial=False)
+        if self.web.count_segments(site_id) >= MAX_SEGMENTS:
+            raise ApiError(409, "at most %d segments: delete some first" % MAX_SEGMENTS)
         seg_id = self.web.add_segment(site_id, fields["name"], fields["filters"], self.user)
         return {"id": seg_id, "site_id": site_id, **fields}
+
+    def _own_segment(self, params: Dict[str, str]) -> Dict[str, Any]:
+        """The segment, when the user may change it: its author, or an admin."""
+        seg = self.web.segment(self._segment_id(params))
+        if seg is None:
+            raise ApiError(404, "unknown segment")
+        if not self.is_admin and seg["created_by"] != self.user:
+            raise ApiError(403, "only its author or an admin may change this segment")
+        return seg
 
     def _segment_id(self, params: Dict[str, str]) -> int:
         try:
@@ -486,25 +501,34 @@ class Admin:
             raise ApiError(400, "id is a number")
 
     def update_segment(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
-        fields = self._segment_fields(body, partial=True)
-        if not self.web.update_segment(self._segment_id(params), fields.get("name"), fields.get("filters")):
+        seg = self._own_segment(params)
+        # Filters are checked against the segment's own property (goals belong to one).
+        fields = self._segment_fields(dict(body, site=seg["site_id"]), partial=True)
+        if not self.web.update_segment(seg["id"], fields.get("name"), fields.get("filters")):
             raise ApiError(404, "unknown segment")
-        return {"id": self._segment_id(params), **fields}
+        return {"id": seg["id"], **fields}
 
     def delete_segment(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
-        if not self.web.delete_segment(self._segment_id(params)):
+        seg = self._own_segment(params)
+        if not self.web.delete_segment(seg["id"]):
             raise ApiError(404, "unknown segment")
-        return {"deleted": self._segment_id(params)}
+        return {"deleted": seg["id"]}
 
     def create_annotation(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
         site = self.cfg.site(body.get("site"))
         if site is None:
             raise ApiError(404, "unknown property")
         day, text = body.get("day"), body.get("text")
-        if not isinstance(day, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        if not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
             raise ApiError(400, "day is YYYY-MM-DD")
+        try:
+            time.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            raise ApiError(400, "day is not a date")
         if not isinstance(text, str) or not text.strip() or len(text) > 500:
             raise ApiError(400, "a note of 1 to 500 characters")
+        if self.web.count_annotations(site.id) >= MAX_ANNOTATIONS:
+            raise ApiError(409, "at most %d notes per property: delete some first" % MAX_ANNOTATIONS)
         ann_id = self.web.add_annotation(site.id, day, text.strip(), self.user)
         return {"id": ann_id, "day": day, "text": text.strip(), "created_by": self.user}
 
@@ -513,6 +537,11 @@ class Admin:
             ann_id = int(params.get("id", ""))
         except ValueError:
             raise ApiError(400, "id is a number")
+        ann = self.web.annotation(ann_id, params.get("site", ""))
+        if ann is None:
+            raise ApiError(404, "unknown annotation")
+        if not self.is_admin and ann["created_by"] != self.user:
+            raise ApiError(403, "only its author or an admin may delete this note")
         if not self.web.delete_annotation(ann_id, params.get("site", "")):
             raise ApiError(404, "unknown annotation")
         return {"deleted": ann_id}

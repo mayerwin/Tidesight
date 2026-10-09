@@ -302,7 +302,7 @@ def check_goals(value: Any, where: str) -> List[Dict[str, Any]]:
             raise ConfigError("%s.goals[%d].type: event or page" % (where, i))
         if not isinstance(match, str) or not match.strip() or len(match) > 500:
             raise ConfigError("%s.goals[%d].match: the event name or page path (1 to 500 characters)" % (where, i))
-        gid = g.get("id") if isinstance(g.get("id"), str) and re.match(r"^[a-z0-9-]{1,64}$", g.get("id")) else None
+        gid = g.get("id") if isinstance(g.get("id"), str) and re.fullmatch(r"[a-z0-9-]{1,64}", g.get("id")) else None
         if not gid:
             gid = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48] or "goal"
         taken = {x["id"] for x in out}
@@ -412,7 +412,14 @@ class Config:
                 raise ConfigError("[sites.%s] must be a table" % site_id)
             self.sites[site_id] = self._build_site(site_id, table)
         # Properties added in the dashboard (data_dir/properties.json); the configuration file's sites win.
-        self.managed_tables = properties.load_tables(self.data_dir) if load_properties else {}
+        self.properties_error: Optional[str] = None
+        self.managed_tables: Dict[str, Dict[str, Any]] = {}
+        if load_properties:
+            try:
+                self.managed_tables = properties.read_tables(self.data_dir)
+            except properties.PropertiesError as exc:
+                self.properties_error = str(exc)
+                self.warnings.append("%s (its properties are ignored)" % exc)
         for site_id, table in self.managed_tables.items():
             if site_id in self.sites:
                 self.warnings.append("properties.json: %r is defined in the configuration file (ignored)" % site_id)
@@ -687,8 +694,12 @@ class ConfigHolder:
     def reload(self) -> Config:
         """Reload now (after the dashboard changed a property)."""
         with self._lock:
-            self._config = self._rebuild()
-            self._mtime = self._stat()
+            fresh = self._rebuild()
+            if fresh.properties_error and not self._config.properties_error:
+                log.error("config reload: %s; keeping the previous configuration", fresh.properties_error)
+            else:
+                self._config = fresh
+                self._mtime = self._stat()
             self._checked = time.monotonic()
         return self._config
 
@@ -701,10 +712,15 @@ class ConfigHolder:
             mtime = self._stat()
             if mtime != self._mtime:
                 try:
-                    self._config = self._rebuild()
-                    self._mtime = mtime
-                    log.info("config reloaded")
-                except Exception as exc:  # keep serving with the previous config
+                    fresh = self._rebuild()
+                    # A properties.json that cannot be read now (a moment's lock, a bad edit) must not drop the
+                    # properties this process serves: keep the previous configuration and look again later.
+                    if fresh.properties_error and not self._config.properties_error:
+                        log.error("config reload: %s; keeping the previous configuration", fresh.properties_error)
+                    else:
+                        self._config = fresh
+                        self._mtime = mtime
+                        log.info("config reloaded")
+                except Exception as exc:  # keep serving with the previous config, and try again at the next check
                     log.error("config reload failed, keeping the previous one: %s", exc)
-                    self._mtime = mtime
         return self._config
