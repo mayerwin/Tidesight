@@ -105,10 +105,15 @@ cat > ~/stats.example.com/.htaccess <<'EOF'
 Options +ExecCGI -Indexes
 CGIPassAuth On
 RewriteEngine On
+# The dashboard and share pages only over HTTPS: passwords and session cookies never travel in clear.
+RewriteCond %{HTTPS} !=on
+RewriteRule ^(dashboard|share)(/.*)?$ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^(.*)$ tidesight.fcgi/$1 [L,QSA]
 EOF
 ```
+
+The tracker's addresses answer over HTTP too (pages served over HTTP can still be measured); the dashboard is sent to HTTPS, so it opens only once the certificate exists. Behind Cloudflare's proxy, the SSL mode must be "Full (strict)": with "Flexible", Cloudflare would reach Dreamhost over HTTP and the redirect would loop.
 
 Dreamhost runs `.fcgi` files with FastCGI as they are. On another Apache host with mod_fcgid, add `AddHandler fcgid-script .fcgi` to the `.htaccess`, but only where mod_fcgid is installed: without it, Apache would send the file instead of running it. `CGIPassAuth On` lets HTTP Basic credentials reach the app, for scripts using the API (the dashboard signs in with a cookie).
 
