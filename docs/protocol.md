@@ -127,12 +127,11 @@ Present when `features.context` is on. Every key is optional.
 | `ck`, `ls` | Cookies enabled, localStorage usable (1/0) |
 | `pwa` | Display mode: `standalone`, `fullscreen`, `minimal-ui`, `browser` |
 | `ifr` | Page runs in an iframe (1/0) |
-| `ua`, `pf`, `vnd` | `navigator.userAgent`, `navigator.platform`, `navigator.vendor` |
-| `uad` | `navigator.userAgentData` with high-entropy values: `{brands, mobile, platform, platformVersion, model, architecture, bitness, fullVersionList, formFactors, wow64}` |
-| `pdf` | `navigator.pdfViewerEnabled` |
+| `ua` | `navigator.userAgent` |
+| `uad` | `navigator.userAgentData` with high-entropy values: `{brands, mobile, platform, platformVersion, model, architecture, bitness, fullVersionList, formFactors, wow64, uaFullVersion}` (cached per tab in sessionStorage, `ts_uad`) |
 | `dnt`, `gpc` | `navigator.doNotTrack`, `navigator.globalPrivacyControl` |
-| `bot` | Automation signals (when `features.bot_signals`): `{wd, pl, lg, oz, au, hl, co}` = webdriver, plugin count, language count, outer size is zero, automation globals found, headless UA, `window.chrome` present |
-| `ab` | Ad blocker detected (1/0), when `features.adblock` |
+
+`navigator.platform`, `vendor` and `pdfViewerEnabled` travel in the fingerprint event (`fp.x`), automation signals in `fp.bot`, and ad-blocker detection in the `adblock` event.
 
 #### `event` (custom)
 
@@ -159,37 +158,41 @@ Sent when the page is hidden or left, on SPA route changes (for the previous pag
 
 #### `fp` (fingerprint)
 
-Once per session (and again when the combined hash changes), when `features.fingerprint` is on.
+Sent when `features.fingerprint` or `features.bot_signals` is on. Computed in idle time after every full page load (not on SPA route changes), one component per idle period, and sent once per session and again whenever the result differs from the one last sent; the session and result last sent are remembered per tab in sessionStorage (`ts_fp`). Each component has its own switch; with `fingerprint` off and `bot_signals` on, the event carries only `bot`, `fv` and `ms`. Hashes are FNV-1a 32-bit in base 36. Fingerprints are evidence for identity stitching, never an identity on their own.
 
 | Field | Meaning |
 |---|---|
-| `h` | Combined hash of all components. |
-| `c` | Canvas hash. |
-| `gl` | WebGL `{v: vendor, r: renderer, h: parameter hash}`. |
-| `au` | Audio hash. |
-| `fo` | Installed-font probe: `{h: hash, n: count}` *(off by default)*. |
-| `x` | Other raw components (math constants, plugin/mime list hash, …). |
-| `fv` | Fingerprint algorithm version. |
-| `ms` | Time spent computing (ms). |
+| `h` | Combined hash of `c`, `gl`, `au`, `fo` and `x` (two 32-bit hashes, concatenated). |
+| `c` | Canvas hash (`canvas_fingerprint`): the data URL of a canvas with text and an emoji in two fonts, a gradient and overlapping arcs. |
+| `gl` | WebGL (`webgl_fingerprint`): `{v: vendor, r: renderer, h: hash}`. `v` and `r` are the unmasked values (`WEBGL_debug_renderer_info`) when the browser exposes them; `h` covers the `getParameter` limits and versions, shader precisions, supported extensions, context attributes and maximum anisotropy. |
+| `au` | Audio (`audio_fingerprint`): the sum of a window of samples of an oscillator rendered offline through a compressor (a float, kept at full precision). Omitted when rendering takes over 1 s. |
+| `fo` | Installed fonts (`font_fingerprint`, *off by default*): `{h: hash of the fonts found, n: how many}`, out of about 70 common fonts, detected by text width on a canvas against the generic fallbacks (no DOM changes). |
+| `x` | Other raw components: `pf` (`navigator.platform`), `vnd` (`navigator.vendor`), `pdf` (`pdfViewerEnabled`, 1/0), `pl` (hash of plugin names), `mt` (hash of MIME types), `mc` (hash of Math function results), `tz` (time zone), `lg` (languages, comma-separated), `sc` (`[screen width, height, colour depth]`), `hc` (`hardwareConcurrency`), `dm` (`deviceMemory`), `tp` (`maxTouchPoints`), `ar` (CPU architecture byte from a NaN bit pattern), `ps` (`productSub`), `os` (`oscpu`), `cg` (colour gamut: `rec2020`, `p3`, `srgb`), `hdr` (high dynamic range, 1/0), `cn` (1 when the canvas renders differently each time, e.g. randomised by the browser or an extension: `c` is then unstable). |
+| `bot` | Automation signals (`bot_signals`; sent here rather than in `ctx`): `wd` (`navigator.webdriver`, 1/0), `pl` (plugin count), `lg` (language count), `oz` (outer window size is zero, 1/0), `au` (automation globals and attributes found, e.g. `__playwright__binding__`, `__pwInitScripts`, `callPhantom`, `__nightmare`, `domAutomation`, `Cypress`, `__webdriver_evaluate`, `_selenium`, `$cdc_…` keys, `@webdriver` for a `webdriver` attribute on `<html>`; omitted when none), `hl` (`HeadlessChrome` in the user agent, 1/0), `co` (`window.chrome` present, 1/0; Chrome user agents only). |
+| `fv` | Algorithm version, currently `1`. It changes whenever a component's computation changes: compare hashes only within one version. |
+| `ms` | Time spent computing (ms): the idle-time steps plus the audio rendering. |
 
 #### Behaviour events (plugins)
 
+Sent by the plugins (`ts/<name>.js`), each event only when its feature is on and sampled in for the session. A plugin starts after the page's first pageview (at once when `features.pageviews` is off), so its events carry that page's `pid`; nothing is sent on excluded paths. Elements inside `.ts-no-track` are ignored by click, form, copy/paste and selection tracking. No value a visitor types, copies, pastes or selects is ever sent.
+
 | Type | Fields |
 |---|---|
-| `click` | `x`, `y` (page px), `vx`, `vy` (viewport px), `pw`, `ph` (page size), `vw`, `vh`, `sel` (CSS selector), `tag`, `txt` (≤ 100 chars), `href`, `lk` (`out`, `dl`, `mail`, `tel`), `ex`, `ey` (position inside the element, 0–1), `ew`, `eh` (element size), `btn`, `mod` (modifier keys). |
-| `rage` | `sel`, `n` (clicks), `ms` (time span), `x`, `y`. |
-| `dead` | `sel`, `tag`, `x`, `y`: a click on a clickable-looking element with no visible effect. |
-| `errclick` | `sel`, `msg`: a click followed by a JS error. |
-| `scroll` | `d` (milestone %: 25, 50, 75, 90, 100), `max`, `ph`, `vh`. |
-| `form` | `a` (`start`, `focus`, `blur`, `submit`, `abandon`, `invalid`, `reset`), `f` (form id, name or selector), `fld` (field name or id), `ft` (field type), `ms` (time in field), `filled` (1/0), `n` (fields touched), `last` (last field touched), `why` (validity reason). Field values are never sent. |
-| `vital` | `n` (`LCP`, `CLS`, `INP`, `FCP`, `TTFB`), `val`, `r` (`good`, `ni`, `poor`), `el` (selector of the element responsible), `nt` (navigation type). |
-| `perf` | Navigation Timing: `dns`, `tcp`, `tls`, `ttfb`, `dl`, `dom`, `dcl`, `load`, `rt` (redirect time), `rc` (redirect count), `ts` (transfer size), `ebs`, `dbs` (encoded/decoded body size), `proto`, `nt`. |
-| `longtask` | `n` (count), `tot` (total ms), `max` (ms) for the page *(off by default)*. |
-| `error` | `k` (`error`, `rejection`, `resource`), `msg`, `src`, `line`, `col`, `stack` (≤ 4 KB), `tag` and `res` (for resource errors), `n` (occurrences on this page). |
-| `resize` | `vw`, `vh`, `or`. |
-| `vis` | `s`: `hidden`, `visible`, `blur`, `focus`. |
-| `copy`, `cut`, `paste` | `sel`, `len` *(off by default)*. |
-| `select` | `sel`, `len` *(off by default)*. |
+| `click` | `sel` (CSS selector), `tag`, `txt` (≤ `clicks.text_max` chars) of the clicked element: the nearest link, button, field, label, summary, `[role=button\|link\|checkbox\|menuitem\|tab]` or `[onclick]` element, else the target itself (then only its own text). `txt` is never a typed value: fields give none, submit/button inputs their label. `btn` (mouse button), `mod` (modifier keys: alt 1, ctrl 2, meta 4, shift 8; omitted when none), `vw`, `vh` (viewport). `x`, `y` (page px) and `vx`, `vy` (viewport px), or `kb: 1` for a click without a pointer position (keyboard or script). Links: `href`, `lk` (`out` another host, `dl` a `download_extensions` extension or a `download` attribute, `mail`, `tel`), `lk` only when its feature (`outbound` for out/mail/tel, `downloads` for dl) is on. With `heatmap_clicks`: `ex`, `ey` (position inside the element, 0–1, 3 decimals), `ew`, `eh` (element size), `pw`, `ph` (page size). Middle clicks on links are sent too (`btn: 1`). With `clicks` off, link clicks are still sent when their `lk` feature is on. A click a `<label>` forwards to its control is not counted twice. |
+| `rage` | `sel` (element of the first click), `n` (clicks), `ms` (first to last click), `x`, `y` (first click, page px). A burst starts with `rage_clicks.count` clicks within `window_ms` and `radius_px` of each other and lasts while further clicks follow within `window_ms` and `radius_px`; one event when it ends (or the page is hidden or left). The clicks are also sent as `click` events. |
+| `dead` | `sel`, `tag`, `x`, `y` (page px): a click on a clickable-looking element (link, button, `[role=button\|link]`, submit or button input, summary, label, `[onclick]`, or `cursor: pointer`) followed within `dead_clicks.wait_ms` by no DOM change, URL change, focus change, scroll, input, change, submit, window blur or page exit. Form fields, links the browser follows (unless a script prevents it) and links opened in a new tab are never dead. One check at a time. |
+| `errclick` | `sel`, `msg`: a JS error or unhandled rejection within 1 s after a click (once per click). |
+| `scroll` | `d` (milestone %), `max` (maximum depth so far, %), `ph` (page height px), `vh` (viewport height px). Depth = (scrollY + viewport height) / page height. One event per newly crossed milestone of `scroll.marks` (default 25, 50, 75, 90, 100); when several are crossed at once (a short page at load, a jump to the end), only the highest is sent and the lower ones are implied. Per page: SPA route changes start again. The maximum is also added to `engagement` events as `sd`. |
+| `form` | `a` (action), `f` (form: its `id`, `name` or action path, else a selector; fields outside a `<form>` belong to the closest `[data-ts-form]` container, named by that attribute, else to `_page`), `fld` (field `name`, else `id`, else selector), `ft` (field type: `text`, `email`, `password`, `checkbox`, `select-one`, `textarea`…). Actions: `start` (first field focused or changed in the form, with `fld`), `blur` (leaving a field: `fld`, `ft`, `ms` time in the field, `filled` 1/0), `submit` (`n` fields touched, `ms` since `start`), `invalid` (HTML5 validation failed: `fld`, `ft`, `why` = the first failing `ValidityState` flag, e.g. `valueMissing`, `typeMismatch`; at most 50 per page), `reset`, `abandon` (page left or SPA route after a `start` without a `submit`: `n`, `last` field touched). Hidden, submit, button, reset and image inputs are skipped. Values are never sent. |
+| `vital` | `n` (`LCP`, `CLS`, `INP`, `FCP`, `TTFB`), `val` (ms, rounded; CLS unitless, 4 decimals), `r` (`good`, `ni`, `poor` by the web-vitals thresholds: LCP 2500/4000, CLS 0.1/0.25, INP 200/500, FCP 1800/3000, TTFB 800/1800), `el` (selector: the LCP element, the largest shift's source, the INP target), `nt` (navigation type of the page load: `navigate`, `reload`, `back_forward`, `prerender`), `upd` (1 on a re-sent, changed value: the last value per page and metric wins). Definitions follow the web-vitals library (CLS: largest session window, shifts < 1 s apart, ≤ 5 s, without recent input; INP: worst interaction, one in 50 ignored; TTFB: responseStart − activationStart). For the initial page load only, never SPA soft navigations: `pid` and `url` are that page's even when sent after route changes. TTFB and FCP are sent when known, LCP at the first key press or click (or when hidden), CLS and INP when the page is first hidden or left; a later hide re-sends a value that changed. |
+| `perf` | Navigation Timing of the page load, once after `load`, ms rounded: durations `dns`, `tcp`, `tls`, `dl` (response download), `rt` (redirects); times since navigation start `ttfb` (responseStart), `req` (requestStart), `dom` (domInteractive), `dcl` (domContentLoadedEventEnd), `load` (loadEventEnd); `rc` (redirect count), `tsz` (transfer size, bytes), `ebs`, `dbs` (encoded/decoded body size), `proto` (next-hop protocol), `nt` (navigation type), `act` (prerender activation time, when prerendered), `srt` (Server-Timing entries `[[name, duration, description]]`, when present). |
+| `longtask` | `n` (count), `tot` (total ms), `max` (longest, ms), `tbt` (blocking time: the part of each task over 50 ms) of the long tasks since the previous report for the page, sent when the page is hidden, left or changed (SPA); sum them per page *(off by default)*. |
+| `error` | `k` (`error`, `rejection`, `resource`), `msg`, `src`, `line`, `col`, `stack` (≤ 4 KB) for JS errors and rejections; `tag` and `res` (URL) for failed resources (`resource_errors`). `ts` is when it happened, including errors raised before the plugin loaded. Identical errors (same `k`, `msg`, `src` or `res`, `line`) are sent once per page; when the page is hidden, left or changed, an update with the identifying fields, `n` (total occurrences on the page) and `upd: 1` (no stack) follows for any error seen again. At most `errors.max_per_page` distinct errors per page. |
+| `resize` | `vw`, `vh`, `or` (screen orientation type), 500 ms after the last resize or orientation change. |
+| `vis` | `s`: `hidden`, `visible` (tab), `blur`, `focus` (window). At most 50 per page. |
+| `copy`, `cut`, `paste` | `sel` (target element), `len` (characters; never the text) *(off by default)*. |
+| `select` | `sel` (element containing the selection), `len`: a text selection of at least 3 characters, 1 s after it last changed *(off by default)*. |
+| `adblock` | `ab`: 1 when a bait element with ad-like class names was hidden or removed, else 0. Once per session (remembered per tab in sessionStorage, `ts_ab`); sent as this event rather than in `ctx` *(off by default)*. |
 | `search` | `q`, `n` (result count), `cat`: site searches reported by the page (`tidesight.search()`). Searches in the URL are extracted at enrichment. |
 
 ### Response
@@ -210,23 +213,24 @@ Responses carry `Cache-Control: no-store`, CORS headers, and `Accept-CH` (when `
 
 ## `POST /chunk`
 
-Heavy data goes to `replay.db`. The metadata travels in the query string, so the collector stores the body **without parsing it**.
+Heavy data goes to `replay.db`. The metadata travels in the query string, so the collector stores the body **without parsing it**; every query parameter is kept in the chunk's metadata.
 
-`POST /chunk?site=ID&k=replay&vid=…&sid=…&pid=…&seq=0&ts=…`
+`POST /chunk?site=ID&k=replay&vid=…&sid=…&pid=…&seq=0&ts=…&url=…&rec=…`
 
 | Parameter | Meaning |
 |---|---|
-| `site`, `vid`, `sid`, `pid` | As in `/collect`. |
+| `site`, `vid`, `sid`, `pid` | As in `/collect`; `pid` is the page instance shown when the chunk was sent. |
 | `k` | Kind: `replay` (rrweb events), `mouse` (mouse-movement points), `snapshot` (DOM snapshot). |
-| `seq` | Chunk number within the page instance (0, 1, 2, …). |
+| `seq` | Chunk number, from 0: per page instance (`pid`) for `mouse`; per recording (`rec`) for `replay`, continuing across SPA route changes; always 0 for `snapshot`. Chunks can arrive out of order: sort by `seq`. |
 | `ts` | Client time of the first item in the chunk (ms). |
 | `url` | Page URL (optional). |
+| `rec` | `replay` only: the recording id, one per page load. SPA route changes continue the same recording. |
 
-The body is a JSON array, optionally gzip-compressed (sniffed), up to `server.max_chunk_kb` (default 1 MB). Payload formats:
+The body is JSON, up to `server.max_chunk_kb` (default 1 MB). While the page is open it is gzip-compressed (sniffed); when the page is hidden or left, whatever is pending is sent at once, uncompressed, by `sendBeacon` within the browser's beacon budget (about 64 KB in flight per page, shared with the event batches), else by `fetch`. Payload formats:
 
-- `replay`: an array of rrweb events.
-- `mouse`: `{"pw", "ph", "vw", "vh", "pts": [[x, y, dt], …]}` with page coordinates and milliseconds since `ts`.
-- `snapshot`: an rrweb full snapshot.
+- `replay`: a JSON array of rrweb events (`@rrweb/record` 2.x). A recording starts with a Meta event (type 4) and a FullSnapshot (type 2) and takes a new full snapshot every 5 minutes; an SPA route change adds a custom event (type 5) `{"tag": "pageview", "payload": {"pid", "url"}}`. Inputs are masked (all of them unless `replay.mask_all_inputs` is false, passwords always), text inside `replay.mask_text_class` (`ts-mask`) is masked, elements with `replay.block_class` (`ts-block`) and hidden inputs are left out. Chunks are sent every 10 s, at 200 events or 500 KB, and about 1 s after a full snapshot; when the page is hidden or left, in pieces of at most 48 KB. A recording stops after `replay.max_minutes`, or when an SPA route enters an excluded path (a later tracked page starts a new recording).
+- `mouse`: `{"pw", "ph", "vw", "vh", "pts": [[x, y, dt], …]}`: page coordinates, at most one point per `mouse_moves.interval_ms` while a mouse or pen moves (the resting position included), `dt` in ms since `ts`; page and viewport size when sent. A chunk every 10 s or 500 points, at most `mouse_moves.max_points` points per page.
+- `snapshot`: a JSON array of two rrweb events, Meta (`href`, `width`, `height`) and FullSnapshot: the page as rendered about 1.5 s after load or an SPA route change, once per page (path, plus the hash of `#/` routes) per session, for heatmap backgrounds. Same masking as `replay`. Taken with a short rrweb recording, or from the running replay recording (which then also holds that full snapshot).
 
 Responses and CORS are as for `/collect`.
 
@@ -293,7 +297,15 @@ Visitor-visible names used by the official tracker. Other trackers should use th
 | `ts_q` | localStorage | Undelivered batches awaiting retry. |
 | `ts_cfg_<site>` | localStorage | Cached site configuration. |
 | `ts_ignore` | localStorage | `1`: this browser is excluded from tracking (`tidesight('ignore', true)`). |
+| `ts_uad` | sessionStorage | High-entropy User-Agent Client Hints, fetched once per tab. |
+| `ts_fp` | sessionStorage | Session and fingerprint last sent (the `fp` event is sent once per session). |
+| `ts_ab` | sessionStorage | Ad-blocker result already sent this session. |
+| `ts_snap` | sessionStorage | Pages whose DOM snapshot was already taken this session. |
 
 ## Changelog
 
-- **v1** (2026-10): initial version.
+- **v1** (2026-10): initial version. Clarifications made while the plugins were built, all backward compatible:
+  bot signals moved from `ctx.bot` to `fp.bot`, ad-blocker detection from `ctx.ab` to the `adblock` event;
+  `perf` transfer size is `tsz` (`ts` is every event's client time); `vital` and `error` updates carry `upd: 1`;
+  replay chunks carry `rec`. Collectors fill the `name` column only from a string `n` (several event types use
+  `n` as a count).

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plugins</title>
+  <style>
+    body { font: 16px/1.4 sans-serif; margin: 0; padding: 16px; }
+    #heat { width: 400px; height: 200px; background: #def; margin: 16px 0; }
+    #fake { cursor: pointer; display: inline-block; padding: 4px; background: #eee; }
+    .row { margin: 8px 0; }
+  </style>
+  <script src="/loader.js"></script>
+</head>
+<body>
+  <h1 id="top">Behaviour plugins</h1>
+  <p id="para">The quick brown fox jumps over the lazy dog while the tide comes in.</p>
+  <div id="heat"><span>Heat map target</span></div>
+  <div class="row">
+    <a id="out" href="https://outbound.example/landing?x=1">Outbound link</a>
+    <a id="dl" href="/files/report.pdf">Download PDF</a>
+    <a id="dl-attr" href="/export?id=3" download>Export</a>
+    <a id="mail" href="mailto:hello@example.com">Mail us</a>
+    <a id="tel" href="tel:+15551234567">Call us</a>
+    <a id="hash-link" href="#nowhere" onclick="return false">Hash link</a>
+  </div>
+  <div class="row">
+    <button id="live" onclick="document.getElementById('log').textContent += 'x'">Live button</button>
+    <button id="dead">Dead button</button>
+    <div id="fake">Looks clickable</div>
+    <button id="boom" onclick="throw new Error('boom from click')">Throws</button>
+    <button id="busy" onclick="var t = performance.now(); while (performance.now() - t < 150) {} this.textContent = 'done'">Busy</button>
+    <button id="secret-btn" class="ts-no-track" onclick="this.textContent = 'ok'">Not tracked</button>
+  </div>
+  <div id="log"></div>
+
+  <form id="signup" action="/signup" onsubmit="event.preventDefault(); document.getElementById('log').textContent = 'submitted'">
+    <input name="name" id="name" placeholder="Name">
+    <input name="email" id="email" type="email" required placeholder="Email">
+    <input name="pw" id="pw" type="password" placeholder="Password">
+    <input name="token" type="hidden" value="hidden-token-value">
+    <label for="agree">I agree</label><input type="checkbox" name="agree" id="agree">
+    <select name="plan" id="plan"><option value="">Choose…</option><option value="pro">Pro</option></select>
+    <textarea name="bio" id="bio"></textarea>
+    <button id="submit" type="submit">Sign up</button>
+  </form>
+
+  <input id="search" name="q" placeholder="Search (outside any form)">
+  <div data-ts-form="newsletter"><input id="nl" name="nl-email" placeholder="Newsletter"></div>
+  <form id="private-form" class="ts-no-track"><input id="private" name="private"></form>
+</body>
+</html>

@@ -27,6 +27,56 @@ origins = ["http://127.0.0.1:8788"]
 features.replay = true
 replay.sample_rate = 1.0
 
+# Session replay and DOM snapshots for every session.
+[sites.replaysnap]
+origins = ["http://127.0.0.1:8788"]
+features.replay = true
+replay.sample_rate = 1.0
+features.dom_snapshots = true
+dom_snapshots.sample_rate = 1.0
+
+# DOM snapshots for every session, no replay.
+[sites.snap]
+origins = ["http://127.0.0.1:8788"]
+features.dom_snapshots = true
+dom_snapshots.sample_rate = 1.0
+
+# Plain clicks and heatmap coordinates off: only links (outbound, downloads, mailto/tel) are reported.
+[sites.links]
+origins = ["http://127.0.0.1:8788"]
+features.clicks = false
+features.heatmap_clicks = false
+
+# Fingerprinting off, automation signals still on.
+[sites.botonly]
+origins = ["http://127.0.0.1:8788"]
+features.fingerprint = false
+
+# Heavy plugins enabled but sampled out (rate 0), everything else off: no plugin file is ever requested.
+[sites.sampled0]
+origins = ["http://127.0.0.1:8788"]
+features.mouse_moves = true
+mouse_moves.sample_rate = 0.0
+features.replay = true
+replay.sample_rate = 0.0
+features.fingerprint = false
+features.bot_signals = false
+features.clicks = false
+features.outbound = false
+features.downloads = false
+features.heatmap_clicks = false
+features.rage_clicks = false
+features.dead_clicks = false
+features.error_clicks = false
+features.scroll = false
+features.forms = false
+features.vitals = false
+features.navigation_timing = false
+features.errors = false
+features.resource_errors = false
+features.resize = false
+features.visibility = false
+
 # Core only: every plugin feature off.
 [sites.core]
 origins = ["http://127.0.0.1:8788", "http://localhost:8788"]

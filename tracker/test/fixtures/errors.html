@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Errors</title>
+  <script>
+    // An error raised as soon as the core runs, before the errors plugin has loaded: the core keeps it for the plugin.
+    var waitCore = setInterval(function () {
+      if (window.tidesight && window.tidesight.v) {
+        clearInterval(waitCore);
+        setTimeout(function () { throw new Error('early boom'); }, 0);
+      }
+    }, 2);
+    function kaboom() { throw new Error('kaboom'); }
+  </script>
+  <script src="/loader.js"></script>
+</head>
+<body>
+  <h1>Errors</h1>
+  <button id="err" onclick="kaboom()">Throw</button>
+  <button id="rej" onclick="Promise.reject(new Error('nope'))">Reject</button>
+  <button id="res" onclick="var i = document.createElement('img'); i.src = '/missing-image.png'; document.body.appendChild(i)">Broken image</button>
+</body>
+</html>

@@ -126,7 +126,7 @@
   const emit = (n, a) => (hooks[n] || []).forEach((f) => { try { f(a); } catch (e) { log(e); } });
 
   // ---- event queue and delivery
-  let queue = [], timer = 0, due = 0, started = 0, silent = 0, dropped = 0;
+  let queue = [], timer = 0, due = 0, started = 0, silent = 0, dropped = 0, leaving = 0;
   let pid = rid(12), pageUrl = loc.href, lastUrl = pageUrl, pageSent = 0;
   const endpoint = () => base + '/collect';
 
@@ -146,7 +146,7 @@
     ev._s = ses.id;
     emit('event', ev);
     queue.push(ev);
-    if (queue.length >= 20) flush(); else schedule(fast ? 150 : cfg.flush_sec * 1000);
+    if (queue.length >= 20 && !leaving) flush(); else schedule(fast ? 150 : cfg.flush_sec * 1000);
   };
   const schedule = (ms) => {
     const t = now() + ms;
@@ -366,8 +366,8 @@
   };
   const enabled = (f) => !!(cfg.features[f] && sampled(f));
   const wanted = (n) => !PLUGINS[n] || PLUGINS[n].some(enabled);
-  const initPlugin = (n) => {
-    if (inited[n] || !started || silent || !wanted(n)) return;
+  const initPlugin = (n) => { // after the first pageview (its page id), so never on an excluded page
+    if (inited[n] || !started || silent || (!pageSent && cfg.features.pageviews) || !wanted(n)) return;
     inited[n] = 1;
     try { plugins[n](api); } catch (e) { log(e); }
   };
@@ -379,10 +379,10 @@
       });
     }
   };
-  const chunk = (kind, seq, t0, body, beacon) => {
+  const chunk = (kind, seq, t0, body, beacon, extra) => { // extra: more query parameters, e.g. '&rec=…'
     if (!started || silent || !ses) return;
     const url = base + '/chunk?site=' + enc(siteId) + '&k=' + kind + '&vid=' + enc(vis.id) + '&sid=' + enc(ses.id) +
-      '&pid=' + enc(pid) + '&seq=' + seq + '&ts=' + t0 + '&url=' + enc(pageUrl.slice(0, 1000));
+      '&pid=' + enc(pid) + '&seq=' + seq + '&ts=' + t0 + '&url=' + enc(pageUrl.slice(0, 1000)) + (extra || '');
     try { if (beacon && nav.sendBeacon(url, body)) return; } catch (e) { /* use fetch */ }
     if (w.fetch) fetch(url, { method: 'POST', body, keepalive: !!beacon && (body.size || body.length * 3) < 6e4, credentials: 'omit' }).catch(noop);
   };
@@ -442,7 +442,7 @@
   const pending = [];
   const run = (args) => {
     const name = args[0], fn = cmds[name];
-    if (!fn) return log('unknown command', name);
+    if (!fn) return log('?', name);
     if (!started && name[0] !== '_') return pending.push(args);
     fn(...[].slice.call(args, 1));
   };
@@ -460,9 +460,9 @@
     loadVisitor();
     listen(d, 'visibilitychange', () => {
       engTick();
-      if (d.visibilityState === 'hidden') { engagement('hidden'); emit('hide'); flush(1); } else retry();
+      if (d.visibilityState === 'hidden') { leaving = 1; engagement('hidden'); emit('hide'); leaving = 0; flush(1); } else retry();
     });
-    listen(w, 'pagehide', () => { engagement('leave'); emit('leave'); flush(1); });
+    listen(w, 'pagehide', () => { leaving = 1; engagement('leave'); emit('leave'); leaving = 0; flush(1); });
     listen(w, 'pageshow', (e) => { if (e.persisted && pageSent) pageview({ nav: 'restore' }); });
     listen(w, 'focus', engTick);
     listen(w, 'blur', engTick);
@@ -492,7 +492,6 @@
   q.forEach((a) => ts(...a)); // may include a _config from an early config.js
   if (!cfgLoaded) {
     safe(() => {
-      if (!siteId) log('missing data-site');
       let cached;
       try { cached = JSON.parse(lsGet('ts_cfg_' + siteId)); } catch (e) { /* none */ }
       if (cached && cached.c && now() - cached.at < 864e5) {

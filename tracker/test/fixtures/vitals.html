@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Vitals</title>
+  <style>
+    body { margin: 0; padding: 16px; font-family: sans-serif; }
+    #hero { font-size: 56px; line-height: 1.2; margin: 0 0 16px; }
+    #banner { height: 160px; background: #fc9; }
+  </style>
+  <script src="/loader.js"></script>
+</head>
+<body>
+  <div id="slot"></div>
+  <h1 id="hero">A large heading that is the largest contentful paint of this page</h1>
+  <p id="body-text">Some body text below the hero, pushed down by a late banner.</p>
+  <button id="slow" onclick="var t = performance.now(); while (performance.now() - t < 150) {} this.textContent = 'Clicked'">Slow handler</button>
+  <script>
+    // A late banner: a layout shift without recent input.
+    setTimeout(function () {
+      var b = document.createElement('div');
+      b.id = 'banner';
+      document.getElementById('slot').appendChild(b);
+      window.shifted = true;
+    }, 400);
+  </script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Replay</title>
+  <script src="/loader.js"></script>
+</head>
+<body>
+  <h1>Session replay</h1>
+  <p class="ts-mask">Masked text: account 4242</p>
+  <div class="ts-block" id="blocked">Blocked widget</div>
+  <form id="login" onsubmit="event.preventDefault()">
+    <input id="user" name="user" placeholder="User">
+    <input id="pw" name="pw" type="password" placeholder="Password">
+    <button id="go" type="submit">Log in</button>
+  </form>
+  <button id="add" onclick="var p = document.createElement('p'); p.textContent = 'Added ' + Date.now(); document.body.appendChild(p)">Add</button>
+</body>
+</html>

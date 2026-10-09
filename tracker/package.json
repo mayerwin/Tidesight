@@ -13,6 +13,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",
+    "@rrweb/record": "^2.1.7",
     "esbuild": "^0.25.10"
   }
 }
