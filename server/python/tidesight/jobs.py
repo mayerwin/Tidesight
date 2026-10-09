@@ -9,6 +9,7 @@
     python -m tidesight.jobs --config … privacy-clean [--hash-ip|--truncate-ip] [--drop-fingerprint] ... [--apply]
     python -m tidesight.jobs --config … archive --before 2025-01-01 [--apply]
     python -m tidesight.jobs --config … export --site ID --what sessions --from … --to … [--format csv]
+    python -m tidesight.jobs --config … purge-site ID [--apply]
     python -m tidesight.jobs --config … vacuum
     python -m tidesight.jobs --config … status
     python -m tidesight.jobs hash-password
@@ -68,8 +69,10 @@ def cmd_load_spool(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
-    """Load the spool (if any), enrich within a time budget, roll up. Safe to run every minute."""
+    """Load the spool (if any), enrich within a time budget, roll up; delete the data of properties deleted in the
+    dashboard; refresh [server] resolved_config_file. Safe to run every minute."""
     from .enrich import pipeline
+    from .maintenance import purge_queued
     out: Dict[str, Any] = {}
     if os.path.isdir(os.path.join(cfg.data_dir, "spool")):
         out["load_spool"] = cmd_load_spool(cfg, args)
@@ -77,6 +80,11 @@ def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         out["enrich"] = pipeline.run(cfg, max_seconds=args.max_seconds)
     except RuntimeError as exc:  # another run holds the lock
         out["enrich"] = {"skipped": str(exc)}
+    purged = purge_queued(cfg)
+    if purged:
+        out["purged"] = purged
+    if cfg.server["resolved_config_file"]:
+        out["resolved_config"] = write_resolved(cfg, cfg.server["resolved_config_file"], only_if_changed=True)
     return out
 
 
@@ -162,20 +170,39 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     return out
 
 
+def write_resolved(cfg: Config, out: str, only_if_changed: bool = False) -> Dict[str, Any]:
+    """Write the resolved configuration: a new file, mode 600, renamed over the old one (an existing file keeps no
+    looser mode)."""
+    text = json.dumps(cfg.resolved(), indent=2, sort_keys=True) + "\n"
+    if only_if_changed:
+        try:
+            with open(out, "r", encoding="utf-8") as fh:
+                if fh.read() == text:
+                    return {"unchanged": out}
+        except OSError:
+            pass
+    tmp = out + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, out)
+    return {"written": out}
+
+
 def cmd_config_json(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     """The resolved configuration as JSON, for the PHP/Node/Worker connectors (contains the secret)."""
-    text = json.dumps(cfg.resolved(), indent=2, sort_keys=True)
     if args.out and args.out != "-":
-        # A new file, mode 600, then renamed over the old one: an existing file keeps no looser mode.
-        tmp = args.out + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text + "\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, args.out)
-        return {"written": args.out}
-    print(text)
+        return write_resolved(cfg, args.out)
+    print(json.dumps(cfg.resolved(), indent=2, sort_keys=True))
     return {}
+
+
+def cmd_purge_site(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
+    from .maintenance import purge_site
+    if args.apply and cfg.site(args.site) is not None:
+        raise SystemExit("%r is still configured: remove it from the configuration (or the dashboard) first" % args.site)
+    return purge_site(cfg, args.site, apply=args.apply)
 
 
 def cmd_hash_password(cfg: Optional[Config], args: argparse.Namespace) -> Dict[str, Any]:
@@ -253,6 +280,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", default="csv", choices=["csv", "json", "jsonl"])
     p.add_argument("--out", default="-", help="output file (default stdout)")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("purge-site", help="delete every row stored for a site (dry run unless --apply)")
+    p.add_argument("site")
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(func=cmd_purge_site)
 
     p = sub.add_parser("vacuum", help="optimise and compact the databases")
     p.set_defaults(func=cmd_vacuum)

@@ -1,11 +1,12 @@
-"""Read-only JSON API for the dashboard and public share pages (standard library only).
+"""JSON API for the dashboard and public share pages (standard library only). docs/api.md describes it.
 
-Endpoints live under /dashboard/api/<name> (HTTP Basic auth, see [dashboard] users)
-and, for sites with `public = true`, under /share/<site>/api/<name> with only the
-metrics listed in the site's `public_metrics`.
+Endpoints live under /dashboard/api/<name> (a login session or HTTP Basic auth, see [dashboard] users)
+and, for sites with `public = true`, under /share/<site>/api/<name> with only the metrics listed in the
+site's `public_metrics`. Reads are here; the writes (properties, segments, annotations) are in admin.py.
 
-Common parameters: site, from and to (YYYY-MM-DD, site-local days, inclusive),
-filters as f.<dimension>=<value>, and bots=1 to include bot traffic.
+Common parameters: site, from and to (YYYY-MM-DD, site-local days, inclusive), filters (JSON, see
+query.py; f.<dimension>=<value> still works), bots (exclude, include or only), compare (previous, year,
+custom with compare_from and compare_to).
 """
 
 from __future__ import annotations
@@ -28,16 +29,11 @@ from . import __version__
 from .config import Config, SiteConfig
 from .enrich.timeutil import local_day, zone
 
-# Session dimensions that can be broken down or filtered on: name -> sessions column.
-SESSION_DIMS = {
-    "source": "source", "medium": "medium", "campaign": "campaign", "term": "term", "content": "content",
-    "channel": "channel", "referrer": "referrer_domain", "country": "country", "region": "region_name",
-    "city": "city", "device": "device_type", "browser": "browser", "os": "os", "screen": "screen",
-    "language": "language", "timezone": "timezone", "entry": "entry_path", "exit": "exit_path",
-    "visitor": "visitor_key", "uid": "uid", "asn": "as_org", "brand": "device_brand", "model": "device_model",
-    "browser_version": "browser || ' ' || COALESCE(browser_version, '')", "os_version": "os || ' ' || COALESCE(os_version, '')",
-    "hour": "hour", "new": "is_new", "bot": "bot_name", "category": "source_category",
-}
+from .properties import hosts as site_hosts
+from .query import (DIM_LABELS, MAX_ROW_VALUES, METRIC_LABELS, SESSION_DIMS, ApiError, Query, breakdown, compare_rows, glob_literal,
+                    goal_condition, interval_for, series as time_series, totals as period_totals, value_series)
+from .webdb import WebDB
+
 PUBLIC_ENDPOINTS = {"overview", "breakdown", "sites", "realtime"}
 PUBLIC_DIMS = {"pages": ("page", "entry", "exit"), "sources": ("source", "referrer", "channel", "medium", "campaign"),
                "countries": ("country", "region", "city"), "devices": ("device", "browser", "os", "screen"),
@@ -59,13 +55,6 @@ def public_dims(site: "SiteConfig") -> set:
 
 
 VITAL_THRESHOLDS = {"LCP": (2500, 4000), "INP": (200, 500), "CLS": (0.1, 0.25), "FCP": (1800, 3000), "TTFB": (800, 1800)}
-
-
-class ApiError(Exception):
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-        self.message = message
 
 
 def _percentile(values: Sequence[float], p: float) -> Optional[float]:
@@ -148,89 +137,6 @@ def _rrweb_events(data: Any) -> List[Dict[str, Any]]:
             and isinstance(e.get("timestamp"), (int, float)) and not isinstance(e.get("timestamp"), bool)]
 
 
-class Query:
-    """Parsed request parameters plus SQL helpers bound to one site and date range."""
-
-    def __init__(self, cfg: Config, params: Dict[str, str], site_id: str, public: bool = False) -> None:
-        self.cfg = cfg
-        self.params = params
-        self.public = public
-        site = cfg.site(site_id)
-        if site is None:
-            raise ApiError(404, "unknown site %r" % site_id)
-        self.site: SiteConfig = site
-        self.site_id = site_id
-        self.tz = site.timezone
-        today = local_day(int(time.time() * 1000), self.tz)
-        end = params.get("to") or today
-        start = params.get("from") or (datetime.strptime(end, "%Y-%m-%d").date() - timedelta(days=29)).isoformat()
-        for d in (start, end):
-            if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
-                raise ApiError(400, "dates must be YYYY-MM-DD")
-        if start > end:
-            start, end = end, start
-        self.start, self.end = start, end
-        self.bots = params.get("bots") == "1" and not public
-        self.filters: List[Tuple[str, str]] = []
-        allowed = public_dims(site) if public else None
-        for k, v in params.items():
-            if k.startswith("f.") and v != "":
-                name = k[2:]
-                if name not in SESSION_DIMS and name not in ("page", "event", "path_prefix"):
-                    raise ApiError(400, "unknown filter %r" % name)
-                if allowed is not None and name not in allowed:  # a public page must not single anyone out
-                    raise ApiError(403, "this filter is not public")
-                self.filters.append((name, v))
-        if public and len(self.filters) > 1:  # combining filters narrows a public view down to one person
-            raise ApiError(400, "public pages take one filter at a time")
-
-    def limit(self, default: int = 50, maximum: int = 1000) -> int:
-        try:
-            return max(1, min(maximum, int(self.params.get("limit", default))))
-        except ValueError:
-            return default
-
-    def session_where(self, alias: str = "s") -> Tuple[str, List[Any]]:
-        if not alias:
-            raise ValueError("session_where needs a table alias")  # EXISTS subqueries reference it
-        a = alias + "."
-        where = ["%ssite_id = ?" % a, "%sday BETWEEN ? AND ?" % a, "%ssite_ok = 1" % a, "%sinternal = 0" % a]
-        args: List[Any] = [self.site_id, self.start, self.end]
-        if not self.bots:
-            where.append("%sis_bot = 0" % a)
-        for name, value in self.filters:
-            if name == "page":
-                where.append("EXISTS (SELECT 1 FROM pageviews fp WHERE fp.session_key = %ssession_key AND fp.path = ?)" % a)
-                args.append(value)
-            elif name == "path_prefix":
-                where.append("EXISTS (SELECT 1 FROM pageviews fp WHERE fp.session_key = %ssession_key AND fp.path LIKE ?)" % a)
-                args.append(value.replace("%", "") + "%")
-            elif name == "event":
-                where.append("EXISTS (SELECT 1 FROM events fe WHERE fe.session_key = %ssession_key AND fe.name = ?)" % a)
-                args.append(value)
-            elif value == "(none)":
-                where.append("(%s) IS NULL" % self._col(name, a))
-            else:
-                where.append("(%s) = ?" % self._col(name, a))
-                args.append(int(value) if name in ("hour", "new") and value.lstrip("-").isdigit() else value)
-        return " AND ".join(where), args
-
-    @staticmethod
-    def _col(name: str, prefix: str) -> str:
-        expr = SESSION_DIMS[name]
-        if re.match(r"^\w+$", expr):
-            return prefix + expr
-        return re.sub(r"\b(browser|browser_version|os|os_version)\b", lambda m: prefix + m.group(1), expr)
-
-    def previous(self) -> "Query":
-        n = len(_days(self.start, self.end))
-        d0 = datetime.strptime(self.start, "%Y-%m-%d").date()
-        q = Query(self.cfg, dict(self.params), self.site_id, self.public)
-        q.start = (d0 - timedelta(days=n)).isoformat()
-        q.end = (d0 - timedelta(days=1)).isoformat()
-        return q
-
-
 class Api:
     """Executes API calls against the databases of one deployment."""
 
@@ -274,18 +180,69 @@ class Api:
         return fn(params, public_site is not None)
 
     def q(self, params: Dict[str, str], public: bool) -> Query:
-        return Query(self.cfg, params, params.get("site", ""), public)
+        if public:  # refused before their values are even read
+            site = self.cfg.site(params.get("site", ""))
+            allowed = public_dims(site) if site is not None else set()
+            asked = [k[2:] for k in params if k.startswith("f.") and params[k] != ""]
+            raw = _json_or(params.get("filters"), [])
+            asked += [str(f.get("dim")) for f in raw if isinstance(f, dict)] if isinstance(raw, list) else ["?"]
+            if any(("page" if d == "path_prefix" else d) not in allowed for d in asked):
+                raise ApiError(403, "this filter is not public")
+        q = Query(self.cfg, params, params.get("site", ""), public)
+        if public:
+            allowed = public_dims(q.site)
+            # A public page must not single anyone out: only its own dimensions, exact values, one at a time.
+            if any(f.dim not in allowed or f.op != "is" for f in q.filters):
+                raise ApiError(403, "this filter is not public")
+            if len(q.filters) > 1:  # combining filters narrows a public view down to one person
+                raise ApiError(400, "public pages take one filter at a time")
+        return q
 
     # -- endpoints ------------------------------------------------------------
 
     def ep_sites(self, params: Dict[str, str], public: bool) -> Any:
-        sites = [{"id": s.id, "name": s.name, "timezone": s.timezone, "public": bool(s.settings["public"]),
+        sites = [{"id": s.id, "name": s.name, "label": s.display_name, "domains": site_hosts(s.origins),
+                  "timezone": s.timezone, "public": bool(s.settings["public"]), "managed": s.managed,
                   "public_metrics": s.settings["public_metrics"] if s.settings["public"] else [],
-                  "origins": [o for o in s.origins if "*" not in o]}
-                 for s in self.cfg.sites.values()]
+                  "origins": [o for o in s.origins if "*" not in o], "goals": s.settings.get("goals") or []}
+                 for s in sorted(self.cfg.sites.values(), key=lambda x: x.display_name.lower())]
+        first: Dict[str, str] = {}
+        conn = self._conn("derived.db")
+        if conn is not None:
+            try:  # the first day with data: where "All time" starts
+                first = {r[0]: r[1] for r in conn.execute("SELECT site_id, MIN(day) FROM daily GROUP BY site_id")}
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+        for s in sites:
+            s["first_day"] = first.get(s["id"])
         if public:
-            sites = [dict(s, origins=[]) for s in sites if s["id"] == params.get("site")]
-        return {"sites": sites, "version": __version__}
+            sites = [dict(s, origins=[], domains=[], goals=[]) for s in sites if s["id"] == params.get("site")]
+            return {"sites": sites, "version": __version__}
+        return {"sites": sites, "version": __version__, "freshness": self._freshness()}
+
+    def _freshness(self) -> Dict[str, Any]:
+        """When enrichment last ran and when the last hit arrived: the dashboard says how fresh its data is."""
+        out: Dict[str, Any] = {"enriched_at": None, "last_hit": None}
+        conn = self._conn("derived.db")
+        if conn is not None:
+            try:
+                row = conn.execute("SELECT updated_at FROM job_state WHERE job = 'enrich'").fetchone()
+                out["enriched_at"] = row[0] if row else None
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+        ev = self._conn("events.db")
+        if ev is not None:
+            try:
+                out["last_hit"] = ev.execute("SELECT MAX(received_at) FROM raw_hits WHERE id = (SELECT MAX(id) FROM raw_hits)").fetchone()[0]
+            except sqlite3.Error:
+                pass
+            finally:
+                ev.close()
+        return out
 
     def ep_status(self, params: Dict[str, str], public: bool) -> Any:
         out: Dict[str, Any] = {"version": __version__, "storage_mode": self.cfg.server["storage_mode"], "files": {}}
@@ -323,14 +280,24 @@ class Api:
 
     def ep_overview(self, params: Dict[str, str], public: bool) -> Any:
         q = self.q(params, public)
+        goal = None if public else q.goal()
+        cq = None if public else q.comparison()
+        interval = interval_for(q, params.get("interval"))
         conn = self.derived()
         try:
-            totals = self._totals(conn, q)
-            prev = self._totals(conn, q.previous())
-            interval = params.get("interval") or ("hour" if q.start == q.end else "day" if len(_days(q.start, q.end)) <= 92 else "week")
-            series = self._series(conn, q, interval)
+            totals = period_totals(conn, q, goal)
+            series = time_series(conn, q, interval, goal)
+            # Without a comparison, the change shown is against the period of the same length just before.
+            prev = period_totals(conn, cq or q.previous(), goal)
+            cmp_series = time_series(conn, cq, interval, goal) if cq else None
         finally:
             conn.close()
+        out: Dict[str, Any] = {"site": q.site_id, "from": q.start, "to": q.end, "interval": interval, "totals": totals,
+                               "previous": prev, "series": series}
+        if cq:
+            out["compare"] = {"from": cq.start, "to": cq.end, "totals": prev, "series": cmp_series}
+        if goal:
+            out["goal"] = goal
         if public:
             allowed = set(q.site.settings["public_metrics"])
             keep = {"visitors", "pageviews"} & allowed
@@ -339,113 +306,160 @@ class Api:
                 few = q.filters and (d.get("visitors") or 0) < PUBLIC_MIN_VISITORS  # filtered: no singling out
                 return {k: (v if k == "t" or not few else 0) for k, v in d.items() if k in keep or k == "t"}
 
-            totals, prev, series = shown(totals), shown(prev), [shown(p) for p in series]
-        return {"site": q.site_id, "from": q.start, "to": q.end, "interval": interval, "totals": totals,
-                "previous": prev, "series": series}
-
-    def _totals(self, conn: sqlite3.Connection, q: Query) -> Dict[str, Any]:
-        where, args = q.session_where("s")
-        r = conn.execute(
-            "SELECT COUNT(DISTINCT s.visitor_key) AS visitors, COUNT(*) AS sessions, COALESCE(SUM(s.pageviews), 0) AS pageviews, "
-            "COALESCE(SUM(s.bounce), 0) AS bounces, AVG(s.duration_ms) AS avg_duration, AVG(s.engaged_ms) AS avg_engaged, "
-            "COALESCE(SUM(s.events), 0) AS events, COUNT(DISTINCT CASE WHEN s.is_new = 1 THEN s.visitor_key END) AS new_visitors "
-            "FROM sessions s WHERE " + where, args).fetchone()
-        out = dict(r)
-        out["bounce_rate"] = round(out["bounces"] / out["sessions"], 4) if out["sessions"] else None
-        out["views_per_session"] = round(out["pageviews"] / out["sessions"], 2) if out["sessions"] else None
-        for k in ("avg_duration", "avg_engaged"):
-            out[k] = int(out[k]) if out[k] is not None else None
-        return out
-
-    def _series(self, conn: sqlite3.Connection, q: Query, interval: str) -> List[Dict[str, Any]]:
-        bucket = {"hour": "s.hour", "day": "s.day", "week": "strftime('%Y-W%W', s.day)",
-                  "month": "substr(s.day, 1, 7)"}.get(interval)
-        if bucket is None:
-            raise ApiError(400, "interval must be hour, day, week or month")
-        where, args = q.session_where("s")
-        rows = {r["t"]: dict(r) for r in conn.execute(
-            "SELECT " + bucket + " AS t, COUNT(DISTINCT s.visitor_key) AS visitors, COUNT(*) AS sessions, "
-            "COALESCE(SUM(s.pageviews), 0) AS pageviews, COALESCE(SUM(s.bounce), 0) AS bounces, "
-            "AVG(s.duration_ms) AS avg_duration FROM sessions s WHERE " + where + " GROUP BY t ORDER BY t", args)}
-        if interval == "hour":
-            keys: List[Any] = list(range(24))
-        elif interval == "day":
-            keys = _days(q.start, q.end)
+            out.update(totals=shown(totals), previous=shown(prev), series=[shown(p) for p in series])
         else:
-            keys = sorted(rows)
-        out = []
-        for k in keys:
-            r = rows.get(k) or {"t": k, "visitors": 0, "sessions": 0, "pageviews": 0, "bounces": 0, "avg_duration": None}
-            r["avg_duration"] = int(r["avg_duration"]) if r.get("avg_duration") is not None else None
-            out.append(r)
+            out["annotations"] = WebDB(self.cfg.data_dir).annotations(q.site_id, q.start, q.end)
         return out
 
     def ep_breakdown(self, params: Dict[str, str], public: bool) -> Any:
+        """Rows of a dimension (dim, optionally dim2), sorted (sort, dir), paged (limit, offset), searched (q, or
+        values: a JSON list), with totals, the number of rows, a goal's conversions (goal) and a comparison."""
         q = self.q(params, public)
         dim = params.get("dim", "source")
-        limit = q.limit()
+        if public:
+            dim2, search, values_in, goal, sort, desc, offset = None, None, None, None, None, True, 0
+        else:
+            dim2 = params.get("dim2") or None
+            search = (params.get("q") or "").strip()[:200] or None
+            values_in = _json_or(params.get("values"), None)
+            if values_in is not None and (not isinstance(values_in, list) or len(values_in) > MAX_ROW_VALUES
+                                          or not all(isinstance(v, str) for v in values_in)):
+                raise ApiError(400, "values must be a JSON list of texts")
+            goal = q.goal()
+            sort, desc, offset = params.get("sort"), params.get("dir", "desc") != "asc", q.offset()
+        limit = q.limit(10, 100000 if params.get("format") in ("csv", "tsv", "json") else 1000)
         conn = self.derived()
         try:
-            if dim in ("page", "title"):
-                rows = self._pages(conn, q, limit, by=dim)
-            elif dim == "event":
-                rows = self._events(conn, q, limit)
-            elif dim in SESSION_DIMS:
-                where, args = q.session_where("s")
-                col = q._col(dim, "s.")
-                rows = [dict(r) for r in conn.execute(
-                    "SELECT COALESCE(CAST(" + col + " AS TEXT), '(none)') AS value, COUNT(DISTINCT s.visitor_key) AS visitors, "
-                    "COUNT(*) AS sessions, COALESCE(SUM(s.pageviews), 0) AS pageviews, "
-                    "ROUND(1.0 * SUM(s.bounce) / COUNT(*), 4) AS bounce_rate, CAST(AVG(s.duration_ms) AS INTEGER) AS avg_duration, "
-                    "CAST(AVG(s.engaged_ms) AS INTEGER) AS avg_engaged "
-                    "FROM sessions s WHERE " + where + " GROUP BY 1 ORDER BY visitors DESC, sessions DESC LIMIT ?",
-                    args + [limit])]
-                if dim == "city":
-                    extra = {(r["city"] or "(none)"): r["country"] for r in conn.execute(
-                        "SELECT city, country FROM sessions s WHERE " + where + " GROUP BY city", args)}
-                    for r in rows:
-                        r["country"] = extra.get(r["value"])
-            else:
-                raise ApiError(400, "unknown dimension %r" % dim)
+            result = breakdown(conn, q, dim, dim2, sort=sort, desc=desc, limit=limit, offset=offset, search=search,
+                               values_in=values_in, goal=goal)
+            cq = None if public else q.comparison()
+            if cq is not None:
+                compare_rows(conn, q, cq, result, dim, dim2, goal, search=search, values_in=values_in)
         finally:
             conn.close()
         if public:
             # Rows of one or two visitors are not shown publicly: a page only one person saw may be a reset link
             # with its token in the path, or tell what that person did.
-            rows = [{k: v for k, v in r.items() if k in ("value", "visitors", "pageviews", "country")} for r in rows
-                    if (r.get("visitors") or 0) >= PUBLIC_MIN_VISITORS]
-        return {"dim": dim, "rows": rows, "from": q.start, "to": q.end}
+            result["rows"] = [{k: v for k, v in r.items() if k in ("value", "visitors", "pageviews", "country")}
+                              for r in result["rows"] if (r.get("visitors") or 0) >= PUBLIC_MIN_VISITORS]
+            for key in ("totals", "total_rows", "metrics"):
+                result.pop(key, None)
+        else:
+            result["columns"] = ([{"key": "value", "label": DIM_LABELS.get(dim, dim)}]
+                                 + ([{"key": "value2", "label": DIM_LABELS.get(dim2, dim2)}] if dim2 else [])
+                                 + [{"key": m, "label": METRIC_LABELS.get(m, m)} for m in result["metrics"]])
+        result.update({"from": q.start, "to": q.end})
+        return result
+
+    def ep_breakdown_series(self, params: Dict[str, str], public: bool) -> Any:
+        """One metric over time for a few values of a dimension (values: a JSON list of up to 10)."""
+        q = self.q(params, public)
+        values = _json_or(params.get("values"), None)
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise ApiError(400, "values must be a JSON list of texts")
+        interval = interval_for(q, params.get("interval"))
+        conn = self.derived()
+        try:
+            out = value_series(conn, q, params.get("dim", "source"), values[:10], params.get("metric", ""), interval)
+        finally:
+            conn.close()
+        out["interval"] = interval
+        return out
+
+    def ep_goals(self, params: Dict[str, str], public: bool) -> Any:
+        """Each goal's conversions (visits that completed it), converted visitors and rate, with a comparison."""
+        q = self.q(params, public)
+        cq = q.comparison()
+        goals = list(q.goals.values())
+        conn = self.derived()
+        try:
+            base = period_totals(conn, q)
+            base_cmp = period_totals(conn, cq) if cq else None
+            rows = []
+            for g in goals:
+                row = dict(g, **self._goal_stats(conn, q, g, base))
+                if cq:
+                    row["cmp"] = self._goal_stats(conn, cq, g, base_cmp)
+                rows.append(row)
+            selected = q.goal() or (goals[0] if goals else None)
+            interval = interval_for(q, params.get("interval"))
+            trend = time_series(conn, q, interval, selected) if selected else []
+            trend_cmp = time_series(conn, cq, interval, selected) if selected and cq else None
+        finally:
+            conn.close()
+        out: Dict[str, Any] = {"goals": rows, "sessions": base["sessions"], "interval": interval,
+                               "selected": selected["id"] if selected else None, "series": trend}
+        if cq:
+            out["compare"] = {"from": cq.start, "to": cq.end, "sessions": base_cmp["sessions"], "series": trend_cmp}
+        return out
+
+    @staticmethod
+    def _goal_stats(conn: sqlite3.Connection, q: Query, goal: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any]:
+        """Visits that completed the goal, their visitors and rate, and the summed value of matching events."""
+        where, args = q.session_where("s")
+        gargs: List[Any] = []
+        cond = goal_condition(goal, gargs)
+        r = conn.execute("SELECT COUNT(*) AS conversions, COUNT(DISTINCT s.visitor_key) AS visitors FROM sessions s "
+                         "WHERE " + where + " AND " + cond, args + gargs).fetchone()
+        value = None
+        if goal["type"] == "event":
+            value = conn.execute("SELECT SUM(e.value) FROM events e CROSS JOIN sessions s ON s.session_key = e.session_key "
+                                 "WHERE e.site_id = ? AND e.day BETWEEN ? AND ? AND e.name GLOB ? AND " + where,
+                                 [q.site_id, q.start, q.end, glob_literal(goal["match"])] + args).fetchone()[0]
+        sessions = base["sessions"] or 0
+        return {"conversions": r["conversions"], "visitors": r["visitors"], "value": value,
+                "conversion_rate": round(r["conversions"] / sessions, 4) if sessions else None}
+
+    def ep_annotations(self, params: Dict[str, str], public: bool) -> Any:
+        q = self.q(params, public)
+        return {"annotations": WebDB(self.cfg.data_dir).annotations(q.site_id, q.start, q.end)}
+
+    def ep_segments(self, params: Dict[str, str], public: bool) -> Any:
+        site = params.get("site")
+        return {"segments": WebDB(self.cfg.data_dir).segments(site)}
+
+    def ep_export_catalog(self, params: Dict[str, str], public: bool) -> Any:
+        """What each raw dataset holds (description, columns) and how many rows it has for this site and period."""
+        from .maintenance import EXPORT_INFO, EXPORTS, export_args
+        q = self.q(params, public)
+        out = []
+        conns: Dict[str, Optional[sqlite3.Connection]] = {}
+        try:
+            for key, info in EXPORT_INFO.items():
+                db = info["db"]
+                if db not in conns:
+                    conns[db] = self._conn(db)
+                conn = conns[db]
+                rows, columns = None, []
+                if conn is not None:
+                    try:
+                        args = export_args(key, q.site_id, q.start, q.end)
+                        rows = conn.execute(info["count"], args).fetchone()[0]
+                        columns = [d[0] for d in conn.execute("SELECT * FROM (%s) LIMIT 0" % EXPORTS[key][1], args).description]
+                    except sqlite3.Error:
+                        rows = None
+                out.append({"id": key, "label": info["label"], "description": info["description"],
+                            "columns": columns, "rows": rows, "utc_days": key in ("raw", "visitors")})
+        finally:
+            for c in conns.values():
+                if c is not None:
+                    c.close()
+        return {"datasets": out, "from": q.start, "to": q.end}
 
     def _pages(self, conn: sqlite3.Connection, q: Query, limit: int, by: str = "page") -> List[Dict[str, Any]]:
-        where, args = q.session_where("s")
-        col = "p.path" if by == "page" else "p.title"
-        return [dict(r) for r in conn.execute(
-            "SELECT COALESCE(" + col + ", '(none)') AS value, COUNT(DISTINCT s.visitor_key) AS visitors, COUNT(*) AS pageviews, "
-            "CAST(AVG(p.engaged_ms) AS INTEGER) AS avg_engaged, CAST(AVG(p.scroll_max) AS INTEGER) AS avg_scroll, "
-            "SUM(p.is_entry) AS entries, SUM(p.is_exit) AS exits, "
-            "SUM(CASE WHEN p.is_entry = 1 AND s.bounce = 1 THEN 1 ELSE 0 END) AS bounces, "
-            "CAST(AVG(p.duration_ms) AS INTEGER) AS avg_time FROM pageviews p CROSS JOIN sessions s ON s.session_key = p.session_key "
-            "WHERE p.site_id = ? AND p.day BETWEEN ? AND ? AND " + where + " GROUP BY 1 ORDER BY pageviews DESC LIMIT ?",
-            [q.site_id, q.start, q.end] + args + [limit])]
+        return breakdown(conn, q, by, limit=limit, with_totals=False)["rows"]
 
     def _events(self, conn: sqlite3.Connection, q: Query, limit: int) -> List[Dict[str, Any]]:
-        where, args = q.session_where("s")
-        return [dict(r) for r in conn.execute(
-            "SELECT COALESCE(e.name, '(none)') AS value, COUNT(*) AS count, COUNT(DISTINCT s.visitor_key) AS visitors, "
-            "COUNT(DISTINCT s.session_key) AS sessions, SUM(e.value) AS total_value FROM events e "
-            "JOIN sessions s ON s.session_key = e.session_key WHERE e.site_id = ? AND e.day BETWEEN ? AND ? AND " + where +
-            " GROUP BY 1 ORDER BY count DESC LIMIT ?", [q.site_id, q.start, q.end] + args + [limit])]
+        return breakdown(conn, q, "event", limit=limit, with_totals=False)["rows"]
 
     def ep_pages(self, params: Dict[str, str], public: bool) -> Any:
+        """Pages with their engagement (the breakdown of `page`, kept for older dashboards and scripts)."""
         q = self.q(params, public)
         conn = self.derived()
         try:
             rows = self._pages(conn, q, q.limit(100))
         finally:
             conn.close()
-        for r in rows:
-            r["exit_rate"] = round(r["exits"] / r["pageviews"], 4) if r["pageviews"] else None
-            r["bounce_rate"] = round(r["bounces"] / r["entries"], 4) if r["entries"] else None
         return {"rows": rows}
 
     def ep_not_found(self, params: Dict[str, str], public: bool) -> Any:
@@ -496,6 +510,21 @@ class Api:
         return {"name": name, "count": len(rows), "total_value": total_value,
                 "series": [{"t": d, "count": per_day.get(d, 0)} for d in _days(q.start, q.end)],
                 "props": {k: [{"value": v, "count": n} for v, n in c.most_common(20)] for k, c in props.items()}}
+
+    def ep_live(self, params: Dict[str, str], public: bool) -> Any:
+        """Visitors seen in the last 5 minutes (the dashboard's "now" indicator): one indexed count."""
+        site_id = params.get("site", "")
+        if self.cfg.site(site_id) is None:
+            raise ApiError(404, "unknown site")
+        ev = self._conn("events.db")
+        if ev is None:
+            return {"active": 0}
+        try:
+            n = ev.execute("SELECT COUNT(DISTINCT visitor_id) FROM raw_hits WHERE site_id = ? AND received_at > ? "
+                           "AND site_ok = 1", (site_id, int(time.time() * 1000) - 5 * 60000)).fetchone()[0]
+        finally:
+            ev.close()
+        return {"active": n}
 
     def ep_realtime(self, params: Dict[str, str], public: bool) -> Any:
         site_id = params.get("site", "")

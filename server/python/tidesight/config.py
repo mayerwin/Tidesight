@@ -13,10 +13,13 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+from . import properties
 
 try:  # Python 3.11+
     import tomllib as _toml_impl  # type: ignore
@@ -63,6 +66,9 @@ SERVER_DEFAULTS: Dict[str, Any] = {
     # and the secret could be downloaded): the collector refuses to run there unless this is true.
     "allow_data_in_web_root": False,
     "log_file": "",
+    # When set, `jobs.py cron` rewrites this file with the resolved configuration whenever it changes (properties
+    # added in the dashboard reach the PHP and Node connectors this way).
+    "resolved_config_file": "",
 }
 
 HEADERS_DEFAULTS: Dict[str, Any] = {
@@ -99,6 +105,9 @@ ENRICH_DEFAULTS: Dict[str, Any] = {
 
 DASHBOARD_DEFAULTS: Dict[str, Any] = {
     "users": {},
+    # Users who may add, change and delete properties in the dashboard; empty: every user.
+    "admins": [],
+    "session_days": 30,                # how long "keep me signed in" lasts
     "realtime_minutes": 30,
     # Origins (besides the sites' own) that replays and heatmap backgrounds may load images, styles and fonts
     # from, e.g. a CDN: ["https://cdn.example.net"]. Anything else stays blocked by the dashboard's CSP.
@@ -139,6 +148,9 @@ SITE_DEFAULTS: Dict[str, Any] = {
     "public": False,
     "public_metrics": ["visitors", "pageviews", "pages", "sources", "countries", "devices"],
     "share_token": "",
+    # Conversions: [{name = "Signup", type = "event", match = "signup"}, {name = "Thanks page", type = "page",
+    # match = "/thank-you*"}]; `match` is the event name or the page path, `*` matching anything.
+    "goals": [],
     # Stored hits per UTC day; beyond, the site's requests answer 429 until midnight UTC. Off by default: anyone
     # can send hits, so a flood could use the quota up and lock real visitors out (availability over storage).
     "max_hits_per_day": 0,
@@ -223,7 +235,7 @@ _CHOICES = {
 
 # List settings whose items must be strings.
 _STRING_LISTS = frozenset({"origins", "search_params", "redact_params", "redact_paths", "exclude_paths",
-                           "download_extensions", "public_metrics", "asset_origins", "rate_limit_proxies"})
+                           "download_extensions", "public_metrics", "asset_origins", "rate_limit_proxies", "admins"})
 
 
 class ConfigError(ValueError):
@@ -275,6 +287,33 @@ def normalize_origin(origin: str) -> str:
     return o
 
 
+def check_goals(value: Any, where: str) -> List[Dict[str, Any]]:
+    """A site's goals, normalized: [{id, name, type: event|page, match}]."""
+    if not isinstance(value, list):
+        raise ConfigError("%s.goals: expected a list" % where)
+    out: List[Dict[str, Any]] = []
+    for i, g in enumerate(value):
+        if not isinstance(g, dict):
+            raise ConfigError("%s.goals[%d]: expected a table with name, type and match" % (where, i))
+        name, kind, match = g.get("name"), g.get("type", "event"), g.get("match")
+        if not isinstance(name, str) or not name.strip() or len(name) > 100:
+            raise ConfigError("%s.goals[%d].name: a text of 1 to 100 characters" % (where, i))
+        if kind not in ("event", "page"):
+            raise ConfigError("%s.goals[%d].type: event or page" % (where, i))
+        if not isinstance(match, str) or not match.strip() or len(match) > 500:
+            raise ConfigError("%s.goals[%d].match: the event name or page path (1 to 500 characters)" % (where, i))
+        gid = g.get("id") if isinstance(g.get("id"), str) and re.match(r"^[a-z0-9-]{1,64}$", g.get("id")) else None
+        if not gid:
+            gid = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48] or "goal"
+        taken = {x["id"] for x in out}
+        base, n = gid, 2
+        while gid in taken:
+            gid = "%s-%d" % (base, n)
+            n += 1
+        out.append({"id": gid, "name": name.strip(), "type": kind, "match": match.strip()})
+    return out
+
+
 class SiteConfig:
     """Resolved configuration of one site."""
 
@@ -288,6 +327,13 @@ class SiteConfig:
         self.name = settings.get("name") or site_id
         self.timezone = settings["timezone"]
         self.origins = [normalize_origin(o) for o in settings.get("origins", [])]
+        self.managed = False  # defined in properties.json (editable in the dashboard), not in the config file
+
+    @property
+    def display_name(self) -> str:
+        """Its name, else the most precise domain that sends it data, else its id."""
+        from .properties import display_name
+        return display_name(self.id, self.settings.get("name"), self.origins)
 
     def origin_allowed(self, origin: Optional[str]) -> bool:
         """True when the origin is allowed, or when the site lists no origins."""
@@ -316,7 +362,7 @@ class SiteConfig:
 class Config:
     """The whole resolved configuration."""
 
-    def __init__(self, raw: Dict[str, Any], path: Optional[str] = None) -> None:
+    def __init__(self, raw: Dict[str, Any], path: Optional[str] = None, load_properties: bool = True) -> None:
         self.path = path
         self.raw = raw
         self.warnings: List[str] = []
@@ -347,7 +393,7 @@ class Config:
         self.data_dir = resolve(self.server["data_dir"] or ("data" if path else "~/tidesight-data"))
         self.server["data_dir"] = self.data_dir
         for section, key in (("server", "static_dir"), ("server", "dashboard_dir"), ("server", "log_file"),
-                             ("enrich", "geo_dir"), ("enrich", "bot_list")):
+                             ("server", "resolved_config_file"), ("enrich", "geo_dir"), ("enrich", "bot_list")):
             values = getattr(self, section)
             if values[key]:
                 values[key] = resolve(values[key])
@@ -365,6 +411,19 @@ class Config:
             if not isinstance(table, dict):
                 raise ConfigError("[sites.%s] must be a table" % site_id)
             self.sites[site_id] = self._build_site(site_id, table)
+        # Properties added in the dashboard (data_dir/properties.json); the configuration file's sites win.
+        self.managed_tables = properties.load_tables(self.data_dir) if load_properties else {}
+        for site_id, table in self.managed_tables.items():
+            if site_id in self.sites:
+                self.warnings.append("properties.json: %r is defined in the configuration file (ignored)" % site_id)
+                continue
+            try:
+                site = self._build_site(site_id, table)
+            except ConfigError as exc:
+                self.warnings.append("properties.json: %s (ignored)" % exc)
+                continue
+            site.managed = True
+            self.sites[site_id] = site
         self._default_site = self._build_site("", {})
         self._secret: Optional[str] = None
 
@@ -408,6 +467,8 @@ class Config:
                                       % (where, key, type(SITE_DEFAULTS[key]).__name__, value))
                 if key in _STRING_LISTS and not all(isinstance(v, str) for v in value):
                     raise ConfigError("%s.%s: expected a list of strings, got %r" % (where, key, value))
+                if key == "goals":
+                    value = check_goals(value, where)
                 choices = _CHOICES.get(("site", key))
                 if choices and value not in choices:
                     raise ConfigError("%s.%s: must be one of %s" % (where, key, ", ".join(choices)))
@@ -610,26 +671,39 @@ class ConfigHolder:
         self._interval = check_interval
         self._static = config is not None and path is None
 
-    def _stat(self) -> Optional[float]:
+    def _stat(self) -> Tuple[Optional[float], Optional[float]]:
+        """Modification times of the configuration file and of properties.json (both are watched)."""
         try:
-            return os.stat(self._path).st_mtime if self._path else None
+            main = os.stat(self._path).st_mtime if self._path else None
         except OSError:
-            return None
+            main = None
+        return main, properties.mtime(self._config.data_dir)
+
+    def _rebuild(self) -> Config:
+        if self._static or not self._path:  # a configuration given as an object: rebuild it from its tables
+            return Config(self._config.raw, self._config.path)
+        return load(self._path)
+
+    def reload(self) -> Config:
+        """Reload now (after the dashboard changed a property)."""
+        with self._lock:
+            self._config = self._rebuild()
+            self._mtime = self._stat()
+            self._checked = time.monotonic()
+        return self._config
 
     def get(self) -> Config:
-        if self._static or not self._path:
-            return self._config
         now = time.monotonic()
         if now - self._checked < self._interval:
             return self._config
         with self._lock:
             self._checked = now
             mtime = self._stat()
-            if mtime is not None and mtime != self._mtime:
+            if mtime != self._mtime:
                 try:
-                    self._config = load(self._path)
+                    self._config = self._rebuild()
                     self._mtime = mtime
-                    log.info("config reloaded from %s", self._path)
+                    log.info("config reloaded")
                 except Exception as exc:  # keep serving with the previous config
                     log.error("config reload failed, keeping the previous one: %s", exc)
                     self._mtime = mtime

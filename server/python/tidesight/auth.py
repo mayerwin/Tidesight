@@ -1,7 +1,8 @@
-"""Password hashing and HTTP Basic authentication helpers (standard library only).
+"""Password hashing, sign-in checks and their throttling (standard library only).
 
 Hashes look like ``pbkdf2_sha256$<iterations>$<salt>$<hash>`` (base64 salt and hash),
-created with ``python -m tidesight.jobs hash-password``.
+created with ``python -m tidesight.jobs hash-password``. The dashboard signs in with a form (a session cookie,
+see wsgi.py and webdb.py); scripts may send HTTP Basic credentials with each request.
 """
 
 from __future__ import annotations
@@ -53,6 +54,11 @@ def parse_basic(header: Optional[str]) -> Optional[Tuple[str, str]]:
     return user, password
 
 
+def password_tag(encoded: Optional[str]) -> str:
+    """A short digest of a user's password hash: a login session is valid only while the password is unchanged."""
+    return hashlib.sha256(("tidesight-session\0%s" % (encoded or "")).encode("utf-8")).hexdigest()[:24]
+
+
 class Throttle:
     """Failed attempts per client, in memory (per process).
 
@@ -98,8 +104,41 @@ def _dummy_hash() -> str:
     return _DUMMY_HASH[0]
 
 
+class SharedThrottle:
+    """A Throttle kept in memory and in web.db at once: blocked when either is. In memory, it costs nothing under
+    Passenger; in web.db, it holds across processes (CGI starts one per request) and restarts."""
+
+    def __init__(self, memory: Throttle, data_dir: str) -> None:
+        from .webdb import WebDB
+        self.memory = memory
+        self.web = WebDB(data_dir)
+        self.max_failures = memory.max_failures
+        self.window = memory.window
+
+    def blocked(self, client: str) -> bool:
+        if self.memory.blocked(client):
+            return True
+        try:
+            return self.web.throttle_blocked(client, self.max_failures, self.window)
+        except Exception:  # web.db unavailable: the in-memory count still applies
+            return False
+
+    def failed(self, client: str) -> None:
+        self.memory.failed(client)
+        try:
+            self.web.throttle_failed(client, self.window)
+        except Exception:
+            pass
+
+    def reset(self, client: str) -> None:
+        try:
+            self.web.throttle_reset(client)
+        except Exception:
+            pass
+
+
 class Authenticator:
-    """Checks Basic credentials against [dashboard] users.
+    """Checks credentials against [dashboard] users.
 
     Successful checks are cached (PBKDF2 costs a few hundred milliseconds of CPU, and the dashboard sends the
     credentials with every request). Uncached checks run one at a time per process: concurrent requests with
@@ -121,11 +160,16 @@ class Authenticator:
         return bool(encoded) and hmac.compare_digest(self._ok.get(user, ""), token)
 
     def verify(self, header: Optional[str], client: str = "-") -> Tuple[Optional[str], str]:
-        """(user or None, "ok" | "denied" | "throttled")."""
+        """(user or None, "ok" | "denied" | "throttled") for an Authorization: Basic header."""
         creds = parse_basic(header)
         if creds is None:
             return None, "denied"
-        user, password = creds
+        return self.login(creds[0], creds[1], client)
+
+    def login(self, user: str, password: str, client: str = "-") -> Tuple[Optional[str], str]:
+        """(user or None, "ok" | "denied" | "throttled") for a user name and password."""
+        if not isinstance(user, str) or not isinstance(password, str) or len(user) > 200 or len(password) > 1024:
+            return None, "denied"
         encoded = self.users.get(user)
         token = hashlib.sha256(("%s\0%s\0%s" % (user, password, encoded or "")).encode("utf-8")).hexdigest()
         if self._cached(user, token, encoded):

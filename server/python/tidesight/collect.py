@@ -270,7 +270,9 @@ def extract_headers(environ: Dict[str, Any], cfg: Config) -> Tuple[Dict[str, str
             kept: Dict[str, str] = {}
             others = 0
             for cname, cval in parse_cookie_header(value):
-                if len(kept) < MAX_KEPT_COOKIES and any(fnmatch.fnmatchcase(cname, p) for p in cookie_patterns):
+                # The dashboard's sign-in cookie (ts_login, wsgi.py) is never kept, whatever cookie_names says.
+                if cname != "ts_login" and len(kept) < MAX_KEPT_COOKIES and \
+                        any(fnmatch.fnmatchcase(cname, p) for p in cookie_patterns):
                     # A comma is not a cookie character: past it is another Cookie header the server merged in.
                     kept[cname] = cval.split(",", 1)[0].rstrip()[:512]
                 else:

@@ -645,7 +645,8 @@ final class Collector
                 foreach (self::parseCookieHeader($value) as $pair) {
                     $cname = Util::latin1($pair[0]);
                     $match = false;
-                    if (count($kept) < self::MAX_KEPT_COOKIES) { // further matching cookies count as others
+                    // The dashboard's sign-in cookie (ts_login) is never kept, whatever cookie_names says.
+                    if ($cname !== 'ts_login' && count($kept) < self::MAX_KEPT_COOKIES) { // further matching cookies count as others
                         foreach ($cookiePatterns as $p) {
                             if (Util::fnmatch($cname, (string) $p)) {
                                 $match = true;

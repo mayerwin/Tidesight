@@ -30,11 +30,12 @@ rate_limit_ipv6_prefix = 64              # IPv6 clients are grouped by this pref
 min_free_disk_mb = 512                   # below this free space in data_dir, writes answer 503
 cors = "reflect"                         # "reflect" any Origin on ingest endpoints, or "allowed" origins only
 accept_ch = true                         # send Accept-CH so browsers supply Client Hints
-public_url = ""                          # e.g. "https://stats.example.com"; used in generated snippets
+public_url = ""                          # e.g. "https://stats.example.com/": the tracking code the dashboard shows uses it
 secret = ""                              # REQUIRED: long random string (cookieless-hash salts, share links)
 static_dir = ""                          # serve tracker/dashboard files from the app when no web server does
 store_raw_body = false                   # also keep the raw body of requests that parsed fine
 log_file = ""                            # error log; stderr when empty
+resolved_config_file = ""                # PHP/Node connectors: `jobs.py cron` keeps this resolved JSON up to date
 
 [headers]
 secret_patterns = ["*token*", "*key*", "*secret*", "*password*"]   # values replaced by "[redacted]"
@@ -62,9 +63,11 @@ bot_list = ""                            # optional path to crawler-user-agents.
 internal_ips = []                        # CIDRs flagged as internal traffic (e.g. your office)
 
 [dashboard]
-# Users for HTTP Basic auth. Create a hash with:
-#   python -m tidesight.jobs hash-password
+# Who may sign in (the dashboard's form; scripts may use HTTP Basic). Create a hash with:
+#   python -m tidesight.jobs hash-password --user admin
 users = {}                               # e.g. { admin = "pbkdf2_sha256$600000$...$..." }
+admins = []                              # who may add, change and delete properties; empty = every user
+session_days = 30                        # how long "Keep me signed in" lasts
 
 # Settings applied to every site. Any key below can be overridden per site.
 [defaults]
@@ -150,9 +153,12 @@ max_points = 3000                        # per page
 sample_rate = 0.01
 
 # One table per site. The table name is the site id used by the tracker (data-site="example").
+# Sites ("properties") can also be added in the dashboard (Properties > Add property): they are kept in
+# data_dir/properties.json, and the sites of this file stay read-only there.
 [sites.example]
 name = "Example"
 origins = ["https://example.com", "https://www.example.com"]
+goals = [{name = "Signup", type = "event", match = "signup"}, {name = "Thank you page", type = "page", match = "/thank-you*"}]
 timezone = "Pacific/Tahiti"
 features.replay = false
 replay.sample_rate = 0.1

@@ -629,7 +629,8 @@ export function createCollector({
         const kept = new Map();
         let others = 0;
         for (const [cname, cval] of parseCookieHeader(value)) {
-          if (kept.size < MAX_KEPT_COOKIES && rules.cookies.some((re) => re.test(cname))) {
+          // The dashboard's sign-in cookie (ts_login) is never kept, whatever cookie_names says.
+          if (cname !== "ts_login" && kept.size < MAX_KEPT_COOKIES && rules.cookies.some((re) => re.test(cname))) {
             // A comma is not a cookie character: past it is another Cookie header the server merged in.
             kept.set(cname, pySlice(pyRstrip(cval.split(",", 1)[0]), 512));
           } else {

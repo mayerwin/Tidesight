@@ -529,6 +529,8 @@ features.replay = true
 replay.sample_rate = 0.05
 features.mouse_moves = true
 features.dom_snapshots = true
+goals = [{name = "Signup", type = "event", match = "signup"}, {name = "Purchase", type = "event", match = "purchase"},
+         {name = "Saw pricing", type = "page", match = "/pricing*"}]
 """ % ORIGIN)
     cfg = load(cfg_path)
     data_dir = cfg.data_dir

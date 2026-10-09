@@ -1,4 +1,4 @@
-"""Maintenance jobs: backup, vacuum, privacy clean-up, archiving, export.
+"""Maintenance jobs: backup, vacuum, privacy clean-up, archiving, export, deleting a site's data.
 
 Every destructive job is a dry run unless told to apply, and privacy-clean
 takes a backup first. See docs/privacy.md.
@@ -129,16 +129,25 @@ BATCH = 2000  # rows per write transaction: the collector waits for the database
 
 
 def _delete_in_batches(conn: sqlite3.Connection, table: str, where: str, args: Tuple = ()) -> int:
-    """DELETE in short transactions, so the collector is never locked out for long (it writes between them)."""
+    """DELETE in short transactions, so the collector is never locked out for long (it writes between them).
+    A table WITHOUT ROWID (small counters) is cleared in one statement."""
     total = 0
     while True:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            cur = conn.execute("DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE %s LIMIT %d)"
-                               % (table, table, where, BATCH), args)
+            try:
+                cur = conn.execute("DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE %s LIMIT %d)"
+                                   % (table, table, where, BATCH), args)
+            except sqlite3.OperationalError as exc:
+                if "rowid" not in str(exc):
+                    raise
+                cur = conn.execute("DELETE FROM %s WHERE %s" % (table, where), args)
+                conn.execute("COMMIT")
+                return total + cur.rowcount
             conn.execute("COMMIT")
         except BaseException:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
         total += cur.rowcount
         if cur.rowcount < BATCH:
@@ -308,6 +317,89 @@ def _retention(cfg: Config, econn: Optional[sqlite3.Connection], rconn: Optional
 
 
 # ---------------------------------------------------------------------------
+# Deleting a site's data (a property deleted in the dashboard, or `jobs.py purge-site`)
+# ---------------------------------------------------------------------------
+
+def purge_site(cfg: Config, site_id: str, apply: bool = False) -> Dict[str, Any]:
+    """Delete everything stored for one site: raw requests and hits (archives included), recordings, derived
+    data and the dashboard's segments and notes. Short transactions: the collector keeps writing meanwhile.
+    Backups made before keep the data until they are rotated out."""
+    from .enrich.db import JobLock
+    from .webdb import WebDB
+    if not site_id:
+        raise ValueError("purge_site needs a site id")
+    out: Dict[str, Any] = {"site": site_id, "applied": apply, "rows": {}}
+    rows = out["rows"]
+
+    def count(conn: sqlite3.Connection, table: str) -> int:
+        return conn.execute("SELECT COUNT(*) FROM %s WHERE site_id = ?" % table, (site_id,)).fetchone()[0]
+
+    for path in raw_paths(cfg.data_dir):
+        conn = _raw_db(cfg, path)
+        try:
+            name = os.path.relpath(path, cfg.data_dir)
+            for table in ("raw_hits", "raw_requests", "counters"):
+                n = count(conn, table)
+                if apply and n:
+                    _delete_in_batches(conn, table, "site_id = ?", (site_id,))
+                rows["%s:%s" % (name, table)] = n
+        finally:
+            conn.close()
+    rconn = _db(cfg, "replay.db")
+    if rconn is not None:
+        try:
+            n = count(rconn, "chunks")
+            if apply and n:
+                _delete_in_batches(rconn, "chunks", "site_id = ?", (site_id,))
+            rows["replay.db:chunks"] = n
+        finally:
+            rconn.close()
+    dconn = _db(cfg, "derived.db")
+    if dconn is not None:
+        lock = JobLock(cfg.data_dir)
+        if apply and not lock.acquire():  # enrichment is running: try again at the next run
+            dconn.close()
+            raise RuntimeError("enrichment is running")
+        try:
+            tables = [r[0] for r in dconn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+            for table in tables:
+                cols = [r[1] for r in dconn.execute("PRAGMA table_info(%s)" % table)]
+                if "site_id" not in cols:
+                    continue
+                n = count(dconn, table)
+                if apply and n:
+                    _delete_in_batches(dconn, table, "site_id = ?", (site_id,))
+                if n:
+                    rows["derived.db:" + table] = n
+        finally:
+            if apply:
+                lock.release()
+            dconn.close()
+    if apply:
+        WebDB(cfg.data_dir).delete_site(site_id)
+    return out
+
+
+def purge_queued(cfg: Config) -> Dict[str, Any]:
+    """Carry out the deletions the dashboard asked for (sites no longer configured only)."""
+    from .webdb import WebDB
+    web = WebDB(cfg.data_dir)
+    done: Dict[str, Any] = {}
+    for item in web.purges():
+        sid = item["site_id"]
+        if cfg.site(sid) is not None:  # configured again since: keep its data
+            web.purge_done(sid)
+            done[sid] = "skipped: the site is configured"
+            continue
+        try:
+            done[sid] = purge_site(cfg, sid, apply=True)
+            web.purge_done(sid)
+        except (RuntimeError, sqlite3.Error) as exc:
+            done[sid] = "postponed: %s" % exc
+    return done
+
+
+# ---------------------------------------------------------------------------
 # Archiving: old raw data into yearly databases
 # ---------------------------------------------------------------------------
 
@@ -368,6 +460,8 @@ def archive(cfg: Config, before: str, apply: bool = False, batch: int = 5000) ->
 # Export
 # ---------------------------------------------------------------------------
 
+# Datasets: (database, query). Derived rows are selected by the site's local day; raw rows and visitors by
+# server time, between the UTC midnights that start the first day and end the last (index-friendly bounds).
 EXPORTS = {
     "sessions": ("derived.db", "SELECT * FROM sessions WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY started_at"),
     "pageviews": ("derived.db", "SELECT * FROM pageviews WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY ts"),
@@ -377,12 +471,65 @@ EXPORTS = {
     "clicks": ("derived.db", "SELECT * FROM clicks WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY ts"),
     "forms": ("derived.db", "SELECT * FROM forms WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY ts"),
     "daily": ("derived.db", "SELECT * FROM daily WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY day"),
-    "visitors": ("derived.db", "SELECT * FROM visitors WHERE site_id = ? AND date(last_seen / 1000, 'unixepoch') "
-                               "BETWEEN ? AND ? ORDER BY last_seen"),
+    "visitors": ("derived.db", "SELECT * FROM visitors WHERE site_id = ? AND last_seen >= ? AND last_seen < ? "
+                               "ORDER BY last_seen"),
     "raw": ("events.db", "SELECT h.*, r.ip, r.headers, r.envelope, r.site_status, r.endpoint FROM raw_hits h "
-                         "JOIN raw_requests r ON r.id = h.request_id WHERE h.site_id = ? AND "
-                         "date(h.received_at / 1000, 'unixepoch') BETWEEN ? AND ? ORDER BY h.id"),
+                         "JOIN raw_requests r ON r.id = h.request_id WHERE h.site_id = ? AND h.received_at >= ? "
+                         "AND h.received_at < ? ORDER BY h.id"),
 }
+_MS_BOUNDS = {"visitors", "raw"}
+
+# What the dashboard's export dialog says about each dataset, and how it counts its rows.
+EXPORT_INFO: Dict[str, Dict[str, str]] = {
+    "sessions": {"label": "Visits", "db": "derived.db",
+                 "description": "One row per visit: start and end, source, medium, campaign, channel, landing and exit "
+                                "page, location, device, browser, pageviews, duration, engaged time, and flags (bot, "
+                                "internal, new visitor).",
+                 "count": "SELECT COUNT(*) FROM sessions WHERE site_id = ? AND day BETWEEN ? AND ?"},
+    "pageviews": {"label": "Pageviews", "db": "derived.db",
+                  "description": "One row per page viewed: URL, path, title, referrer, time on page, engaged time, "
+                                 "scroll depth, and whether it started or ended the visit.",
+                  "count": "SELECT COUNT(*) FROM pageviews WHERE site_id = ? AND day BETWEEN ? AND ?"},
+    "events": {"label": "Custom events", "db": "derived.db",
+               "description": "One row per custom event: name, properties (JSON), value and page.",
+               "count": "SELECT COUNT(*) FROM events WHERE site_id = ? AND day BETWEEN ? AND ?"},
+    "errors": {"label": "JavaScript errors", "db": "derived.db",
+               "description": "One row per error: message, source file, line, stack, page.",
+               "count": "SELECT COUNT(*) FROM errors WHERE site_id = ? AND day BETWEEN ? AND ?"},
+    "vitals": {"label": "Web Vitals", "db": "derived.db",
+               "description": "One row per measurement: LCP, INP, CLS, FCP or TTFB, its value, rating and page.",
+               "count": "SELECT COUNT(*) FROM vitals WHERE site_id = ? AND day BETWEEN ? AND ?"},
+    "clicks": {"label": "Clicks", "db": "derived.db",
+               "description": "One row per recorded click: element, text, link, position, and rage, dead or error "
+                              "click flags.",
+               "count": "SELECT COUNT(*) FROM clicks WHERE site_id = ? AND day BETWEEN ? AND ?"},
+    "forms": {"label": "Form interactions", "db": "derived.db",
+              "description": "One row per form or field interaction: start, field focus and time, submit, abandon "
+                             "(never what visitors typed).",
+              "count": "SELECT COUNT(*) FROM forms WHERE site_id = ? AND day BETWEEN ? AND ?"},
+    "daily": {"label": "Daily totals", "db": "derived.db",
+              "description": "One row per day: visitors, new visitors, visits, pageviews, events, bounces, engaged "
+                             "visits and time.",
+              "count": "SELECT COUNT(*) FROM daily WHERE site_id = ? AND day BETWEEN ? AND ?"},
+    "visitors": {"label": "Visitors", "db": "derived.db",
+                 "description": "One row per visitor seen in the period (last visit, UTC days): first and last seen, "
+                                "visits, pageviews, engaged time, user id and linked browser ids.",
+                 "count": "SELECT COUNT(*) FROM visitors WHERE site_id = ? AND last_seen >= ? AND last_seen < ?"},
+    "raw": {"label": "Raw hits", "db": "events.db",
+            "description": "Every hit exactly as received (UTC days), with its request's IP address, headers and "
+                           "envelope. Unfiltered and large: for audits, re-processing or moving to another tool.",
+            "count": "SELECT COUNT(*) FROM raw_hits WHERE site_id = ? AND received_at >= ? AND received_at < ?"},
+}
+
+
+def export_args(what: str, site: str, start: Optional[str], end: Optional[str]) -> Tuple[Any, ...]:
+    """The query arguments of a dataset for a site and a range of days (both bounds included)."""
+    start, end = start or "0000-01-01", end or "9999-12-31"
+    if what in _MS_BOUNDS:
+        lo = _utc_day_start(start) if start > "0001" else 0
+        hi = _utc_day_start(end) + DAY_MS if end < "9999" else 2 ** 62
+        return site, lo, hi
+    return site, start, end
 
 
 def iter_export(cfg: Config, site: str, what: str, start: Optional[str], end: Optional[str]) -> Tuple[List[str], Iterable[Tuple]]:
@@ -390,7 +537,7 @@ def iter_export(cfg: Config, site: str, what: str, start: Optional[str], end: Op
     conn = _db(cfg, db, readonly=True)
     if conn is None:
         return [], iter(())
-    cur = conn.execute(sql, (site, start or "0000-00-00", end or "9999-99-99"))
+    cur = conn.execute(sql, export_args(what, site, start, end))
     cols = [d[0] for d in cur.description]
 
     def rows() -> Iterable[Tuple]:

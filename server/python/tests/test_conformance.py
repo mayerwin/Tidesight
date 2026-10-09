@@ -685,6 +685,14 @@ def test_merged_cookie_headers_never_leak_into_a_kept_value(connector):
     assert cookies["kept"] == {"ts_vid": vid + ".1", "ts_ses": "s.1"}
 
 
+def test_the_dashboard_sign_in_cookie_is_never_stored(connector):
+    vid = _vid()
+    connector.post(_env(vid), headers={"Cookie": "ts_vid=%s.1; ts_login=SIGN-IN-TOKEN" % vid})
+    stored = connector.request_for(vid)
+    assert json.loads(stored["cookies"]) == {"kept": {"ts_vid": vid + ".1"}, "others": 1}
+    assert "SIGN-IN-TOKEN" not in json.dumps(stored, default=str)
+
+
 def test_privacy_hash_matches_python(connector):
     vid = _vid()
     assert connector.post(_env(vid, site="hashed"))[0] == 204
