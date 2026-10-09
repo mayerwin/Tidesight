@@ -301,7 +301,8 @@ table.data td.trunc { max-width: 360px; overflow: hidden; text-overflow: ellipsi
 .viewer canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
 .player-wrap { display: flex; justify-content: center; }
 .timeline { list-style: none; margin: 0; padding: 0; font-size: 13px; }
-.timeline li { display: grid; grid-template-columns: 70px 22px 1fr; gap: 6px; padding: 5px 0; border-bottom: 1px dashed transparent; }
+.timeline li { display: grid; grid-template-columns: 70px 22px minmax(0, 1fr); gap: 6px; padding: 5px 0; }
+.timeline li > span:last-child { overflow-wrap: anywhere; }
 .timeline li .t { color: var(--muted); font-variant-numeric: tabular-nums; }
 .timeline li .k { width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--axis); }
 .timeline li.pageview .k { background: var(--s1); } .timeline li.event .k { background: var(--s3); }

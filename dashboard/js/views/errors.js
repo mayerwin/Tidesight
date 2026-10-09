@@ -10,7 +10,10 @@ export async function render(root, ctx) {
   table(c.body, [
     { key: 'msg', label: 'Message', trunc: true, render: (r) => r.msg || r.res || '(no message)' },
     { key: 'kind', label: 'Kind' },
-    { key: 'src', label: 'Source', trunc: true, render: (r) => (r.src ? r.src.replace(/^https?:\/\/[^/]+/, '') + (r.line ? ':' + r.line : '') : '—') },
+    { key: 'src', label: 'Source', trunc: true, render: (r) => {
+      const where = r.src || r.res;
+      return where ? where.replace(/^https?:\/\/[^/]+/, '') + (r.line ? ':' + r.line : '') : '—';
+    } },
     { key: 'occurrences', label: 'Occurrences', num: true, format: fmt.num },
     { key: 'sessions', label: 'Visits', num: true, format: fmt.num },
     { key: 'last_seen', label: 'Last seen', num: true, format: (v) => fmt.when(v) },

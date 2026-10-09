@@ -27,7 +27,13 @@ function describe(h) {
     case 'form': return 'form ' + (d.a || '') + ' ' + (d.f || '') + (d.fld ? ' · ' + d.fld : '');
     case 'identify': return 'identified as ' + (d.uid || '');
     case 'search': return 'searched “' + (d.q || '') + '”';
-    default: return JSON.stringify(d).slice(0, 200);
+    case 'perf': return 'server ' + fmt.ms(d.ttfb) + ' · DOM ready ' + fmt.ms(d.dcl) + ' · loaded ' + fmt.ms(d.load);
+    case 'fp': return 'device fingerprint ' + (d.h || '') + (d.bot && d.bot.wd ? ' · automated browser' : '');
+    case 'status': return 'page status ' + (d.st || '');
+    default: {
+      const rest = Object.fromEntries(Object.entries(d).filter(([k]) => !['t', 'id', 'ts', 'pid', 'url', 'sid', 'vid', 'ns'].includes(k)));
+      return JSON.stringify(rest).slice(0, 160);
+    }
   }
 }
 
