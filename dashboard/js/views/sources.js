@@ -1,12 +1,10 @@
-// Sources: channels (GA4 default channel group), source categories, sources, referrers, campaigns.
-import { breakdownCard } from '../widgets.js';
+// Acquisition: channels (GA4's default channel group), sources, mediums, campaigns, referrers.
+import { reportPage } from './report-page.js';
 
-export async function render(root, ctx) {
-  root.appendChild(breakdownCard(ctx, { title: 'Channels', span: 6, tabs: [{ dim: 'channel', label: 'Channel' }] }));
-  root.appendChild(breakdownCard(ctx, { title: 'Source categories', span: 6, tabs: [{ dim: 'category', label: 'Category' }] }));
-  root.appendChild(breakdownCard(ctx, { title: 'Sources', span: 6, limit: 15, tabs: [
-    { dim: 'source', label: 'Source' }, { dim: 'medium', label: 'Medium' }] }));
-  root.appendChild(breakdownCard(ctx, { title: 'Referrers', span: 6, limit: 15, tabs: [{ dim: 'referrer', label: 'Referrer' }] }));
-  root.appendChild(breakdownCard(ctx, { title: 'Campaigns', span: 12, limit: 15, tabs: [
-    { dim: 'campaign', label: 'Campaign' }, { dim: 'term', label: 'Term' }, { dim: 'content', label: 'Content' }] }));
+export function render(root, ctx) {
+  reportPage(root, ctx, { title: 'Acquisition', tabs: [
+    { dim: 'channel', label: 'Channels' }, { dim: 'source', label: 'Sources' }, { dim: 'medium', label: 'Mediums' },
+    { dim: 'campaign', label: 'Campaigns' }, { dim: 'term', label: 'Terms' }, { dim: 'content', label: 'Ad content' },
+    { dim: 'referrer', label: 'Referrers' }, { dim: 'category', label: 'Categories' }],
+  emptyHint: 'No visits in this period. Campaigns come from utm_ parameters in the landing URL.' });
 }

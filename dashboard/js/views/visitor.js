@@ -27,6 +27,6 @@ export async function render(root, ctx) {
     { key: 'pageviews', label: 'Pages', num: true }, { key: 'duration_ms', label: 'Duration', num: true, format: fmt.duration },
     { key: 'channel', label: 'Channel' }, { key: 'city', label: 'Location', render: (r) => [r.city, labelFor('country', r.country)].filter(Boolean).join(', ') },
     { key: 'browser', label: 'Browser' },
-  ], res.sessions, { sortKey: null, onRowClick: (r) => ctx.go('session', { key: r.session_key }) });
+  ], res.sessions, { sortKey: null, exportName: 'visitor-visits', onRowClick: (r) => ctx.go('session', { key: r.session_key }) });
   root.append(info.root, ids.root, visits.root);
 }

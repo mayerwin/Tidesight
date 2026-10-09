@@ -34,7 +34,7 @@ export async function render(root, ctx) {
         { key: 'type', label: 'Type' },
         { key: 'name', label: 'Name', format: (v) => v || '' },
         { key: 'path', label: 'Page', trunc: true },
-      ], d.recent, { sortKey: null, empty: 'Nothing in the last minutes' });
+      ], d.recent, { sortKey: null, exportName: ctx.site + '-latest-activity', empty: 'Nothing in the last minutes' });
     }
   };
   await draw();

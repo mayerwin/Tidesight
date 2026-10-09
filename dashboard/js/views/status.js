@@ -36,7 +36,7 @@ export async function render(root, ctx) {
     { key: 'site', label: 'Site', format: (v) => v || '(unknown or none)' },
     { key: 'name', label: 'Counter', format: (v) => LABELS[v] || v },
     { key: 'n', label: 'Count', num: true, format: fmt.num }
-  ], st.counters_today || [], { sortKey: 'n', empty: 'Nothing counted today.' });
+  ], st.counters_today || [], { sortKey: 'n', exportName: 'counters-today', empty: 'Nothing counted today.' });
   counters.body.appendChild(el('p', { class: 'note', text: 'Refused requests are counted, not stored: see "Limits and abuse protection" in docs/configuration.md.' }));
   root.append(files.root, enrich.root, flagged.root, counters.root);
 }

@@ -22,7 +22,7 @@ export async function render(root, ctx) {
     { key: 'signals', label: '', sortable: false, render: (r) => el('span', {}, ...[
       r.errors ? el('span', { class: 'badge', text: r.errors + ' errors' }) : null,
       r.rage_clicks ? el('span', { class: 'badge', text: r.rage_clicks + ' rage' }) : null].filter(Boolean)) },
-  ], res.rows, { sortKey: null, onRowClick: (r) => ctx.go('replays', { session: r.session_key }),
+  ], res.rows, { sortKey: null, exportName: ctx.site + '-recordings-' + ctx.from + '_' + ctx.to, onRowClick: (r) => ctx.go('replays', { session: r.session_key }),
     empty: 'No recorded visits in this period. Session replay is off by default: enable features.replay (and its sample_rate) for the site.' });
 }
 

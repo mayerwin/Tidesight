@@ -17,7 +17,7 @@ export async function render(root, ctx) {
     { key: 'occurrences', label: 'Occurrences', num: true, format: fmt.num },
     { key: 'sessions', label: 'Visits', num: true, format: fmt.num },
     { key: 'last_seen', label: 'Last seen', num: true, format: (v) => fmt.when(v) },
-  ], res.rows, { sortKey: 'occurrences', onRowClick: (r) => ctx.go('errors', { grp: r.grp }), empty: 'No errors in this period.' });
+  ], res.rows, { sortKey: 'occurrences', exportName: ctx.site + '-errors-' + ctx.from + '_' + ctx.to, onRowClick: (r) => ctx.go('errors', { grp: r.grp }), empty: 'No errors in this period.' });
   if (!grp) return;
   const occ = await ctx.api('errors', { grp });
   const d = card({ title: 'Occurrences', span: 12 });

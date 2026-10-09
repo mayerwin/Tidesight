@@ -9,7 +9,8 @@
     "build": "node build.mjs",
     "pretest": "node build.mjs",
     "test": "playwright test",
-    "test:headed": "playwright test --headed"
+    "test:headed": "playwright test --headed",
+    "test:dashboard": "playwright test -c playwright.dashboard.config.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",

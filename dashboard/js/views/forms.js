@@ -12,7 +12,7 @@ export async function render(root, ctx) {
     { key: 'submits', label: 'Submitted', num: true, format: fmt.num },
     { key: 'abandons', label: 'Abandoned', num: true, format: fmt.num },
     { key: 'conversion', label: 'Completion', num: true, format: (v) => fmt.pct(v, 1) },
-  ], res.rows, { sortKey: 'starts', empty: 'No form interactions in this period.' });
+  ], res.rows, { sortKey: 'starts', exportName: ctx.site + '-forms-' + ctx.from + '_' + ctx.to, empty: 'No form interactions in this period.' });
   for (const f of res.rows.slice(0, 6)) {
     const c = card({ title: 'Fields · ' + f.form, span: 6 });
     table(c.body, [
@@ -21,7 +21,7 @@ export async function render(root, ctx) {
       { key: 'median_ms', label: 'Median time', num: true, format: fmt.duration },
       { key: 'filled_rate', label: 'Filled', num: true, format: (v) => fmt.pct(v) },
       { key: 'abandoned_here', label: 'Left here', num: true, format: fmt.num },
-    ], f.fields, { sortKey: 'interactions' });
+    ], f.fields, { sortKey: 'interactions', exportName: ctx.site + '-form-' + f.form + '-fields' });
     root.appendChild(c.root);
   }
   if (!res.rows.length) overview.body.appendChild(el('p', { class: 'note', text: 'Form analytics needs the forms feature (on by default).' }));

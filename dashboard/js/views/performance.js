@@ -58,12 +58,12 @@ export async function render(root, ctx) {
   } else {
     trend.body.appendChild(el('div', { class: 'empty', text: 'No ' + metric + ' measurements in this period.' }));
   }
-  table(trend.alt, [{ key: 't', label: 'Day', render: (r) => fmt.day(r.t, true) }, { key: 'p75', label: 'p75', num: true, format: md.format }], series, { sortKey: null });
+  table(trend.alt, [{ key: 't', label: 'Day', render: (r) => fmt.day(r.t, true) }, { key: 'p75', label: 'p75', num: true, format: md.format }], series, { sortKey: null, exportName: ctx.site + '-' + metric + '-p75' });
 
   const pages = card({ title: 'Pages', span: 8 });
   root.appendChild(pages.root);
   table(pages.body, [{ key: 'path', label: 'Page', trunc: true }, { key: 'count', label: 'Loads', num: true, format: fmt.num },
-    ...METRICS.slice(0, 3).map((m) => ({ key: m.key, label: m.key, num: true, format: m.format }))], res.pages, { sortKey: 'count' });
+    ...METRICS.slice(0, 3).map((m) => ({ key: m.key, label: m.key, num: true, format: m.format }))], res.pages, { sortKey: 'count', exportName: ctx.site + '-vitals-by-page-' + ctx.from + '_' + ctx.to });
 
   const timing = card({ title: 'Navigation timing · median', span: 4 });
   root.appendChild(timing.root);
@@ -71,5 +71,5 @@ export async function render(root, ctx) {
     dcl: 'DOMContentLoaded', load: 'Load event', rt: 'Redirects' };
   const rows = Object.entries(names).filter(([k]) => res.timing[k]).map(([k, label]) => ({ label, median: res.timing[k].median, p75: res.timing[k].p75 }));
   table(timing.body, [{ key: 'label', label: 'Phase' }, { key: 'median', label: 'Median', num: true, format: fmt.ms }, { key: 'p75', label: 'p75', num: true, format: fmt.ms }],
-    rows, { sortKey: null, empty: 'No navigation timing yet.' });
+    rows, { sortKey: null, exportName: ctx.site + '-navigation-timing', empty: 'No navigation timing yet.' });
 }

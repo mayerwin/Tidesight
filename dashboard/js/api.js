@@ -1,4 +1,4 @@
-// API client. The base is /dashboard/api/ for the private dashboard and /share/<site>/api/ for public pages.
+// API client. The base is <dashboard>/api/ for the private dashboard and /share/<site>/api/ for public pages.
 const share = location.pathname.match(/^(.*\/share\/([^/]+))\/?/);
 export const PUBLIC = !!share;
 export const PUBLIC_SITE = share ? decodeURIComponent(share[2]) : null;
@@ -6,22 +6,47 @@ const base = share ? share[1] + '/api/' : new URL('api/', location.href.split('#
 const shareToken = new URLSearchParams(location.search).get('t');
 
 export class ApiError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, body) { super(message); this.status = status; this.body = body || null; }
 }
 
-export async function api(endpoint, params = {}) {
+// Fired when the API says the session ended (401): the shell shows the sign-in form.
+export const events = new EventTarget();
+
+function query(params) {
   const qs = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') qs.set(k, v);
-  const headers = { Accept: 'application/json' };
-  if (shareToken) headers['X-Share-Token'] = shareToken; // a header: kept out of server logs
-  const res = await fetch(base + endpoint + '?' + qs.toString(), { credentials: 'same-origin', headers });
-  let body = null;
-  try { body = await res.json(); } catch (e) { /* not JSON */ }
-  if (!res.ok) throw new ApiError(res.status, (body && body.error) || res.statusText);
-  return body;
+  for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== null && v !== '') qs.set(k, v);
+  return qs.toString();
 }
 
-export function exportUrl(params) {
-  const qs = new URLSearchParams(params);
-  return base + 'export?' + qs.toString();
+async function request(method, endpoint, params, body) {
+  const headers = { Accept: 'application/json', 'X-Tidesight': '1' };
+  if (shareToken) headers['X-Share-Token'] = shareToken; // a header: kept out of server logs
+  const init = { method, credentials: 'same-origin', headers };
+  if (body !== undefined) { headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
+  const qs = query(params);
+  const res = await fetch(base + endpoint + (qs ? '?' + qs : ''), init);
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* not JSON */ }
+  if (!res.ok) {
+    const err = new ApiError(res.status, (data && data.error) || res.statusText || 'Request failed', data);
+    if (res.status === 401 && endpoint !== 'login') events.dispatchEvent(new CustomEvent('signedout'));
+    throw err;
+  }
+  return data;
+}
+
+export const api = (endpoint, params = {}) => request('GET', endpoint, params);
+export const send = (method, endpoint, body = {}, params = {}) => request(method, endpoint, params, body);
+
+// A URL to download (report files, raw exports): plain navigation carries the session cookie.
+export function fileUrl(endpoint, params) {
+  return base + endpoint + '?' + query(params);
+}
+export function exportUrl(params) { return fileUrl('export', params); }
+
+// Where the tracker is served from: [server] public_url, else this dashboard's own host and folder.
+export function collectorBase(publicUrl) {
+  if (publicUrl) return publicUrl.replace(/\/+$/, '') + '/';
+  const path = location.pathname.replace(/\/dashboard\/.*$/, '/').replace(/\/share\/.*$/, '/');
+  return location.origin + path;
 }

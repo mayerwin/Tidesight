@@ -72,6 +72,6 @@ export async function render(root, ctx) {
     { key: 'seq', label: '#', num: true }, { key: 'path', label: 'Page', trunc: true }, { key: 'title', label: 'Title', trunc: true },
     { key: 'engaged_ms', label: 'Engaged', num: true, format: fmt.duration }, { key: 'scroll_max', label: 'Scroll', num: true, format: (v) => (v === null ? '—' : v + '%') },
     { key: 'duration_ms', label: 'On page', num: true, format: fmt.duration }, { key: 'nav', label: 'Navigation' },
-  ], res.pageviews, { sortKey: null });
+  ], res.pageviews, { sortKey: null, exportName: 'visit-pages' });
   root.append(info.root, tl.root, pv.root);
 }

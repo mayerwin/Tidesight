@@ -1,18 +1,27 @@
-// Tidesight dashboard: shell, routing, filters. Views live in ./views/<name>.js and export render(root, ctx).
-import { api, exportUrl, PUBLIC, PUBLIC_SITE, ApiError } from './api.js';
-import { el, s, tip } from './charts.js';
+// Tidesight dashboard: sign-in, shell, routing and the report bar. Views live in ./views/<name>.js and export
+// render(root, ctx); their state is in the URL hash (state.js).
+import { api, ApiError, events, PUBLIC, send } from './api.js';
+import { openDatePicker, periodLabel } from './datepicker.js';
+import { el, hint, icon, s, tip } from './dom.js';
+import { clearReports, openExportDialog } from './export.js';
+import { filterChips, loadSegments, openFilterBuilder, segmentButton, trafficButton } from './filters.js';
 import * as fmt from './fmt.js';
+import { openPalette, openShortcuts, registerShortcuts } from './palette.js';
+import { context, go, hrefFor, onReplace, shiftRange, state, storage } from './state.js';
+import { closeDialogs, closePopover, menu, popover } from './ui.js';
 
-const VIEWS = [
-  { group: 'Traffic' },
+export const VIEWS = [
+  { group: 'Reports' },
   { id: 'overview', title: 'Overview', icon: 'M4 13h4v7H4zM10 8h4v12h-4zM16 4h4v16h-4z' },
-  { id: 'realtime', title: 'Realtime', icon: 'M3 12h4l3-7 4 14 3-7h4' },
-  { id: 'pages', title: 'Pages', icon: 'M6 3h9l4 4v14H6zM14 3v5h5' },
-  { id: 'sources', title: 'Sources', icon: 'M12 3v10M7 8l5 5 5-5M5 21h14' },
-  { id: 'geo', title: 'Geography', icon: 'M12 21s7-6.2 7-12a7 7 0 10-14 0c0 5.8 7 12 7 12zM12 11.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z' },
-  { id: 'devices', title: 'Devices', icon: 'M3 5h14v10H3zM7 19h6M19 9h2v10h-6' },
-  { group: 'Behaviour' },
-  { id: 'events', title: 'Events', icon: 'M13 2L4 14h7l-1 8 9-12h-7z' },
+  { id: 'realtime', title: 'Realtime', icon: 'M3 12h4l3-7 4 14 3-7h4', bar: 'live' },
+  { id: 'sources', title: 'Acquisition', icon: 'M12 3v10M7 8l5 5 5-5M5 21h14', sub: 'Channels, sources, campaigns, referrers' },
+  { id: 'pages', title: 'Content', icon: 'M6 3h9l4 4v14H6zM14 3v5h5', sub: 'Pages, entry and exit pages, titles' },
+  { id: 'geo', title: 'Locations', icon: 'M12 21s7-6.2 7-12a7 7 0 10-14 0c0 5.8 7 12 7 12zM12 11.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z', sub: 'Countries, regions, cities, languages' },
+  { id: 'devices', title: 'Technology', icon: 'M3 5h14v10H3zM7 19h6M19 9h2v10h-6', sub: 'Devices, browsers, systems, screens' },
+  { id: 'events', title: 'Events', icon: 'M13 2L4 14h7l-1 8 9-12h-7z', sub: 'Custom events and their properties' },
+  { id: 'goals', title: 'Goals', icon: 'M12 21a9 9 0 100-18 9 9 0 000 18zM12 16a4 4 0 100-8 4 4 0 000 8zM12 12h.01', sub: 'Conversions and conversion rates' },
+  { group: 'Explore' },
+  { id: 'report', title: 'Explorer', icon: 'M4 5h16v14H4zM9.5 5v14M4 10h16', sub: 'Any dimension, any breakdown' },
   { id: 'funnels', title: 'Funnels', icon: 'M3 5h18l-7 8v6l-4 2v-8z' },
   { id: 'retention', title: 'Retention', icon: 'M4 4h4v4H4zM10 4h4v4h-4zM16 4h4v4h-4zM4 10h4v4H4zM10 10h4v4h-4zM4 16h4v4H4z' },
   { id: 'heatmaps', title: 'Heatmaps', icon: 'M12 3c4 5 6 8 6 11a6 6 0 01-12 0c0-3 2-6 6-11z' },
@@ -23,85 +32,18 @@ const VIEWS = [
   { id: 'performance', title: 'Performance', icon: 'M12 20a8 8 0 118-8M12 12l5-5' },
   { id: 'errors', title: 'Errors', icon: 'M12 3l10 18H2zM12 10v5M12 18v.5' },
   { group: 'People' },
-  { id: 'sessions', title: 'Sessions', icon: 'M4 6h16M4 12h16M4 18h16' },
-  { id: 'visitor', title: 'Visitor', icon: 'M12 12a4 4 0 100-8 4 4 0 000 8zM4 21a8 8 0 0116 0', hidden: true },
-  { id: 'session', title: 'Session', icon: '', hidden: true },
-  { group: 'System' },
-  { id: 'status', title: 'Status', icon: 'M12 3v4M12 17v4M3 12h4M17 12h4M12 15a3 3 0 100-6 3 3 0 000 6z' },
+  { id: 'sessions', title: 'Visits', icon: 'M4 6h16M4 12h16M4 18h16', sub: 'Every visit, newest first' },
+  { id: 'visitor', title: 'Visitor', hidden: true, bar: 'none' },
+  { id: 'session', title: 'Visit', hidden: true, bar: 'none' },
+  { group: 'Admin' },
+  { id: 'properties', title: 'Properties', icon: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z', bar: 'none', admin: true },
+  { id: 'property', title: 'Property settings', hidden: true, bar: 'none' },
+  { id: 'status', title: 'Status', icon: 'M12 3v4M12 17v4M3 12h4M17 12h4M12 15a3 3 0 100-6 3 3 0 000 6z', bar: 'none' },
 ];
 const PUBLIC_VIEWS = new Set(['overview', 'realtime']);
+const NO_SITE_VIEWS = new Set(['properties', 'status']);
 
-const PRESETS = [
-  { id: 'today', label: 'Today' }, { id: 'yesterday', label: 'Yesterday' }, { id: '7d', label: 'Last 7 days' },
-  { id: '30d', label: 'Last 30 days' }, { id: '90d', label: 'Last 90 days' }, { id: 'mtd', label: 'Month to date' },
-  { id: 'lastmonth', label: 'Last month' }, { id: 'ytd', label: 'Year to date' }, { id: '12m', label: 'Last 12 months' },
-];
-
-const FILTER_LABELS = {
-  source: 'Source', medium: 'Medium', campaign: 'Campaign', channel: 'Channel', referrer: 'Referrer', country: 'Country',
-  region: 'Region', city: 'City', device: 'Device', browser: 'Browser', os: 'OS', screen: 'Screen', language: 'Language',
-  entry: 'Entry page', exit: 'Exit page', page: 'Page', event: 'Event', visitor: 'Visitor', uid: 'User', hour: 'Hour',
-  timezone: 'Time zone', asn: 'Network', brand: 'Brand', model: 'Model', category: 'Source category', new: 'New visitor',
-};
-
-const state = { sites: [], version: '' };
-
-function presetRange(id) {
-  const today = fmt.isoDay(new Date());
-  const d = new Date();
-  switch (id) {
-    case 'today': return [today, today];
-    case 'yesterday': { const y = fmt.addDays(today, -1); return [y, y]; }
-    case '7d': return [fmt.addDays(today, -6), today];
-    case '90d': return [fmt.addDays(today, -89), today];
-    case 'mtd': return [fmt.isoDay(new Date(d.getFullYear(), d.getMonth(), 1)), today];
-    case 'lastmonth': return [fmt.isoDay(new Date(d.getFullYear(), d.getMonth() - 1, 1)), fmt.isoDay(new Date(d.getFullYear(), d.getMonth(), 0))];
-    case 'ytd': return [fmt.isoDay(new Date(d.getFullYear(), 0, 1)), today];
-    case '12m': return [fmt.addDays(today, -364), today];
-    default: return [fmt.addDays(today, -29), today];
-  }
-}
-
-// ---- route state (all in the hash, so views are bookmarkable) ----------------------------------
-export function route() {
-  const [path, query] = location.hash.replace(/^#\/?/, '').split('?');
-  const params = new URLSearchParams(query || '');
-  return { view: path || 'overview', params };
-}
-
-export function go(view, changes = {}, replace = false) {
-  const { params } = route();
-  for (const [k, v] of Object.entries(changes)) {
-    if (v === null || v === undefined || v === '') params.delete(k); else params.set(k, v);
-  }
-  const hash = '#/' + view + (params.toString() ? '?' + params.toString() : '');
-  if (replace) history.replaceState(null, '', hash); else location.hash = hash;
-  if (replace) render();
-}
-
-function context() {
-  const { view, params } = route();
-  const site = PUBLIC ? PUBLIC_SITE : params.get('site') || localStorage.getItem('ts_dash_site') || (state.sites[0] && state.sites[0].id);
-  const period = params.get('period') || '30d';
-  let [from, to] = presetRange(period);
-  if (period === 'custom' && params.get('from') && params.get('to')) { from = params.get('from'); to = params.get('to'); }
-  const filters = {};
-  for (const [k, v] of params) if (k.startsWith('f.')) filters[k.slice(2)] = v;
-  const bots = params.get('bots') === '1';
-  const common = { site, from, to, ...(bots ? { bots: '1' } : {}) };
-  for (const [k, v] of Object.entries(filters)) common['f.' + k] = v;
-  return {
-    view, params, site, from, to, period, filters, bots, public: PUBLIC,
-    siteInfo: state.sites.find((x) => x.id === site),
-    api: (endpoint, extra = {}) => api(endpoint, { ...common, ...extra }),
-    rawApi: api,
-    setFilter: (dim, value) => go(view === 'overview' || PUBLIC ? view : view, { ['f.' + dim]: value }),
-    go,
-    fmt,
-  };
-}
-
-// ---- shell -----------------------------------------------------------------------------------
+// ---- rail ------------------------------------------------------------------------------------------
 function renderNav(ctx) {
   const nav = document.getElementById('nav');
   nav.replaceChildren();
@@ -109,110 +51,239 @@ function renderNav(ctx) {
     if (v.group) { if (!PUBLIC) nav.appendChild(el('h3', { text: v.group })); continue; }
     if (v.hidden || (PUBLIC && !PUBLIC_VIEWS.has(v.id))) continue;
     if (PUBLIC && v.id === 'realtime' && !(ctx.siteInfo && (ctx.siteInfo.public_metrics || []).includes('realtime'))) continue;
-    const params = new URLSearchParams(ctx.params);
-    for (const k of [...params.keys()]) if (!['site', 'period', 'from', 'to', 'bots'].includes(k) && !k.startsWith('f.')) params.delete(k);
-    const a = el('a', { href: '#/' + v.id + (params.toString() ? '?' + params : ''), 'aria-current': ctx.view === v.id ? 'page' : undefined });
+    if (v.id === 'goals' && !ctx.goals.length && !(state.me && state.me.admin)) continue;
+    const a = el('a', { href: hrefFor(v.id), 'aria-current': ctx.view === v.id || (v.id === 'properties' && ctx.view === 'property') ? 'page' : null });
     const ic = s('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' });
     ic.appendChild(s('path', { d: v.icon, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
     a.append(ic, el('span', { text: v.title }));
+    if (v.id === 'goals' && ctx.goals.length) a.appendChild(el('span', { class: 'nav-count', text: String(ctx.goals.length) }));
     nav.appendChild(a);
   }
 }
 
 function renderSitePicker(ctx) {
-  const sel = document.getElementById('site');
-  sel.replaceChildren(...state.sites.map((x) => el('option', { value: x.id, text: x.name || x.id, selected: x.id === ctx.site })));
-  sel.parentElement.hidden = PUBLIC || state.sites.length < 1;
-  sel.onchange = () => { localStorage.setItem('ts_dash_site', sel.value); go(ctx.view === 'session' || ctx.view === 'visitor' ? 'overview' : ctx.view, { site: sel.value }); };
+  const box = document.getElementById('site-picker');
+  box.replaceChildren();
+  if (PUBLIC) { box.hidden = true; return; }
+  box.hidden = false;
+  const info = ctx.siteInfo;
+  const btn = el('button', { type: 'button', class: 'site-btn', 'aria-haspopup': 'dialog' },
+    el('span', { class: 'site-mark', text: info ? (info.label || info.id).replace(/^www\./, '').slice(0, 1).toUpperCase() : '+' }),
+    el('span', { class: 'site-text' }, el('b', { text: info ? info.label : 'No property yet' }),
+      el('small', { text: info ? (info.label !== (info.domains || [])[0] && (info.domains || [])[0] ? info.domains[0] : info.id) : 'Add one to start' })),
+    icon('down', 'caret'));
+  btn.addEventListener('click', () => openSiteMenu(btn, ctx));
+  box.appendChild(btn);
 }
 
-let openMenu = null;
-function closeMenu() { if (openMenu) { openMenu.remove(); openMenu = null; } }
-document.addEventListener('click', (e) => { if (openMenu && !openMenu.contains(e.target) && !e.target.closest('[data-menu]')) closeMenu(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
-
-function dateMenu(anchor, ctx) {
-  closeMenu();
-  const r = anchor.getBoundingClientRect();
-  const menu = el('div', { class: 'menu', role: 'menu', style: { left: r.left + 'px', top: r.bottom + 6 + window.scrollY + 'px' } });
-  for (const p of PRESETS) {
-    const b = el('button', { type: 'button', role: 'menuitemradio', 'aria-checked': ctx.period === p.id ? 'true' : 'false' },
-      el('span', { class: 'check', text: ctx.period === p.id ? '✓' : '' }), p.label);
-    b.addEventListener('click', () => { closeMenu(); go(ctx.view, { period: p.id, from: null, to: null }); });
-    menu.appendChild(b);
+function openSiteMenu(anchor, ctx) {
+  const wrap = el('div', { class: 'site-menu' });
+  const search = el('input', { class: 'input search', type: 'search', placeholder: 'Find a property…', 'aria-label': 'Find a property' });
+  const list = el('div', { class: 'site-list', role: 'listbox' });
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    list.replaceChildren();
+    const sites = state.sites.filter((x) => !q || [x.label, x.id, ...(x.domains || [])].some((t) => String(t).toLowerCase().includes(q)));
+    for (const x of sites) {
+      const b = el('button', { type: 'button', class: 'site-option', role: 'option', 'aria-selected': String(x.id === ctx.site) },
+        el('span', { class: 'site-mark small', text: (x.label || x.id).replace(/^www\./, '').slice(0, 1).toUpperCase() }),
+        el('span', { class: 'site-text' }, el('b', { text: x.label }), el('small', { text: (x.domains || []).slice(0, 2).join(', ') || x.id })),
+        x.id === ctx.site ? icon('check') : null);
+      b.addEventListener('click', () => {
+        closePopover();
+        storage.set('ts_dash_site', x.id);
+        const keep = NO_SITE_VIEWS.has(ctx.view) || ['session', 'visitor', 'property'].includes(ctx.view) ? 'overview' : ctx.view;
+        go(keep, { site: x.id, filters: null, goal: null });
+      });
+      list.appendChild(b);
+    }
+    if (!sites.length) list.appendChild(el('div', { class: 'empty small', text: 'No property matches' }));
+  };
+  search.addEventListener('input', draw);
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const b = list.querySelector('.site-option'); if (b) b.click(); } });
+  const manage = el('a', { class: 'menu-item', href: hrefFor('properties') }, icon('gear'), el('span', { text: 'Manage properties' }));
+  manage.addEventListener('click', () => closePopover());
+  wrap.append(state.sites.length > 6 ? search : el('span'), list, el('div', { class: 'menu-sep' }), manage);
+  if (state.me && state.me.admin) {
+    const add = el('a', { class: 'menu-item', href: hrefFor('properties', { add: '1' }) }, icon('plus'), el('span', { text: 'Add a property' }));
+    add.addEventListener('click', () => closePopover());
+    wrap.appendChild(add);
   }
-  const from = el('input', { type: 'date', value: ctx.from, 'aria-label': 'From' });
-  const to = el('input', { type: 'date', value: ctx.to, 'aria-label': 'To' });
-  const apply = el('button', { type: 'button', class: 'btn', text: 'Apply', style: { width: 'auto' } });
-  apply.addEventListener('click', () => { closeMenu(); go(ctx.view, { period: 'custom', from: from.value, to: to.value }); });
-  menu.appendChild(el('div', { class: 'foot' }, from, el('span', { text: '→' }), to, apply));
-  document.body.appendChild(menu);
-  openMenu = menu;
+  draw();
+  popover(anchor, wrap, { className: 'site-pop', width: 300 });
 }
 
-function periodLabel(ctx) {
-  const p = PRESETS.find((x) => x.id === ctx.period);
-  if (p) return p.label;
-  return ctx.from === ctx.to ? fmt.day(ctx.from) : fmt.day(ctx.from) + ' – ' + fmt.day(ctx.to);
+function renderUser() {
+  const box = document.getElementById('rail-user');
+  box.replaceChildren();
+  if (PUBLIC || !state.me) return;
+  const b = el('button', { type: 'button', class: 'user-btn' }, icon('user'), el('span', { text: state.me.user === 'local' ? 'Local mode' : state.me.user }));
+  b.addEventListener('click', () => menu(b, [
+    { heading: state.me.user === 'local' ? 'Signed in automatically (dev server --no-auth)' : 'Signed in as ' + state.me.user + (state.me.admin ? ' · admin' : '') },
+    { label: 'Keyboard shortcuts', icon: 'keyboard', kbd: '?', onClick: openShortcuts },
+    { label: 'Switch theme', icon: 'theme', onClick: toggleTheme },
+    state.me.can_sign_out ? 'sep' : null,
+    state.me.can_sign_out ? { label: 'Sign out', icon: 'logout', onClick: signOut } : null,
+  ]));
+  box.appendChild(b);
 }
 
-function renderFilters(ctx) {
+async function signOut() {
+  try { await send('POST', 'logout'); } catch (e) { /* signed out anyway */ }
+  location.reload();
+}
+
+// ---- page head: title, freshness ----------------------------------------------------------------------
+function renderHead(ctx, meta) {
+  const title = document.getElementById('title');
+  const sub = document.getElementById('subtitle');
+  if (ctx.view === 'overview' && ctx.siteInfo) {
+    title.textContent = ctx.siteInfo.label;
+    sub.textContent = PUBLIC ? 'Public statistics' : 'Overview' + (ctx.siteInfo.label !== ctx.siteInfo.id ? ' · ' + ctx.siteInfo.id : '');
+  } else {
+    title.textContent = meta.title;
+    sub.textContent = [meta.sub, ctx.siteInfo && !NO_SITE_VIEWS.has(ctx.view) ? ctx.siteInfo.label : null].filter(Boolean).join(' · ');
+  }
+  document.title = (ctx.view === 'overview' ? '' : meta.title + ' · ') + (ctx.siteInfo ? ctx.siteInfo.label + ' · ' : '') + 'Tidesight';
+  const tools = document.getElementById('head-tools');
+  tools.replaceChildren();
+  if (PUBLIC) return;
+  const f = state.freshness;
+  if (f) {
+    const stale = f.enriched_at && f.last_hit && f.last_hit - f.enriched_at > 30 * 60000;
+    const pill = el('span', { class: 'fresh' + (stale ? ' stale' : '') + (!f.enriched_at ? ' never' : ''), tabindex: 0 },
+      el('i'), el('span', { text: f.enriched_at ? 'Updated ' + fmt.ago(f.enriched_at) : 'Not processed yet' }));
+    hint(pill, (f.enriched_at ? 'Reports include the data processed by the enrichment job ' + fmt.ago(f.enriched_at) + ' (it runs from cron every few minutes). '
+      : 'The enrichment job has not run yet: run `jobs.py cron`. ') + (f.last_hit ? 'Last hit received ' + fmt.ago(f.last_hit) + '. ' : '') + 'Realtime shows hits as they arrive.');
+    tools.appendChild(pill);
+  }
+  if (ctx.view === 'overview' && ctx.site) {
+    const live = el('a', { class: 'live-now', href: hrefFor('realtime'), hidden: true }, el('i'), el('span'));
+    tools.appendChild(live);
+    api('live', { site: ctx.site }).then((r) => {
+      live.lastChild.textContent = fmt.plural(r.active, 'visitor') + ' now';
+      live.hidden = false;
+      hint(live, 'Visitors in the last 5 minutes: open Realtime');
+    }).catch(() => {});
+  }
+  const k = el('button', { type: 'button', class: 'ctl ghost', 'aria-label': 'Search and commands' }, icon('search'),
+    el('span', { text: 'Search' }), el('kbd', { text: navigator.platform && /Mac/.test(navigator.platform) ? '⌘K' : 'Ctrl K' }));
+  k.addEventListener('click', () => openPalette(context()));
+  tools.appendChild(k);
+}
+
+// ---- report bar --------------------------------------------------------------------------------------------
+function renderBar(ctx, meta) {
   const bar = document.getElementById('filters');
   bar.replaceChildren();
-  if (['session', 'visitor', 'status'].includes(ctx.view)) { bar.hidden = true; return; }
+  const kind = meta.bar || 'full';
+  if (kind === 'none' || !ctx.site) { bar.hidden = true; return; }
   bar.hidden = false;
-  const cal = s('svg', { viewBox: '0 0 24 24' });
-  cal.appendChild(s('path', { d: 'M4 6h16v14H4zM4 10h16M8 3v4M16 3v4', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.7 }));
-  const dateBtn = el('button', { class: 'ctl', type: 'button', 'data-menu': '1', 'aria-haspopup': 'menu' }, cal, el('span', { text: periodLabel(ctx) }));
-  dateBtn.addEventListener('click', (e) => { e.stopPropagation(); openMenu ? closeMenu() : dateMenu(dateBtn, ctx); });
-  bar.appendChild(dateBtn);
-  if (ctx.view !== 'realtime') bar.appendChild(el('span', { class: 'note', text: fmt.day(ctx.from, true) + (ctx.from !== ctx.to ? ' → ' + fmt.day(ctx.to, true) : '') }));
-  for (const [dim, value] of Object.entries(ctx.filters)) {
-    const shown = dim === 'country' ? fmt.country(value) : value;
-    const x = el('button', { type: 'button', 'aria-label': 'Remove filter', text: '×' });
-    x.addEventListener('click', () => go(ctx.view, { ['f.' + dim]: null }));
-    bar.appendChild(el('span', { class: 'chip' }, el('span', { text: (FILTER_LABELS[dim] || dim) + ' is ' }), el('b', { text: shown }), x));
-  }
-  bar.appendChild(el('span', { class: 'spacer' }));
-  if (!PUBLIC) {
-    const bots = el('button', { class: 'ctl' + (ctx.bots ? ' active' : ''), type: 'button', 'aria-pressed': ctx.bots ? 'true' : 'false',
-      title: 'Include traffic flagged as bots', text: ctx.bots ? 'Bots included' : 'Bots excluded' });
-    bots.addEventListener('click', () => go(ctx.view, { bots: ctx.bots ? null : '1' }));
-    bar.appendChild(bots);
-    const exp = el('a', { class: 'ctl', href: exportUrl({ site: ctx.site, what: 'sessions', from: ctx.from, to: ctx.to, format: 'csv' }),
-      title: 'Download the sessions of this period as CSV', text: 'Export CSV' });
-    bar.appendChild(exp);
-  }
-}
-
-function setTheme(next) {
-  if (next) localStorage.setItem('ts_dash_theme', next); else localStorage.removeItem('ts_dash_theme');
-  if (next) document.documentElement.setAttribute('data-theme', next); else document.documentElement.removeAttribute('data-theme');
-}
-
-let renderToken = 0;
-async function render() {
-  const token = ++renderToken;
-  tip.hide();
-  closeMenu();
-  const ctx = context();
-  if (PUBLIC && !PUBLIC_VIEWS.has(ctx.view)) { go('overview', {}, true); return; }
-  const meta = VIEWS.find((v) => v.id === ctx.view) || VIEWS[1];
-  document.getElementById('title').textContent = ctx.view === 'overview' && ctx.siteInfo ? (ctx.siteInfo.name || ctx.site) : meta.title;
-  document.getElementById('subtitle').textContent = ctx.view === 'overview' ? 'Overview' + (PUBLIC ? ' · public stats' : '') : (ctx.siteInfo ? ctx.siteInfo.name || ctx.site : '');
-  document.title = meta.title + (ctx.siteInfo ? ' · ' + (ctx.siteInfo.name || ctx.site) : '') + ' · Tidesight';
-  renderNav(ctx);
-  renderSitePicker(ctx);
-  renderFilters(ctx);
-  const root = document.getElementById('view');
-  if (!ctx.site) {
-    root.replaceChildren(el('div', { class: 'card span-12' }, el('p', { text: 'No site is configured yet. Add a [sites.<id>] table to the configuration.' })));
+  if (kind === 'live') {
+    bar.appendChild(el('span', { class: 'live-pill' }, el('i'), el('span', { text: 'Live: hits as they arrive, refreshed every 10 seconds' })));
     return;
   }
+  const dateWrap = el('div', { class: 'date-ctl' });
+  const prev = el('button', { type: 'button', class: 'ctl icon-only', 'aria-label': 'Previous period' }, icon('left'));
+  const next = el('button', { type: 'button', class: 'ctl icon-only', 'aria-label': 'Next period', disabled: ctx.to >= ctx.today || null });
+  next.appendChild(icon('right'));
+  hint(prev, 'Previous period (←)');
+  hint(next, 'Next period (→)');
+  prev.addEventListener('click', () => shift(ctx, -1));
+  next.addEventListener('click', () => shift(ctx, 1));
+  const dateBtn = el('button', { class: 'ctl date-btn', type: 'button', 'aria-haspopup': 'dialog' }, icon('calendar'),
+    el('span', { class: 'date-text' }, el('b', { text: periodLabel(ctx) }),
+      ctx.period !== 'custom' ? el('small', { text: fmt.range(ctx.from, ctx.to) }) : null), icon('down', 'caret'));
+  dateBtn.addEventListener('click', () => openDatePicker(dateBtn, ctx, (p) => go(ctx.view, { ...p, offset: null })));
+  dateWrap.append(prev, dateBtn, next);
+  const left = el('div', { class: 'bar-left' });
+  const right = el('div', { class: 'bar-right' });
+  bar.append(left, right);
+  left.appendChild(dateWrap);
+  if (ctx.compare) {
+    const x = el('button', { type: 'button', 'aria-label': 'Stop comparing' }, icon('close'));
+    x.addEventListener('click', () => go(ctx.view, { compare: null, cfrom: null, cto: null }));
+    const cmp = el('span', { class: 'cmp-pill' }, el('i'), el('span', { text: 'vs ' + fmt.range(ctx.compare.from, ctx.compare.to) }), x);
+    hint(cmp, { previous: 'Compared with the previous period', year: 'Compared with the same period last year', custom: 'Compared with a custom period' }[ctx.compare.mode]);
+    left.appendChild(cmp);
+  } else if (!PUBLIC) {
+    const c = el('button', { type: 'button', class: 'ctl ghost' }, icon('compare'), el('span', { text: 'Compare' }));
+    hint(c, 'Compare with the previous period (C)');
+    c.addEventListener('click', () => menu(c, [{ heading: 'Compare with' },
+      { label: 'Previous period', hint: fmt.range(...shiftRange(ctx.from, ctx.to, -1)), onClick: () => go(ctx.view, { compare: 'previous' }) },
+      { label: 'Same period last year', onClick: () => go(ctx.view, { compare: 'year' }) },
+      { label: 'Custom period…', onClick: () => openDatePicker(dateBtn, Object.assign({}, ctx, { compare: { mode: 'custom', from: fmt.addDays(ctx.from, -365), to: fmt.addDays(ctx.to, -365) } }), (p) => go(ctx.view, p)) }]));
+    left.appendChild(c);
+  }
+  if (!PUBLIC) {
+    left.appendChild(el('span', { class: 'bar-sep' }));
+    const add = el('button', { type: 'button', class: 'ctl', 'aria-haspopup': 'dialog' }, icon('filter'), el('span', { text: 'Filter' }));
+    hint(add, 'Filter every report by any dimension (F)');
+    add.addEventListener('click', () => openFilterBuilder(add, ctx));
+    add.dataset.addFilter = '1';
+    left.appendChild(add);
+    left.appendChild(filterChips(ctx));
+    if (ctx.goal) {
+      const x = el('button', { type: 'button', class: 'chip-x', 'aria-label': 'Stop showing conversions' }, icon('close'));
+      x.addEventListener('click', () => go(ctx.view, { goal: null }));
+      const chip = el('span', { class: 'chip goal' }, el('span', { class: 'chip-main' }, icon('target'),
+        el('span', { class: 'chip-dim', text: 'Conversions:' }), el('b', { text: ctx.goalNames[ctx.goal] || ctx.goal })), x);
+      hint(chip, 'Reports show the conversions of this goal');
+      left.appendChild(chip);
+    }
+    right.appendChild(segmentButton(ctx));
+    right.appendChild(trafficButton(ctx));
+    const exp = el('button', { type: 'button', class: 'ctl' }, icon('download'), el('span', { text: 'Export' }));
+    hint(exp, 'Download this report or raw data (E)');
+    exp.addEventListener('click', () => openExportDialog(ctx));
+    right.appendChild(exp);
+  }
+}
+
+function shift(ctx, dir) {
+  const [a, b] = shiftRange(ctx.from, ctx.to, dir);
+  if (dir > 0 && a > ctx.today) return;
+  go(ctx.view, { period: 'custom', from: a, to: b > ctx.today ? ctx.today : b, offset: null });
+}
+
+// ---- theme ---------------------------------------------------------------------------------------------------
+function setTheme(next) {
+  storage.set('ts_dash_theme', next || null);
+  if (next) document.documentElement.setAttribute('data-theme', next); else document.documentElement.removeAttribute('data-theme');
+}
+export function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  setTheme(current === 'dark' ? 'light' : 'dark');
+  render();
+}
+
+// ---- render -------------------------------------------------------------------------------------------------------
+let renderToken = 0;
+export async function render() {
+  const token = ++renderToken;
+  tip.hide();
+  closePopover();
+  closeDialogs();
+  const ctx = context();
+  clearReports();
+  if (PUBLIC && !PUBLIC_VIEWS.has(ctx.view)) { go('overview', {}, true); return; }
+  const meta = VIEWS.find((v) => v.id === ctx.view) || VIEWS[1];
+  if (ctx.site && !PUBLIC) storage.set('ts_dash_site', ctx.site);
+  renderNav(ctx);
+  renderSitePicker(ctx);
+  renderUser();
+  renderHead(ctx, meta);
+  renderBar(ctx, meta);
+  const root = document.getElementById('view');
+  if (!ctx.site && !NO_SITE_VIEWS.has(ctx.view) && ctx.view !== 'property') {
+    root.replaceChildren(welcome());
+    return;
+  }
+  if (!PUBLIC && ctx.site) loadSegments(ctx).then(() => { if (token === renderToken) renderBar(context(), meta); });
   const previous = root.firstElementChild;
   if (previous) previous.classList.add('loading');
   try {
-    const mod = await import('./views/' + ctx.view + '.js');
+    const mod = await import('./views/' + (VIEWS.some((v) => v.id === ctx.view) ? ctx.view : 'overview') + '.js');
     if (token !== renderToken) return;
     const fresh = el('div', { class: 'grid' });
     // Most views render off-screen and swap in when ready (the previous render stays visible meanwhile).
@@ -223,28 +294,115 @@ async function render() {
     if (!mod.attachFirst) root.replaceChildren(fresh);
   } catch (err) {
     if (token !== renderToken) return;
+    if (err instanceof ApiError && err.status === 401) return;
     console.error(err);
     const msg = err instanceof ApiError ? err.message : 'Something went wrong while loading this view.';
-    root.replaceChildren(el('div', { class: 'error-box' }, el('strong', { text: 'Could not load this view. ' }), el('span', { text: msg })));
+    const retry = el('button', { type: 'button', class: 'btn small', text: 'Try again' });
+    retry.addEventListener('click', () => render());
+    root.replaceChildren(el('div', { class: 'error-box' }, icon('alert'), el('div', {}, el('strong', { text: 'Could not load this view. ' }),
+      el('span', { text: msg })), retry));
   }
 }
 
-async function boot() {
-  const saved = localStorage.getItem('ts_dash_theme');
-  if (saved) setTheme(saved);
-  document.getElementById('theme').addEventListener('click', () => {
-    const current = document.documentElement.getAttribute('data-theme') ||
-      (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    setTheme(current === 'dark' ? 'light' : 'dark');
-    render();
+function welcome() {
+  const admin = state.me && state.me.admin;
+  const box = el('div', { class: 'welcome card span-12' },
+    el('div', { class: 'welcome-mark' }, icon('globe')),
+    el('h2', { text: 'Add your first property' }),
+    el('p', { text: 'A property is a website (or a group of domains) whose visits Tidesight records. Add one, paste the tracking code into its pages, and visits appear here within minutes.' }));
+  if (admin) {
+    const b = el('a', { class: 'btn primary', href: hrefFor('properties', { add: '1' }) }, icon('plus'), el('span', { text: 'Add a property' }));
+    box.appendChild(b);
+  } else {
+    box.appendChild(el('p', { class: 'note', text: 'Ask an administrator to add a property, or add a [sites.<id>] table to the configuration file.' }));
+  }
+  const g = el('div', { class: 'grid' });
+  g.appendChild(box);
+  return g;
+}
+
+// ---- sign-in ----------------------------------------------------------------------------------------------------
+function showLogin(setup = false, message = '') {
+  document.body.classList.add('signed-out');
+  const root = document.getElementById('login');
+  root.hidden = false;
+  document.getElementById('shell').hidden = true;
+  if (setup) {
+    root.replaceChildren(el('div', { class: 'login-card' }, brand(),
+      el('h1', { text: 'Almost there' }),
+      el('p', { text: 'The dashboard is off until a user is added to the configuration file. On the server, create a password hash:' }),
+      el('pre', { class: 'code', text: 'python -m tidesight.jobs hash-password --user admin' }),
+      el('p', { text: 'then add it to tidesight.toml and reload this page:' }),
+      el('pre', { class: 'code', text: '[dashboard]\nusers = { admin = "pbkdf2_sha256$…" }' })));
+    return;
+  }
+  const user = el('input', { class: 'input', name: 'username', autocomplete: 'username', required: true, autofocus: true, 'aria-label': 'User name' });
+  const pass = el('input', { class: 'input', name: 'password', type: 'password', autocomplete: 'current-password', required: true, 'aria-label': 'Password' });
+  const show = el('button', { type: 'button', class: 'icon-btn eye', 'aria-label': 'Show the password' }, icon('eye'));
+  show.addEventListener('click', () => { pass.type = pass.type === 'password' ? 'text' : 'password'; pass.focus(); });
+  const remember = el('input', { type: 'checkbox', id: 'remember', checked: true });
+  const err = el('div', { class: 'login-error', role: 'alert', hidden: !message, text: message });
+  const submit = el('button', { type: 'submit', class: 'btn primary wide', text: 'Sign in' });
+  const form = el('form', { class: 'login-form', novalidate: true },
+    el('label', { class: 'field' }, el('span', { class: 'field-label', text: 'User name' }), user),
+    el('label', { class: 'field' }, el('span', { class: 'field-label', text: 'Password' }), el('span', { class: 'pw-wrap' }, pass, show)),
+    el('label', { class: 'check-row', for: 'remember' }, remember, el('span', { text: 'Keep me signed in on this device' })),
+    err, submit);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!user.value || !pass.value) { err.textContent = 'Enter your user name and password.'; err.hidden = false; return; }
+    submit.disabled = true;
+    submit.textContent = 'Signing in…';
+    try {
+      await send('POST', 'login', { user: user.value, password: pass.value, remember: remember.checked });
+      location.reload(); // the page comes back with the signed-in Content Security Policy
+    } catch (ex) {
+      err.textContent = ex.status === 401 ? 'Wrong user name or password.' : ex.message;
+      err.hidden = false;
+      submit.disabled = false;
+      submit.textContent = 'Sign in';
+      pass.select();
+    }
   });
+  root.replaceChildren(el('div', { class: 'login-card' }, brand(), el('h1', { text: 'Sign in' }),
+    el('p', { class: 'login-sub', text: 'Self-hosted analytics for your sites.' }), form));
+  setTimeout(() => user.focus(), 0);
+}
+
+function brand() {
+  const mark = document.querySelector('.brand-mark');
+  return el('div', { class: 'login-brand' }, mark ? mark.cloneNode(true) : null, el('span', { class: 'brand-name', text: 'Tidesight' }));
+}
+
+// ---- boot ----------------------------------------------------------------------------------------------------------
+export async function refreshSites() {
+  const res = await api('sites', {});
+  state.sites = res.sites || [];
+  state.version = res.version || '';
+  state.freshness = res.freshness || null;
+}
+
+async function boot() {
+  const saved = storage.get('ts_dash_theme');
+  if (saved) setTheme(saved);
+  document.getElementById('theme').addEventListener('click', toggleTheme);
+  events.addEventListener('signedout', () => { if (!PUBLIC) showLogin(false, 'Your session ended: sign in again.'); });
+  if (!PUBLIC) {
+    try {
+      state.me = await api('me');
+    } catch (err) {
+      if (err.status === 401) { showLogin(); return; }
+      if (err.status === 403 && err.body && err.body.setup) { showLogin(true); return; }
+      document.getElementById('view').replaceChildren(el('div', { class: 'error-box' }, el('strong', { text: 'The dashboard API is not reachable. ' }), el('span', { text: err.message })));
+      return;
+    }
+  }
   try {
-    const res = await api('sites', PUBLIC ? {} : {});
-    state.sites = res.sites || [];
-    state.version = res.version || '';
+    await refreshSites();
     document.getElementById('version').textContent = state.version ? 'v' + state.version : '';
   } catch (err) {
-    document.getElementById('view').replaceChildren(el('div', { class: 'error-box login-hint' },
+    if (err.status === 401) return;
+    document.getElementById('view').replaceChildren(el('div', { class: 'error-box' },
       el('strong', { text: 'The dashboard API is not reachable. ' }), el('span', { text: err.message })));
     return;
   }
@@ -252,8 +410,16 @@ async function boot() {
     document.createTextNode('Tidesight — self-hosted analytics. '),
     el('a', { href: 'https://db-ip.com', rel: 'noopener', text: 'IP geolocation by DB-IP' }),
     document.createTextNode(' where DB-IP data is used (CC BY 4.0).'));
+  onReplace(render);
   window.addEventListener('hashchange', render);
+  if (!PUBLIC) {
+    registerShortcuts({ render, views: VIEWS, toggleTheme,
+      shift: (dir) => { const ctx = context(); const meta = VIEWS.find((v) => v.id === ctx.view) || {}; if (!meta.bar) shift(ctx, dir); } });
+    // Keep "Updated … ago" honest on a long-open page.
+    setInterval(() => { if (document.visibilityState === 'visible') refreshSites().then(() => { const c = context(); renderHead(c, VIEWS.find((v) => v.id === c.view) || VIEWS[1]); }).catch(() => {}); }, 5 * 60000);
+  }
   render();
 }
+
 
 boot();

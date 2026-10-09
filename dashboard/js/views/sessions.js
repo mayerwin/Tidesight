@@ -21,7 +21,8 @@ export async function render(root, ctx) {
       r.has_replay ? el('span', { class: 'badge', text: 'replay' }) : null,
       r.errors ? el('span', { class: 'badge', text: r.errors + ' err' }) : null,
       r.is_bot ? el('span', { class: 'badge', text: 'bot' }) : null].filter(Boolean)) },
-  ], res.rows, { sortKey: null, onRowClick: (r) => ctx.go('session', { key: r.session_key }) });
+  ], res.rows, { sortKey: null, exportName: ctx.site + '-visits-' + ctx.from + '_' + ctx.to, searchable: true,
+    onRowClick: (r) => ctx.go('session', { key: r.session_key }), empty: 'No visits in this period' + (ctx.filters.length ? ' for these filters.' : '.') });
   const nav = el('div', { style: { display: 'flex', gap: '8px', marginTop: '12px' } });
   if (offset > 0) { const p = el('button', { class: 'btn', type: 'button', text: 'Newer' }); p.addEventListener('click', () => ctx.go('sessions', { offset: Math.max(0, offset - 100) })); nav.appendChild(p); }
   if (res.rows.length === 100) { const n = el('button', { class: 'btn', type: 'button', text: 'Older' }); n.addEventListener('click', () => ctx.go('sessions', { offset: offset + 100 })); nav.appendChild(n); }

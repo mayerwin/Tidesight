@@ -64,7 +64,7 @@ export async function render(root, ctx) {
         { key: 'conversion', label: 'From start', num: true, format: (v) => fmt.pct(v, 1) },
         { key: 'from_previous', label: 'From previous', num: true, format: (v) => fmt.pct(v, 1) },
         { key: 'median_ms', label: 'Median time', num: true, format: fmt.duration },
-      ], res.steps, { sortKey: null });
+      ], res.steps, { sortKey: null, exportName: ctx.site + '-funnel-' + ctx.from + '_' + ctx.to });
     } catch (err) {
       result.body.replaceChildren(el('div', { class: 'empty', text: err.message }));
     } finally {

@@ -6,6 +6,7 @@ const python = process.env.TIDESIGHT_PYTHON || (process.platform === 'win32' ? '
 
 export default defineConfig({
   testDir: './test',
+  testIgnore: ['dashboard/**'], // the dashboard's tests: playwright.dashboard.config.mjs
   timeout: 30000,
   expect: { timeout: 10000 },
   fullyParallel: true,

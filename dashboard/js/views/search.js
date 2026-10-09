@@ -11,5 +11,5 @@ export async function render(root, ctx) {
     { key: 'searches', label: 'Searches', num: true, format: fmt.num },
     { key: 'visitors', label: 'Visitors', num: true, format: fmt.num },
     { key: 'avg_results', label: 'Avg results', num: true, format: (v) => (v === null || v === undefined ? '—' : v.toFixed(1)) },
-  ], res.rows, { sortKey: 'searches', empty: 'No site searches in this period. Configure search_params or call tidesight("search", query, results).' });
+  ], res.rows, { sortKey: 'searches', exportName: ctx.site + '-site-search-' + ctx.from + '_' + ctx.to, empty: 'No site searches in this period. Configure search_params or call tidesight("search", query, results).' });
 }
