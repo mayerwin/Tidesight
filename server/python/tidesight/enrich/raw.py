@@ -7,7 +7,7 @@ import heapq
 import json
 import os
 import sqlite3
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set
 
 from ..storage import EVENTS_MIGRATIONS, connect
 

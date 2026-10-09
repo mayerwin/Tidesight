@@ -12,8 +12,9 @@ export class ApiError extends Error {
 export async function api(endpoint, params = {}) {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') qs.set(k, v);
-  if (shareToken) qs.set('t', shareToken);
-  const res = await fetch(base + endpoint + '?' + qs.toString(), { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+  const headers = { Accept: 'application/json' };
+  if (shareToken) headers['X-Share-Token'] = shareToken; // a header: kept out of server logs
+  const res = await fetch(base + endpoint + '?' + qs.toString(), { credentials: 'same-origin', headers });
   let body = null;
   try { body = await res.json(); } catch (e) { /* not JSON */ }
   if (!res.ok) throw new ApiError(res.status, (body && body.error) || res.statusText);

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple
@@ -836,7 +837,9 @@ def _as_count(value: Any) -> Optional[int]:
     """A non-negative integer count, or None for missing/invalid values."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return int(value) if value >= 0 else None
+    if isinstance(value, float) and not math.isfinite(value):  # 1e999 parses as infinity
+        return None
+    return int(min(value, 2 ** 31)) if value >= 0 else None
 
 
 def _is_desktop_chromium(ua: str) -> bool:

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import json
+import os
+import sqlite3
 
 import pytest
 
 from conftest import call
 from test_enrich import T0, Traffic, make_config, pv, world  # noqa: F401  (fixture)
 from tidesight.api import Api, ApiError
-from tidesight.auth import hash_password, verify_password
+from tidesight.auth import Throttle, hash_password, verify_password
 from tidesight.enrich import pipeline
 from tidesight.wsgi import create_app
 
@@ -188,3 +191,170 @@ def test_web_app_auth_and_share(world, tmp_path):  # noqa: F811
     assert call(app, "GET", "/share/example/", query="t=tok").code == 200
     # The collector still answers on the same app.
     assert call(app, "GET", "/health").code == 200
+
+
+def test_password_guessing_is_throttled(world, tmp_path):  # noqa: F811
+    world.dashboard["users"] = {"admin": hash_password("pw", iterations=1000)}
+    app = create_app(config=world)
+    bad = {"Authorization": _basic("admin", "guess")}
+    codes = [call(app, "GET", "/dashboard/api/sites", headers=bad).code for _ in range(11)]
+    assert codes == [401] * 10 + [429]
+    # Even the right password waits for the window to pass, from that client; others are not affected.
+    assert call(app, "GET", "/dashboard/api/sites", headers={"Authorization": _basic("admin", "pw")}).code == 429
+    ok = call(app, "GET", "/dashboard/api/sites", headers={"Authorization": _basic("admin", "pw")},
+              remote_addr="198.51.100.5")
+    assert ok.code == 200
+    # Unknown users fail like wrong passwords (and take as long).
+    assert call(app, "GET", "/dashboard/api/sites", headers={"Authorization": _basic("nobody", "x")},
+                remote_addr="198.51.100.6").code == 401
+
+
+def test_concurrent_requests_with_new_credentials_check_the_password_once(monkeypatch):
+    import threading
+    from tidesight import auth
+    calls = []
+    real = auth.verify_password
+    monkeypatch.setattr(auth, "verify_password", lambda p, e: calls.append(1) or real(p, e))
+    a = auth.Authenticator({"admin": hash_password("pw", iterations=20000)}, Throttle())
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(a.verify(_basic("admin", "pw"))[1])) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results == ["ok"] * 8 and len(calls) == 1
+
+
+def test_share_pages_are_rate_limited(world):  # noqa: F811
+    pipeline.run(world)
+    site = world.site("example")
+    site.settings["public"] = True
+    site.settings["share_token"] = "tok"
+    app = create_app(config=world)
+    app.SHARE_API_PER_MINUTE = 3
+    codes = [call(app, "GET", "/share/example/api/sites", query="t=tok").code for _ in range(4)]
+    assert codes == [200, 200, 200, 429]
+    # The page and its assets hold no data: they load without the token (a share page with a token works).
+    assert call(app, "GET", "/share/example/", remote_addr="198.51.100.7").code == 200
+    assert call(app, "GET", "/share/example/app.css", remote_addr="198.51.100.7").code == 200
+    # Data needs it; a missing token is not a guess, a wrong one is (and guessing is throttled).
+    assert all(call(app, "GET", "/share/example/api/sites", remote_addr="198.51.100.8").code == 403 for _ in range(12))
+    assert [call(app, "GET", "/share/example/api/sites", headers={"X-Share-Token": "bad"}, remote_addr="198.51.100.7").code
+            for _ in range(11)] == [403] * 10 + [429]
+    ok = call(app, "GET", "/share/example/api/sites", headers={"X-Share-Token": "tok"}, remote_addr="198.51.100.9")
+    assert ok.code == 200
+
+
+def test_stored_chunks_are_decoded_with_bounds():
+    from tidesight.api import MAX_CHUNK_DECODED, Api as A, Budget
+    bomb = gzip.compress(b"[" + b" " * (MAX_CHUNK_DECODED + 10) + b"]")
+    assert A._decode({"payload": bomb, "encoding": "gzip"}) is None
+    small = gzip.compress(b'[{"type": 2}]')
+    assert A._decode({"payload": small, "encoding": "gzip"}, Budget(10)) is None  # over this call's bytes
+    assert A._decode({"payload": small, "encoding": "gzip"}, Budget(objects=1)) is None  # over its objects
+    assert A._decode({"payload": small, "encoding": "gzip"}) == [{"type": 2}]
+
+
+def test_a_replay_call_decodes_a_bounded_number_of_objects(world):  # noqa: F811
+    """At exactly the density real events have, 4 chunks once made one call hold 15 million events (4 GB)."""
+    from tidesight import api as api_mod
+    pipeline.run(world)
+    from tidesight.storage import REPLAY_MIGRATIONS, connect, migrate
+    rconn = connect(os.path.join(world.data_dir, "replay.db"))
+    migrate(rconn, REPLAY_MIGRATIONS)
+    dense = gzip.compress(("[" + ",".join(['{"type":3,"timestamp":1,"data":{"a":12}}'] * 60000) + "]").encode())
+    junk = gzip.compress(("[" + ",".join(["{}"] * 30000) + "]").encode())
+    for seq, payload in enumerate([dense, dense, dense, junk]):
+        rconn.execute("INSERT INTO chunks(received_at, site_id, site_ok, kind, session_id, seq, client_ts, meta, "
+                      "encoding, payload) VALUES (1, 'example', 1, 'replay', 'big', ?, 1, ?, 'gzip', ?)",
+                      (seq, json.dumps({"rec": "r1"}), payload))
+    rconn.close()
+    api_mod.MAX_OBJECTS_PER_CALL, saved = 150000, api_mod.MAX_OBJECTS_PER_CALL
+    try:
+        out = Api(world).call("replay", {"site": "example", "session": "example/big"})
+    finally:
+        api_mod.MAX_OBJECTS_PER_CALL = saved
+    assert out["truncated"] is True and 60000 <= len(out["events"]) <= 120000  # two chunks fit, then it stops
+    assert all(e["type"] == 3 for e in out["events"])  # and the junk chunk was never decoded
+
+
+def test_dashboard_csp_allows_only_the_sites_origins(world):  # noqa: F811
+    from tidesight.wsgi import content_security_policy
+    world.dashboard["asset_origins"] = ["https://cdn.example.net", "javascript:alert(1)", "https://x; script-src *"]
+    csp = content_security_policy(world)
+    assert "img-src 'self' data: blob: https://example.com https://cdn.example.net;" in csp
+    assert "https:;" not in csp and " http:" not in csp and "javascript" not in csp and "script-src *" not in csp
+    assert "frame-src 'self' blob: https://example.com https://cdn.example.net" in csp
+
+
+def test_cross_site_requests_to_the_api_are_refused(world):  # noqa: F811
+    pipeline.run(world)
+    app = create_app(config=world, auth=False)
+    assert call(app, "GET", "/dashboard/api/sites", headers={"Sec-Fetch-Site": "cross-site"}).code == 403
+    assert call(app, "GET", "/dashboard/api/sites", headers={"Sec-Fetch-Site": "same-origin"}).code == 200
+
+
+def test_api_json_never_carries_nan_or_infinity():
+    from tidesight.wsgi import _json
+    out = {}
+    body = b"".join(_json(lambda status, headers: out.update(status=status), "200 OK",
+                          {"a": float("inf"), "b": [float("nan"), 1.5]}))
+    assert json.loads(body) == {"a": None, "b": [None, 1.5]}
+
+
+def test_exports_stream_and_neutralise_formulas(world):  # noqa: F811
+    pipeline.run(world)
+    app = create_app(config=world, auth=False)
+    r = call(app, "GET", "/dashboard/api/export", query="site=example&what=sessions&format=json&from=2026-06-01&to=2026-06-02")
+    assert r.code == 200 and len(json.loads(r.body)) == 7
+    r = call(app, "GET", "/dashboard/api/export", query="site=example&what=sessions&format=jsonl&from=2026-06-01&to=2026-06-02")
+    assert len([json.loads(line) for line in r.body.decode().splitlines()]) == 7
+
+
+def test_public_pages_cannot_single_anyone_out(world):  # noqa: F811
+    pipeline.run(world)
+    site = world.site("example")
+    site.settings["public"] = True
+    api = Api(world)
+    for f in ("f.uid", "f.visitor", "f.asn", "f.model", "f.timezone", "f.hour", "f.event", "f.path_prefix"):
+        with pytest.raises(ApiError) as e:
+            api.call("overview", dict(RANGE, **{f: "user-1"}), public_site="example")
+        assert e.value.status == 403
+    # Allowed filters still hide tiny groups.
+    small = api.call("overview", dict(RANGE, **{"f.country": "SE"}), public_site="example")
+    assert small["totals"] == {"visitors": 0, "pageviews": 0}
+    rows = api.call("breakdown", dict(RANGE, dim="page", **{"f.country": "GB"}), public_site="example")["rows"]
+    assert rows == []  # one visitor from GB: not shown
+    # Unfiltered too: a page seen by one or two visitors is not published (a reset link with its token...).
+    assert api.call("breakdown", dict(RANGE, dim="page"), public_site="example")["rows"] == []
+    assert api.call("breakdown", dict(RANGE, dim="page"))["rows"]  # the private dashboard shows them
+    with pytest.raises(ApiError) as e:  # combining filters narrows a public view down to one person
+        api.call("overview", dict(RANGE, **{"f.country": "GB", "f.device": "desktop"}), public_site="example")
+    assert e.value.status == 400
+    prev = api.call("overview", {"site": "example", "from": "2026-06-03", "to": "2026-06-03", "f.country": "GB"},
+                    public_site="example")["previous"]
+    assert prev == {"visitors": 0, "pageviews": 0}  # the previous period is thresholded as well
+    site.settings["public_metrics"] = site.settings["public_metrics"] + ["realtime"]
+    rt = api.call("realtime", {"site": "example"}, public_site="example")
+    assert rt["pages"] == [] and rt["referrers"] == []
+
+
+def test_dense_tiny_json_is_not_parsed():
+    from tidesight.api import Api as A
+    bomb = gzip.compress(b"[" + b"{}," * 200000 + b"{}]")  # 600 KB of tiny objects: millions of dicts
+    assert A._decode({"payload": bomb, "encoding": "gzip"}) is None
+    mouse = gzip.compress(json.dumps({"pw": 1, "ph": 1, "pts": [[1, 2, 3]] * 30000}).encode())
+    assert A._decode({"payload": mouse, "encoding": "gzip"}, rrweb=False)["pw"] == 1
+
+
+def test_throttle_stays_cheap_under_a_flood_of_identities():
+    import time as _time
+    t = Throttle(max_failures=3, window=600)
+    started = _time.perf_counter()
+    for i in range(60000):  # every failure from a new client: the old clean-up made this quadratic
+        t.failed("c%d" % i)
+    assert _time.perf_counter() - started < 3
+    assert len(t._failures) <= Throttle.MAX_CLIENTS
+    for _ in range(3):
+        t.failed("attacker")
+    assert t.blocked("attacker") and not t.blocked("c0")

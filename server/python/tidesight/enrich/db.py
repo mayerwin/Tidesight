@@ -352,6 +352,17 @@ DERIVED_MIGRATIONS: List[Tuple[int, List[str]]] = [
         "CREATE INDEX IF NOT EXISTS vitals_page ON vitals(page_key, metric)",
         "CREATE INDEX IF NOT EXISTS errors_page ON errors(page_key, grp)",
     ]),
+    # Hits and sessions enrichment could not derive (malformed data): skipped, recorded, the job goes on.
+    (4, [
+        """CREATE TABLE IF NOT EXISTS failures (
+            id          INTEGER PRIMARY KEY,
+            at          INTEGER NOT NULL,
+            stage       TEXT NOT NULL,
+            hit_id      INTEGER,
+            session_key TEXT,
+            error       TEXT
+        )""",
+    ]),
 ]
 
 

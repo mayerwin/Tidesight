@@ -166,9 +166,13 @@ def cmd_config_json(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     """The resolved configuration as JSON, for the PHP/Node/Worker connectors (contains the secret)."""
     text = json.dumps(cfg.resolved(), indent=2, sort_keys=True)
     if args.out and args.out != "-":
-        fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # A new file, mode 600, then renamed over the old one: an existing file keeps no looser mode.
+        tmp = args.out + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, args.out)
         return {"written": args.out}
     print(text)
     return {}
@@ -268,6 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    os.umask(0o077)  # databases, backups, archives and exports are for this account only
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING if args.quiet else logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")

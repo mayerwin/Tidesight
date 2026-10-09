@@ -872,6 +872,8 @@ def _clean_host(host: Any) -> Optional[str]:
     elif text.count(":") == 1:
         text = text.split(":", 1)[0]
     text = text.rstrip(".")
+    if len(text) > 253 or text.count(".") > 126:  # not a DNS name (and matching it would cost O(labels^2))
+        return None
     return text or None
 
 
@@ -920,7 +922,7 @@ def _public_suffix_length(labels: Sequence[str]) -> int:
 def _match_host(host: str) -> Optional[_Site]:
     """The known site of a host; the most specific pattern wins."""
     clean = _strip_www(host)
-    labels = clean.split(".")
+    labels = clean.split(".")  # at most 127 (_clean_host refuses longer names), so this loop stays cheap
     brand = len(labels) - _public_suffix_length(labels) - 1 if len(labels) > 1 else -1
     for i in range(len(labels)):
         key = ".".join(labels[i:])

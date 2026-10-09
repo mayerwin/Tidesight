@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import csv
 import gzip
-import io
 import json
 import os
 import shutil
@@ -17,8 +16,9 @@ import sys
 import time
 from typing import Any, Dict, IO, Iterable, List, Optional, Tuple
 
-from .anonymize import IP_HEADERS, anonymize_headers, anonymize_ip
+from .anonymize import anonymize_headers, anonymize_ip
 from .config import Config
+from .enrich.raw import raw_paths
 from .storage import EVENTS_MIGRATIONS, REPLAY_MIGRATIONS, connect, migrate
 
 DB_FILES = ("events.db", "replay.db", "derived.db")
@@ -51,13 +51,17 @@ def _utc_day_start(day: str) -> int:
 # ---------------------------------------------------------------------------
 
 def backup(cfg: Config, dest: Optional[str] = None, keep: int = 7, with_replay: bool = False,
-           with_derived: bool = False) -> Dict[str, Any]:
+           with_derived: bool = False, with_archives: bool = False) -> Dict[str, Any]:
     """Consistent online copies (SQLite backup API), gzip-compressed, rotated."""
     root = dest or os.path.join(cfg.data_dir, "backups")
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     target = os.path.join(root, stamp)
     os.makedirs(target, exist_ok=True)
     names = ["events.db"] + (["replay.db"] if with_replay else []) + (["derived.db"] if with_derived else [])
+    if with_archives:
+        names += [os.path.join("archive", os.path.basename(p)) for p in raw_paths(cfg.data_dir)
+                  if os.path.basename(os.path.dirname(p)) == "archive"]
+        os.makedirs(os.path.join(target, "archive"), exist_ok=True)
     done = []
     for name in names:
         src_path = os.path.join(cfg.data_dir, name)
@@ -121,6 +125,26 @@ def _mark_derived_stale(cfg: Config) -> None:
     conn.close()
 
 
+BATCH = 2000  # rows per write transaction: the collector waits for the database at most that long
+
+
+def _delete_in_batches(conn: sqlite3.Connection, table: str, where: str, args: Tuple = ()) -> int:
+    """DELETE in short transactions, so the collector is never locked out for long (it writes between them)."""
+    total = 0
+    while True:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute("DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE %s LIMIT %d)"
+                               % (table, table, where, BATCH), args)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        total += cur.rowcount
+        if cur.rowcount < BATCH:
+            return total
+
+
 def _annotate_geo(cfg: Config, econn: sqlite3.Connection) -> int:
     """Before anonymising IPs, keep each request's derived geolocation in raw_requests.geo."""
     dconn = _db(cfg, "derived.db", readonly=True)
@@ -158,33 +182,42 @@ def privacy_clean(cfg: Config, hash_ip: bool = False, truncate_ip: bool = False,
                         "--drop-mouse and/or --retention"}
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     report: Dict[str, Any] = {"dry_run": not apply, "steps": {}}
-    econn = _db(cfg, "events.db")
+    # Raw data lives in events.db and in the yearly archives (which enrichment reads too): clean them all.
+    econns = [_raw_db(cfg, path) for path in raw_paths(cfg.data_dir)]
     rconn = _db(cfg, "replay.db")
     try:
         if apply and backup_first:
-            report["backup"] = backup(cfg, with_replay=rconn is not None and (drop_replay or drop_mouse or apply_retention))
+            report["backup"] = backup(cfg, with_replay=rconn is not None and (drop_replay or drop_mouse or apply_retention),
+                                      with_archives=len(econns) > 1)
         if hash_ip or truncate_ip:
-            report["steps"]["ip"] = _clean_ips(cfg, econn, rconn, hash_ip, truncate_ip, apply)
-        if drop_fingerprint and econn is not None:
-            n = econn.execute("SELECT COUNT(*) FROM raw_hits WHERE type = 'fp'").fetchone()[0]
-            if apply and n:
-                econn.execute("BEGIN IMMEDIATE")
-                econn.execute("DELETE FROM raw_hits WHERE type = 'fp'")
-                econn.execute("COMMIT")
+            ip_steps = [_clean_ips(cfg, econn, None, hash_ip, truncate_ip, apply) for econn in econns]
+            chunks = _clean_ips(cfg, None, rconn, hash_ip, truncate_ip, apply)
+            report["steps"]["ip"] = {"requests": sum(x["requests"] for x in ip_steps), "chunks": chunks["chunks"],
+                                     "files": len(econns)}
+        if drop_fingerprint:
+            n = 0
+            for econn in econns:
+                found = econn.execute("SELECT COUNT(*) FROM raw_hits WHERE type = 'fp'").fetchone()[0]
+                if apply and found:
+                    _delete_in_batches(econn, "raw_hits", "type = 'fp'")
+                n += found
             report["steps"]["fingerprint"] = {"fp_hits": n}
         for flag, kinds in ((drop_replay, ("replay", "snapshot")), (drop_mouse, ("mouse",))):
             if flag and rconn is not None:
                 marks = ",".join("?" * len(kinds))
                 n = rconn.execute("SELECT COUNT(*) FROM chunks WHERE kind IN (%s)" % marks, kinds).fetchone()[0]
                 if apply and n:
-                    rconn.execute("BEGIN IMMEDIATE")
-                    rconn.execute("DELETE FROM chunks WHERE kind IN (%s)" % marks, kinds)
-                    rconn.execute("COMMIT")
+                    _delete_in_batches(rconn, "chunks", "kind IN (%s)" % marks, kinds)
                 report["steps"]["chunks_" + kinds[0]] = {"chunks": n}
         if apply_retention:
-            report["steps"]["retention"] = _retention(cfg, econn, rconn, apply, now_ms)
+            steps = [_retention(cfg, econn, None, apply, now_ms) for econn in econns] or [{}]
+            out = _retention(cfg, None, rconn, apply, now_ms)
+            if any("raw_requests" in st for st in steps):
+                out["raw_requests"] = sum(st.get("raw_requests", 0) for st in steps)
+                out.pop("note", None)
+            report["steps"]["retention"] = out
         if apply:
-            for conn in (econn, rconn):
+            for conn in econns + [rconn]:
                 if conn is not None:
                     conn.execute("VACUUM")
             _mark_derived_stale(cfg)
@@ -192,10 +225,17 @@ def privacy_clean(cfg: Config, hash_ip: bool = False, truncate_ip: bool = False,
         else:
             report["note"] = "dry run: re-run with --apply to change data"
     finally:
-        for conn in (econn, rconn):
+        for conn in econns + [rconn]:
             if conn is not None:
                 conn.close()
     return report
+
+
+def _raw_db(cfg: Config, path: str) -> sqlite3.Connection:
+    conn = connect(path, cfg.server["journal_mode"], cfg.server["synchronous"], max(30000, cfg.server["busy_timeout_ms"]))
+    migrate(conn, EVENTS_MIGRATIONS)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def _clean_ips(cfg: Config, econn: Optional[sqlite3.Connection], rconn: Optional[sqlite3.Connection],
@@ -220,11 +260,12 @@ def _clean_ips(cfg: Config, econn: Optional[sqlite3.Connection], rconn: Optional
         rows = rconn.execute("SELECT id, ip FROM chunks WHERE ip IS NOT NULL AND ip NOT LIKE 'h:%'").fetchall()
         out["chunks"] = len(rows)
         if apply and rows:
-            rconn.execute("BEGIN IMMEDIATE")
-            for r in rows:
-                rconn.execute("UPDATE chunks SET ip = ? WHERE id = ?",
-                              (anonymize_ip(r["ip"], do_hash, do_truncate, secret), r["id"]))
-            rconn.execute("COMMIT")
+            for start in range(0, len(rows), BATCH):
+                rconn.execute("BEGIN IMMEDIATE")
+                for r in rows[start:start + BATCH]:
+                    rconn.execute("UPDATE chunks SET ip = ? WHERE id = ?",
+                                  (anonymize_ip(r["ip"], do_hash, do_truncate, secret), r["id"]))
+                rconn.execute("COMMIT")
     return out
 
 
@@ -236,11 +277,20 @@ def _retention(cfg: Config, econn: Optional[sqlite3.Connection], rconn: Optional
         cutoff = now_ms - r["raw_days"] * DAY_MS
         n = econn.execute("SELECT COUNT(*) FROM raw_requests WHERE received_at < ?", (cutoff,)).fetchone()[0]
         if apply and n:
-            econn.execute("BEGIN IMMEDIATE")
-            econn.execute("DELETE FROM raw_hits WHERE request_id IN (SELECT id FROM raw_requests WHERE received_at < ?)",
-                          (cutoff,))
-            econn.execute("DELETE FROM raw_requests WHERE received_at < ?", (cutoff,))
-            econn.execute("COMMIT")
+            while True:  # a few requests (and their hits) at a time: short write transactions
+                ids = [r[0] for r in econn.execute("SELECT id FROM raw_requests WHERE received_at < ? LIMIT ?",
+                                                   (cutoff, BATCH // 4))]
+                if not ids:
+                    break
+                marks = ",".join("?" * len(ids))
+                econn.execute("BEGIN IMMEDIATE")
+                try:
+                    econn.execute("DELETE FROM raw_hits WHERE request_id IN (%s)" % marks, ids)
+                    econn.execute("DELETE FROM raw_requests WHERE id IN (%s)" % marks, ids)
+                    econn.execute("COMMIT")
+                except BaseException:
+                    econn.execute("ROLLBACK")
+                    raise
         out["raw_requests"] = n
     if rconn is not None:
         for key, kinds in (("replay_days", ("replay", "snapshot")), ("mouse_days", ("mouse",))):
@@ -250,9 +300,7 @@ def _retention(cfg: Config, econn: Optional[sqlite3.Connection], rconn: Optional
                 n = rconn.execute("SELECT COUNT(*) FROM chunks WHERE received_at < ? AND kind IN (%s)" % marks,
                                   (cutoff,) + kinds).fetchone()[0]
                 if apply and n:
-                    rconn.execute("BEGIN IMMEDIATE")
-                    rconn.execute("DELETE FROM chunks WHERE received_at < ? AND kind IN (%s)" % marks, (cutoff,) + kinds)
-                    rconn.execute("COMMIT")
+                    _delete_in_batches(rconn, "chunks", "received_at < ? AND kind IN (%s)" % marks, (cutoff,) + kinds)
                 out[key] = n
     if not out:
         out["note"] = "no [retention] window is set"
@@ -354,13 +402,27 @@ def iter_export(cfg: Config, site: str, what: str, start: Optional[str], end: Op
     return cols, rows()
 
 
+# Text a spreadsheet would run as a formula (CSV injection): stored values come from visitors' browsers.
+_FORMULA_START = ("=", "+", "-", "@", chr(9), chr(13))
+
+
+def _csv_cell(v: Any) -> Any:
+    if v is None:
+        return ""
+    if isinstance(v, bytes):
+        return v.hex()
+    if isinstance(v, str) and v.startswith(_FORMULA_START):
+        return "'" + v
+    return v
+
+
 def write_export(cols: List[str], rows: Iterable[Tuple], fmt: str, fh: IO[str]) -> int:
     n = 0
     if fmt == "csv":
         w = csv.writer(fh)
         w.writerow(cols)
         for row in rows:
-            w.writerow(["" if v is None else (v.hex() if isinstance(v, bytes) else v) for v in row])
+            w.writerow([_csv_cell(v) for v in row])
             n += 1
     elif fmt == "jsonl":
         for row in rows:

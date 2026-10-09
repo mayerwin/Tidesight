@@ -11,19 +11,18 @@ filters as f.<dimension>=<value>, and bots=1 to include bot traffic.
 from __future__ import annotations
 
 import fnmatch
-import gzip
-import io
 import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import time
 import zlib
 from collections import Counter, defaultdict
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 from . import __version__
 from .config import Config, SiteConfig
@@ -43,6 +42,22 @@ PUBLIC_ENDPOINTS = {"overview", "breakdown", "sites", "realtime"}
 PUBLIC_DIMS = {"pages": ("page", "entry", "exit"), "sources": ("source", "referrer", "channel", "medium", "campaign"),
                "countries": ("country", "region", "city"), "devices": ("device", "browser", "os", "screen"),
                "events": ("event",)}
+# Bounds on decompressing stored chunks in one API call (a chunk is attacker-controlled data).
+MAX_CHUNK_DECODED = 32 * 1024 * 1024
+MAX_MOUSE_DECODED = 2 * 1024 * 1024  # a page's mouse chunk holds at most a few thousand points
+MAX_DECODED_PER_CALL = 128 * 1024 * 1024
+# Decoded JSON objects and arrays per API call: memory follows their number, not the bytes (a megabyte of
+# `[{},{},…]` is a third of a million dicts). A long, busy replay holds a few hundred thousand.
+MAX_OBJECTS_PER_CALL = 600000
+MAX_RAW_HIT = 65536  # raw hit payloads larger than this are not decoded for the session timeline
+PUBLIC_MIN_VISITORS = 3  # public rows and buckets with fewer visitors are hidden (no singling out)
+
+
+def public_dims(site: "SiteConfig") -> set:
+    """The dimensions a site's public page may break down and filter by (its public_metrics)."""
+    return {d for m in site.settings["public_metrics"] for d in PUBLIC_DIMS.get(m, ())}
+
+
 VITAL_THRESHOLDS = {"LCP": (2500, 4000), "INP": (200, 500), "CLS": (0.1, 0.25), "FCP": (1800, 3000), "TTFB": (800, 1800)}
 
 
@@ -78,8 +93,59 @@ def _json_or(raw: Optional[str], default: Any) -> Any:
         return default
     try:
         return json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return default
+
+
+class Budget:
+    """What one API call may decode of stored, client-sent JSON: bytes and objects (memory follows the number of
+    objects: a megabyte of `[{},{},…]` is a third of a million dicts)."""
+
+    def __init__(self, nbytes: Optional[int] = None, objects: Optional[int] = None) -> None:
+        self.bytes = MAX_DECODED_PER_CALL if nbytes is None else nbytes
+        self.objects = MAX_OBJECTS_PER_CALL if objects is None else objects
+        self.exhausted = False
+
+    def take(self, data: Any) -> bool:
+        """Charge a JSON text (str or bytes) about to be decoded; False when it does not fit."""
+        if isinstance(data, str):
+            n, objs = len(data), data.count("{") + data.count("[")
+        else:
+            n, objs = len(data), data.count(b"{") + data.count(b"[")
+        if n > self.bytes or objs > self.objects:
+            self.exhausted = True
+            return False
+        self.bytes -= n
+        self.objects -= objs
+        return True
+
+    def loads(self, raw: Optional[str], default: Any = None) -> Any:
+        if not raw or not self.take(raw):
+            return default
+        return _json_or(raw, default)
+
+
+def _path(url: Any) -> str:
+    """The path of a stored URL ("/" when it has none or does not parse: stored URLs are anyone's data)."""
+    try:
+        return urlsplit(url).path or "/" if isinstance(url, str) else "/"
+    except ValueError:
+        return "/"
+
+
+def _host(url: Any) -> Optional[str]:
+    try:
+        return urlsplit(url).hostname if isinstance(url, str) and url else None
+    except ValueError:
+        return None
+
+
+def _rrweb_events(data: Any) -> List[Dict[str, Any]]:
+    """The items of a stored replay or snapshot chunk that have rrweb's shape (type, timestamp)."""
+    if not isinstance(data, list):
+        return []
+    return [e for e in data if isinstance(e, dict) and type(e.get("type")) is int
+            and isinstance(e.get("timestamp"), (int, float)) and not isinstance(e.get("timestamp"), bool)]
 
 
 class Query:
@@ -106,12 +172,17 @@ class Query:
         self.start, self.end = start, end
         self.bots = params.get("bots") == "1" and not public
         self.filters: List[Tuple[str, str]] = []
+        allowed = public_dims(site) if public else None
         for k, v in params.items():
             if k.startswith("f.") and v != "":
                 name = k[2:]
                 if name not in SESSION_DIMS and name not in ("page", "event", "path_prefix"):
                     raise ApiError(400, "unknown filter %r" % name)
+                if allowed is not None and name not in allowed:  # a public page must not single anyone out
+                    raise ApiError(403, "this filter is not public")
                 self.filters.append((name, v))
+        if public and len(self.filters) > 1:  # combining filters narrows a public view down to one person
+            raise ApiError(400, "public pages take one filter at a time")
 
     def limit(self, default: int = 50, maximum: int = 1000) -> int:
         try:
@@ -194,8 +265,7 @@ class Api:
                 raise ApiError(403, "not available on public pages")
             params = dict(params, site=public_site)
             if endpoint == "breakdown":
-                allowed = {d for m in self.cfg.site(public_site).settings["public_metrics"] for d in PUBLIC_DIMS.get(m, ())}
-                if params.get("dim") not in allowed:
+                if params.get("dim") not in public_dims(self.cfg.site(public_site)):
                     raise ApiError(403, "this breakdown is not public")
             if endpoint == "realtime" and "realtime" not in self.cfg.site(public_site).settings["public_metrics"]:
                 raise ApiError(403, "realtime is not public")
@@ -238,8 +308,17 @@ class Api:
                     "SELECT site_status, COUNT(*) FROM raw_requests WHERE received_at > ? AND site_status != 'ok' "
                     "GROUP BY site_status", (int(time.time() * 1000) - 86400000,)).fetchall()
                 out["flagged_today"] = {r[0]: r[1] for r in out["flagged_today"]}
+                out["counters_today"] = [
+                    {"site": r[0], "name": r[1], "n": r[2]} for r in ev.execute(
+                        "SELECT site_id, name, n FROM counters WHERE day = ? ORDER BY site_id, name",
+                        (time.strftime("%Y-%m-%d", time.gmtime()),))]
             finally:
                 ev.close()
+        try:
+            out["disk_free_mb"] = int(shutil.disk_usage(self.cfg.data_dir).free // (1024 * 1024))
+        except OSError:
+            out["disk_free_mb"] = None
+        out["min_free_disk_mb"] = self.cfg.server["min_free_disk_mb"]
         return out
 
     def ep_overview(self, params: Dict[str, str], public: bool) -> Any:
@@ -255,9 +334,12 @@ class Api:
         if public:
             allowed = set(q.site.settings["public_metrics"])
             keep = {"visitors", "pageviews"} & allowed
-            totals = {k: v for k, v in totals.items() if k in keep}
-            prev = {k: v for k, v in prev.items() if k in keep}
-            series = [{k: v for k, v in p.items() if k in keep or k == "t"} for p in series]
+
+            def shown(d: Dict[str, Any]) -> Dict[str, Any]:
+                few = q.filters and (d.get("visitors") or 0) < PUBLIC_MIN_VISITORS  # filtered: no singling out
+                return {k: (v if k == "t" or not few else 0) for k, v in d.items() if k in keep or k == "t"}
+
+            totals, prev, series = shown(totals), shown(prev), [shown(p) for p in series]
         return {"site": q.site_id, "from": q.start, "to": q.end, "interval": interval, "totals": totals,
                 "previous": prev, "series": series}
 
@@ -328,7 +410,10 @@ class Api:
         finally:
             conn.close()
         if public:
-            rows = [{k: v for k, v in r.items() if k in ("value", "visitors", "pageviews", "country")} for r in rows]
+            # Rows of one or two visitors are not shown publicly: a page only one person saw may be a reset link
+            # with its token in the path, or tell what that person did.
+            rows = [{k: v for k, v in r.items() if k in ("value", "visitors", "pageviews", "country")} for r in rows
+                    if (r.get("visitors") or 0) >= PUBLIC_MIN_VISITORS]
         return {"dim": dim, "rows": rows, "from": q.start, "to": q.end}
 
     def _pages(self, conn: sqlite3.Connection, q: Query, limit: int, by: str = "page") -> List[Dict[str, Any]]:
@@ -422,17 +507,20 @@ class Api:
         ev = self._conn("events.db")
         if ev is None:
             return {"active": 0, "minutes": minutes, "per_minute": [], "pages": [], "referrers": [], "recent": []}
-        try:
+        try:  # raw data is client-controlled: only pageviews' payloads are read, and only reasonable ones
             rows = ev.execute(
-                "SELECT h.type, h.name, h.received_at, h.visitor_id, h.url, h.data, h.request_id FROM raw_hits h "
-                "WHERE h.site_id = ? AND h.received_at > ? AND h.site_ok = 1 ORDER BY h.id DESC LIMIT 20000",
-                (site_id, since)).fetchall()
+                "SELECT h.type, h.name, h.received_at, h.visitor_id, h.url, h.request_id, "
+                "CASE WHEN h.type = 'pageview' AND length(h.data) <= 65536 THEN h.data END AS data FROM raw_hits h "
+                "WHERE h.site_id = ? AND h.received_at > ? AND h.site_ok = 1 ORDER BY h.id DESC LIMIT ?",
+                (site_id, since, 5000 if public else 20000)).fetchall()
         finally:
             ev.close()
         active = {r["visitor_id"] for r in rows if r["visitor_id"] and r["received_at"] > now - 5 * 60000}
         per_min: Dict[int, Dict[str, Any]] = {}
         pages: Counter = Counter()
         refs: Counter = Counter()
+        page_vis: Dict[str, set] = defaultdict(set)
+        ref_vis: Dict[str, set] = defaultdict(set)
         for r in rows:
             m = (now - r["received_at"]) // 60000
             b = per_min.setdefault(m, {"pageviews": 0, "visitors": set()})
@@ -440,17 +528,25 @@ class Api:
                 b["visitors"].add(r["visitor_id"])
             if r["type"] == "pageview":
                 b["pageviews"] += 1
-                path = urlsplit(r["url"] or "").path or "/"
+                path = _path(r["url"])
                 pages[path] += 1
-                ref = (_json_or(r["data"], {}) or {}).get("ref") or ""
-                host = urlsplit(ref).hostname if ref else None
-                page_host = urlsplit(r["url"] or "").hostname
+                page_vis[path].add(r["visitor_id"])
+                data = _json_or(r["data"], {})
+                ref = data.get("ref") if isinstance(data, dict) else None
+                host, page_host = _host(ref), _host(r["url"])
                 if host and host != page_host:
-                    refs[host] += 1
+                    refs[host[:253]] += 1
+                    ref_vis[host[:253]].add(r["visitor_id"])
         series = [{"m": -m, "pageviews": per_min.get(m, {}).get("pageviews", 0),
                    "visitors": len(per_min.get(m, {}).get("visitors", ()))} for m in range(minutes - 1, -1, -1)]
+        if public:  # only what the site's public metrics show, and only what several visitors did
+            shown = set(self.cfg.site(site_id).settings["public_metrics"])
+            pages = Counter({k: v for k, v in pages.items() if "pages" in shown
+                             and len(page_vis[k]) >= PUBLIC_MIN_VISITORS})
+            refs = Counter({k: v for k, v in refs.items() if "sources" in shown
+                            and len(ref_vis[k]) >= PUBLIC_MIN_VISITORS})
         recent = [] if public else [
-            {"type": r["type"], "name": r["name"], "at": r["received_at"], "path": urlsplit(r["url"] or "").path}
+            {"type": r["type"], "name": r["name"], "at": r["received_at"], "path": _path(r["url"])}
             for r in rows[:25] if r["type"] not in ("engagement",)]
         return {"active": len(active), "minutes": minutes, "per_minute": series,
                 "pages": [{"value": k, "pageviews": v} for k, v in pages.most_common(10)],
@@ -668,15 +764,31 @@ class Api:
             conn.close()
 
     @staticmethod
-    def _decode(row: sqlite3.Row) -> Any:
+    def _decode(row: sqlite3.Row, budget: Optional[Budget] = None, limit: int = MAX_CHUNK_DECODED,
+                rrweb: bool = True) -> Any:
+        """A chunk's JSON. A stored chunk is anyone's data, so decoding is bounded: decompression (a gzip bomb)
+        to `limit` bytes per chunk, and the bytes and objects of one API call (budget); rrweb data must also have
+        rrweb's density (megabytes of tiny values, `[{},{},…]`, are no recording)."""
+        budget = budget or Budget()
         data = row["payload"]
+        limit = min(limit, budget.bytes)
         try:
-            if row["encoding"] == "gzip":
-                data = gzip.decompress(data)
-            elif row["encoding"] == "zlib":
-                data = zlib.decompress(data)
+            if row["encoding"] in ("gzip", "zlib"):
+                d = zlib.decompressobj(16 + zlib.MAX_WBITS if row["encoding"] == "gzip" else zlib.MAX_WBITS)
+                data = d.decompress(data, limit + 1)
+                if len(data) > limit or d.unconsumed_tail:
+                    budget.exhausted = True
+                    return None
+            elif len(data) > limit:
+                budget.exhausted = True
+                return None
+            if rrweb and (data.count(b"{") + data.count(b"[") > len(data) // 8 + 8
+                          or data.count(b",") > len(data) // 4 + 8):
+                return None  # real rrweb events are far sparser in brackets and commas
+            if not budget.take(data):
+                return None
             return json.loads(data.decode("utf-8"))
-        except (OSError, ValueError, zlib.error):
+        except (OSError, ValueError, zlib.error, RecursionError):
             return None
 
     def _mouse(self, q: Query, page: str, device: Optional[str]) -> Dict[str, Any]:
@@ -687,14 +799,21 @@ class Api:
         cols, rows_n = 50, 100
         grid = [[0] * cols for _ in range(rows_n)]
         n = 0
+        budget = Budget()
         for r in rows:
-            if (urlsplit(r["url"] or "").path or "/") != page:
+            if _path(r["url"]) != page:
                 continue
-            d = self._decode(r)
-            if not isinstance(d, dict) or not d.get("pw") or not d.get("ph"):
+            d = self._decode(r, budget, limit=MAX_MOUSE_DECODED, rrweb=False)
+            if not isinstance(d, dict):
                 continue
-            pw, ph = float(d["pw"]), float(d["ph"])
-            for pt in d.get("pts") or []:
+            try:
+                pw, ph = float(d.get("pw") or 0), float(d.get("ph") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not (0 < pw < 1e6 and 0 < ph < 1e7):
+                continue
+            pts = d.get("pts")
+            for pt in pts if isinstance(pts, list) else []:
                 try:
                     x, y = float(pt[0]), float(pt[1])
                 except (TypeError, ValueError, IndexError):
@@ -708,10 +827,11 @@ class Api:
         q = self.q(params, public)
         page = params.get("page") or "/"
         rows = self._chunks("SELECT payload, encoding, url, received_at FROM chunks WHERE site_id = ? AND kind = 'snapshot' "
-                            "ORDER BY id DESC LIMIT 200", (q.site_id,))
+                            "AND site_ok = 1 ORDER BY id DESC LIMIT 200", (q.site_id,))
         for r in rows:
-            if (urlsplit(r["url"] or "").path or "/") == page:
-                return {"page": page, "at": r["received_at"], "url": r["url"], "snapshot": self._decode(r)}
+            if _path(r["url"]) == page:  # a snapshot is [Meta, FullSnapshot]: nothing more is passed on
+                return {"page": page, "at": r["received_at"], "url": r["url"],
+                        "snapshot": _rrweb_events(self._decode(r))[:2] or None}
         return {"page": page, "snapshot": None}
 
     def ep_replays(self, params: Dict[str, str], public: bool) -> Any:
@@ -735,20 +855,23 @@ class Api:
         if site_id != params.get("site"):
             raise ApiError(400, "session does not belong to this site")
         rows = self._chunks("SELECT payload, encoding, meta, page_id, seq, client_ts FROM chunks WHERE site_id = ? AND "
-                            "session_id = ? AND kind = 'replay' ORDER BY client_ts, id", (site_id, sid))
+                            "session_id = ? AND kind = 'replay' AND site_ok = 1 ORDER BY client_ts, id LIMIT 5000",
+                            (site_id, sid))
         events: List[Any] = []
         recs: Dict[Tuple[str, int], Any] = {}
+        budget = Budget()
         for r in rows:
             meta = _json_or(r["meta"], {})
+            if not isinstance(meta, dict):
+                meta = {}
             k = (str(meta.get("rec") or r["page_id"] or ""), int(r["seq"] or 0))
             if k in recs:
                 continue  # a retried chunk
-            data = self._decode(r)
+            data = self._decode(r, budget)
             recs[k] = True
-            if isinstance(data, list):
-                events.extend(e for e in data if isinstance(e, dict))
-        events.sort(key=lambda e: e.get("timestamp", 0))
-        return {"session": key, "events": events, "chunks": len(recs)}
+            events.extend(_rrweb_events(data))
+        events.sort(key=lambda e: e["timestamp"])
+        return {"session": key, "events": events, "chunks": len(recs), "truncated": budget.exhausted}
 
     def ep_sessions(self, params: Dict[str, str], public: bool) -> Any:
         q = self.q(params, public)
@@ -783,13 +906,15 @@ class Api:
             conn.close()
         raw = {}
         ev = self._conn("events.db")
+        budget = Budget(16 * 1024 * 1024, 200000)  # payloads are anyone's data: a bounded share of them is decoded
         if ev is not None and hits:
             try:
                 ids = [h["hit_id"] for h in hits]
                 for start in range(0, len(ids), 500):
                     chunk = ids[start:start + 500]
-                    for r in ev.execute("SELECT id, data FROM raw_hits WHERE id IN (%s)" % ",".join("?" * len(chunk)), chunk):
-                        raw[r["id"]] = _json_or(r["data"], None)
+                    for r in ev.execute("SELECT id, CASE WHEN length(data) <= %d THEN data END AS data FROM raw_hits "
+                                        "WHERE id IN (%s)" % (MAX_RAW_HIT, ",".join("?" * len(chunk))), chunk):
+                        raw[r["id"]] = budget.loads(r["data"])
             finally:
                 ev.close()
         for h in hits:

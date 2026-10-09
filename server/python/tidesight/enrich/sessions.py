@@ -3,6 +3,11 @@
 A session is keyed by the tracker's session id (or, for no-JS pixel hits,
 by the cookieless hash with the idle timeout). Every rebuild recomputes the
 whole session from its hits, so late or retried events simply update it.
+
+Anyone can send hits, so a rebuild must stay cheap whatever a session holds: its
+cost is linear in the session's hits, and a session with more than
+MAX_SESSION_HITS hits (no person's visit: a script) is built once from its first
+hits, marked as a bot, and not rebuilt again.
 """
 
 from __future__ import annotations
@@ -10,14 +15,16 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional
 
 from ..config import Config
 from . import bots, sources
 from .timeutil import local_day, local_hour
 from .util import url_parts
 
-SESSIONS_VERSION = 1
+SESSIONS_VERSION = 2
+
+MAX_SESSION_HITS = 20000
 
 ENGAGED_MS = 10000  # GA4: an engaged session lasts 10 s or more, or has 2+ pageviews
 
@@ -76,18 +83,32 @@ def _client_signals(fp_extra: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def rebuild(conn: sqlite3.Connection, cfg: Config, keys: Iterable[str], reader: Any,
-            rconn: Optional[sqlite3.Connection], enricher: Any) -> int:
+            rconn: Optional[sqlite3.Connection], enricher: Any, stats: Optional[Dict[str, Any]] = None) -> int:
     n = 0
     for key in sorted(keys):
-        rebuild_one(conn, cfg, key, reader, rconn, enricher)
-        n += 1
+        conn.execute("SAVEPOINT session")
+        try:
+            rebuild_one(conn, cfg, key, reader, rconn, enricher)
+            conn.execute("RELEASE session")
+            n += 1
+        except Exception as exc:  # one session's bad data must not stop the others
+            conn.execute("ROLLBACK TO session")
+            conn.execute("RELEASE session")
+            enricher.failed(conn, "session", exc, stats if stats is not None else {}, session_key=key)
     return n
 
 
 def rebuild_one(conn: sqlite3.Connection, cfg: Config, key: str, reader: Any,
                 rconn: Optional[sqlite3.Connection], enricher: Any) -> None:
-    old = conn.execute("SELECT site_id, day FROM sessions WHERE session_key = ?", (key,)).fetchone()
-    rows = conn.execute("SELECT * FROM hits WHERE session_key = ? AND dup = 0 ORDER BY ts, hit_id", (key,)).fetchall()
+    old = conn.execute("SELECT site_id, day, hits FROM sessions WHERE session_key = ?", (key,)).fetchone()
+    if old is not None and (old["hits"] or 0) > MAX_SESSION_HITS:
+        return  # a flood, built once (as a bot) when it went over the limit: not rebuilt for every hit it gets
+    rows = conn.execute("SELECT * FROM hits WHERE session_key = ? AND dup = 0 ORDER BY ts, hit_id LIMIT ?",
+                        (key, MAX_SESSION_HITS + 1)).fetchall()
+    total = len(rows)
+    if total > MAX_SESSION_HITS:
+        rows = rows[:MAX_SESSION_HITS]
+        total = conn.execute("SELECT COUNT(*) FROM hits WHERE session_key = ? AND dup = 0", (key,)).fetchone()[0]
     if old is not None:
         conn.execute("INSERT OR IGNORE INTO dirty_days(site_id, day) VALUES (?, ?)", (old["site_id"], old["day"]))
     conn.execute("DELETE FROM pageviews WHERE session_key = ?", (key,))
@@ -139,6 +160,9 @@ def rebuild_one(conn: sqlite3.Connection, cfg: Config, key: str, reader: Any,
     has_js = 1 if "collect" in endpoints else 0
     verdict = bots.classify(ua_string, headers, _client_signals(fp_extra), geo.get("asn"), geo.get("as_org"),
                             bool(has_js), enricher.crawlers or None)
+    if total > MAX_SESSION_HITS:
+        verdict = dict(verdict, is_bot=True, bot_kind=verdict.get("bot_kind") or bots.AUTOMATION, score=1.0,
+                       reasons=list(verdict.get("reasons") or []) + ["too_many_hits"])
 
     has_replay = 0
     if rconn is not None and "/" in key and not key.split("/", 1)[1].startswith(("px-", "hit-")):
@@ -167,7 +191,7 @@ def rebuild_one(conn: sqlite3.Connection, cfg: Config, key: str, reader: Any,
         "session_key": key, "site_id": site_id, "site_ok": min(r["site_ok"] for r in rows), "visitor_key": visitor_key,
         "vid": vid, "uid": uid, "started_at": started, "ended_at": ended, "day": day,
         "hour": local_hour(started, tz), "duration_ms": ended - started,
-        "engaged_ms": engaged_ms, "pageviews": n_pv, "events": n_events, "hits": len(rows), "engaged": engaged,
+        "engaged_ms": engaged_ms, "pageviews": n_pv, "events": n_events, "hits": total, "engaged": engaged,
         "bounce": 1 - engaged, "is_new": is_new, "session_number": sn, "entry_path": entry_path,
         "entry_url": entry_url, "entry_title": first_extra.get("title"), "exit_path": exit_path,
         "source": src.get("source"), "medium": src.get("medium"), "campaign": src.get("campaign"),
@@ -196,26 +220,46 @@ def rebuild_one(conn: sqlite3.Connection, cfg: Config, key: str, reader: Any,
     _record_identity_evidence(conn, site_id, vid, uid, values["fp"], values["ck"], pvs)
 
 
+class _Page:
+    """What the hits of one page (page_key) add up to, computed in one pass over the session."""
+    __slots__ = ("engaged", "depth", "last_ts", "status")
+
+    def __init__(self) -> None:
+        self.engaged = 0
+        self.depth: Optional[int] = None
+        self.last_ts: Optional[int] = None
+        self.status: Any = None  # the last tidesight('status', …) reported for the page, as a (value,) tuple
+
+
 def _rebuild_pageviews(conn: sqlite3.Connection, key: str, site_id: str, tz: str, rows: List[sqlite3.Row],
                        pvs: List[sqlite3.Row]) -> None:
-    by_page: Dict[str, List[sqlite3.Row]] = {}
+    pages: Dict[str, _Page] = {}
     for r in rows:
-        if r["page_key"]:
-            by_page.setdefault(r["page_key"], []).append(r)
+        if not r["page_key"]:
+            continue
+        page = pages.get(r["page_key"])
+        if page is None:
+            page = pages[r["page_key"]] = _Page()
+        if r["type"] == "engagement":
+            page.engaged += r["ms"] or 0
+        if r["sd"] is not None and (page.depth is None or r["sd"] > page.depth):
+            page.depth = r["sd"]
+        if page.last_ts is None or r["ts"] > page.last_ts:
+            page.last_ts = r["ts"]
+        if r["type"] == "status":  # reported after the pageview: tidesight('status', 404)
+            st = _extra(r).get("st")
+            if st is not None:
+                page.status = (st,)
     for i, pv in enumerate(pvs):
-        page_rows = by_page.get(pv["page_key"], [pv])
-        engaged = sum(r["ms"] or 0 for r in page_rows if r["type"] == "engagement")
-        depths = [r["sd"] for r in page_rows if r["sd"] is not None]
+        page = pages.get(pv["page_key"]) or _Page()
+        engaged, depth = page.engaged, page.depth
         if i + 1 < len(pvs):
             duration = pvs[i + 1]["ts"] - pv["ts"]
         else:
-            duration = max(r["ts"] for r in page_rows) - pv["ts"]
+            duration = max(page.last_ts if page.last_ts is not None else pv["ts"], pv["ts"]) - pv["ts"]
         extra = _extra(pv)
         host, path, query, frag = url_parts(pv["url"])
-        st = extra.get("st")
-        for r in page_rows:  # reported after the pageview: tidesight('status', 404)
-            if r["type"] == "status":
-                st = _extra(r).get("st", st)
+        st = page.status[0] if page.status is not None else extra.get("st")
         conn.execute(
             "INSERT OR REPLACE INTO pageviews(page_key, hit_id, site_id, session_key, ts, day, hour, url, host, path, "
             "query, hash, title, referrer, nav, status, seq, engaged_ms, scroll_max, duration_ms, is_entry, is_exit) "
@@ -223,7 +267,7 @@ def _rebuild_pageviews(conn: sqlite3.Connection, key: str, site_id: str, tz: str
             (pv["page_key"], pv["hit_id"], site_id, key, pv["ts"], local_day(pv["ts"], tz), local_hour(pv["ts"], tz),
              pv["url"], host, path,
              query, frag, extra.get("title"), extra.get("ref"), extra.get("nav"),
-             st if isinstance(st, int) else None, i + 1, engaged, max(depths) if depths else None,
+             st if isinstance(st, int) else None, i + 1, engaged, depth,
              max(0, duration), 1 if i == 0 else 0, 1 if i == len(pvs) - 1 else 0))
         conn.execute("INSERT OR IGNORE INTO dirty_days(site_id, day) VALUES (?, ?)", (site_id, local_day(pv["ts"], tz)))
 

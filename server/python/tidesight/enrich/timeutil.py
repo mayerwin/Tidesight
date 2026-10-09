@@ -29,14 +29,21 @@ def zone(name: Optional[str]) -> tzinfo:
     return timezone.utc
 
 
+def _local(ms: int, tz_name: Optional[str]) -> datetime:
+    try:
+        return datetime.fromtimestamp(ms / 1000.0, zone(tz_name))
+    except (OverflowError, OSError, ValueError):  # outside what datetime handles: the epoch
+        return datetime.fromtimestamp(0, timezone.utc)
+
+
 def local_day(ms: int, tz_name: Optional[str]) -> str:
     """YYYY-MM-DD of a UTC millisecond timestamp in the given time zone."""
-    return datetime.fromtimestamp(ms / 1000.0, zone(tz_name)).strftime("%Y-%m-%d")
+    return _local(ms, tz_name).strftime("%Y-%m-%d")
 
 
 def local_hour(ms: int, tz_name: Optional[str]) -> int:
     """Hour of the day (0-23) of a UTC millisecond timestamp in the given time zone."""
-    return datetime.fromtimestamp(ms / 1000.0, zone(tz_name)).hour
+    return _local(ms, tz_name).hour
 
 
 def day_bounds(day: str, tz_name: Optional[str]) -> tuple:

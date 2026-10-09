@@ -385,3 +385,99 @@ def test_per_hit_lookups_have_indexes(world):
                         ("hits", ["session_key"]), ("errors", ["session_key"]), ("pageviews", ["session_key"])):
         assert indexed(table, cols), (table, cols)
     conn.close()
+
+
+POISON = [  # values a client can send that once crashed enrichment (and every later run) on the same hit
+    {"sent": 1e300}, {"sent": 10 ** 30},
+    {"events": [{"t": "pageview", "id": "p1", "pid": "pp1", "url": "https://example.com/", "st": "\u00b2"}]},
+    {"events": [{"t": "engagement", "id": "p2", "pid": "pp1", "ms": 10 ** 400}]},
+    {"events": [{"t": "pageview", "id": "p3", "pid": "pp2", "url": "https://example.com/", "title": ["x"]}]},
+    {"events": [{"t": "pageview", "id": "p4", "pid": "pp3", "url": "https://example.com/", "ctx": {"ua": 1}}]},
+    {"events": [{"t": "event", "id": "p5", "pid": "pp1", "n": "x", "ts": -9000000000000000000}]},
+    {"events": [{"t": "fp", "id": "p6", "pid": "pp1", "h": "x", "bot": {"lg": "__INF__"}}]}, {"sent": "__INF__"},
+    {"events": [{"t": "pageview", "id": "p7", "pid": "pp4", "url": "https://example.com/", "ctx": {"tp": "__INF__"}}]},
+    {"events": [{"t": "pageview", "id": "p8", "pid": "pp5", "url": "https://example.com/",
+                 "ref": "http://" + "a." * 30000 + "com/"}]},
+]
+
+
+def test_malformed_values_never_stop_enrichment(tmp_path, monkeypatch):
+    import time as _time
+    cfg = make_config(tmp_path)
+    tr = Traffic(cfg, monkeypatch)
+    # The collector now refuses numbers too large for a float (1e999); data stored by older versions may still
+    # hold them, so enrichment must cope: post as an older collector would have stored them.
+    monkeypatch.setattr(collect, "_finite_float", float)
+    for i, poison in enumerate(POISON):
+        env = {"events": [pv("ok%d" % i, "pok%d" % i, "https://example.com/p%d" % i, T0 + i * 1000, ns=1, sn=1, pn=1)]}
+        env.update(poison)
+        events = env.pop("events")
+        body = json.dumps(dict({"v": 1, "site": "example", "vid": "visitorPOIS%02d" % i, "sid": "sessP%02d" % i,
+                                "sent": T0 + i * 1000, "events": events}, **env)).replace('"__INF__"', "1e999")
+        r = tr.at(T0 + i * 1000).h.post(None, raw=body.encode(), headers={"Origin": "https://example.com", "User-Agent": CHROME})
+        assert r.code == 204, (i, r.status)
+    tr.batch(T0 + 60000, "visitorGOOD01", "sessGOOD1", [pv("g1", "pg1", "https://example.com/good", T0 + 59000, sn=1)])
+    tr.h.close()
+    started = _time.monotonic()
+    stats = pipeline.run(cfg)
+    assert _time.monotonic() - started < 20
+    db = derived_path(cfg.data_dir)
+    assert query_db(db, "SELECT COUNT(*) AS n FROM sessions WHERE session_key = 'example/sessGOOD1'")[0]["n"] == 1
+    raw_max = query_db(os.path.join(cfg.data_dir, "events.db"), "SELECT MAX(id) AS m FROM raw_hits")[0]["m"]
+    assert query_db(db, "SELECT last_id FROM job_state WHERE job = 'enrich'")[0]["last_id"] == raw_max
+    assert pipeline.run(cfg)["hits"] == 0  # nothing left to retry forever
+    assert stats.get("failures", 0) == len(query_db(db, "SELECT id FROM failures"))
+
+
+def test_privacy_clean_covers_the_archives(world):
+    from tidesight.maintenance import archive, privacy_clean
+    pipeline.run(world)
+    archive(world, before="2026-06-02", apply=True)
+    arch = os.path.join(world.data_dir, "archive", "events-2026.db")
+    assert query_db(arch, "SELECT COUNT(*) AS n FROM raw_requests WHERE ip NOT LIKE 'h:%'")[0]["n"] > 0
+    dry = privacy_clean(world, hash_ip=True, drop_fingerprint=True)
+    assert dry["steps"]["ip"]["files"] == 2 and dry["steps"]["fingerprint"]["fp_hits"] == 2
+    done = privacy_clean(world, hash_ip=True, drop_fingerprint=True, apply=True)
+    assert any(f["file"].startswith("archive") for f in done["backup"]["files"])
+    for db in (arch, os.path.join(world.data_dir, "events.db")):
+        assert query_db(db, "SELECT COUNT(*) AS n FROM raw_requests WHERE ip NOT LIKE 'h:%'")[0]["n"] == 0
+        assert query_db(db, "SELECT COUNT(*) AS n FROM raw_hits WHERE type = 'fp'")[0]["n"] == 0
+        headers = [json.loads(r["headers"]) for r in query_db(db, "SELECT headers FROM raw_requests")]
+        assert not any("198.51.100" in h.get("x-forwarded-for", "") for h in headers)
+    pipeline.run(world)  # the rebuild finds no raw address anywhere
+    assert all((s["client_ip"] or "h:").startswith("h:") for s in sessions(world).values())
+
+
+def test_session_rebuilds_stay_linear(tmp_path, monkeypatch):
+    """Anyone can send hits: 8,000 pageviews sharing one page id once took half a minute to rebuild (and every
+    later hit of that session as long again), stalling enrichment for every site."""
+    import time as _time
+    cfg = make_config(tmp_path)
+    tr = Traffic(cfg, monkeypatch)
+    for b in range(40):
+        tr.batch(T0 + b * MIN, "visitorFLOOD1", "sessFLOOD1", [
+            {"t": "pageview", "id": "f%d-%d" % (b, i), "pid": "SAME", "url": "https://example.com/x",
+             "ts": T0 + b * MIN + i} for i in range(200)])
+    tr.h.close()
+    started = _time.monotonic()
+    pipeline.run(cfg)
+    assert _time.monotonic() - started < 10
+    row = sessions(cfg)["example/sessFLOOD1"]
+    assert row["pageviews"] == 8000 and row["hits"] == 8000
+
+
+def test_flooded_session_is_a_bot_built_once(tmp_path, monkeypatch):
+    from tidesight.enrich import sessions as sessions_mod
+    monkeypatch.setattr(sessions_mod, "MAX_SESSION_HITS", 100)
+    cfg = make_config(tmp_path)
+    tr = Traffic(cfg, monkeypatch)
+    tr.batch(T0, "visitorFLOOD2", "sessFLOOD2", [
+        pv("g%d" % i, "pg%d" % i, "https://example.com/p%d" % i, T0 + i, sn=1, pn=i + 1) for i in range(150)])
+    pipeline.run(cfg)
+    row = sessions(cfg)["example/sessFLOOD2"]
+    assert (row["is_bot"], row["bot_kind"], row["hits"], row["pageviews"]) == (1, "automation", 150, 100)
+    assert "too_many_hits" in json.loads(row["bot_reasons"])
+    tr.batch(T0 + MIN, "visitorFLOOD2", "sessFLOOD2", [pv("late", "plate", "https://example.com/late", T0 + MIN)])
+    tr.h.close()
+    pipeline.run(cfg)
+    assert sessions(cfg)["example/sessFLOOD2"]["hits"] == 150  # not rebuilt for each new hit

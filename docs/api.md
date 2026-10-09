@@ -7,7 +7,11 @@ The dashboard is a static page on top of a small read-only JSON API (`server/pyt
 | URL | Access |
 |---|---|
 | `/dashboard/api/<endpoint>` | HTTP Basic authentication with a `[dashboard] users` account (`docs/configuration.md`). |
-| `/share/<site>/api/<endpoint>` | Only for sites with `public = true`, and only `overview`, `breakdown`, `sites` and `realtime`, limited to the site's `public_metrics`. With a `share_token`, add `?t=<token>`. |
+| `/share/<site>/api/<endpoint>` | Only for sites with `public = true`, and only `overview`, `breakdown`, `sites` and `realtime`, limited to the site's `public_metrics`. With a `share_token`, send it as the `X-Share-Token` header or `?t=<token>`. |
+
+Public share APIs are restricted further, so a public page cannot single anyone out: breakdowns and filters (`f.<dim>`) only use the dimensions of the site's `public_metrics` (pages, sources, countries, devices, events; never `uid`, `visitor`, `asn`, `timezone`, `hour`…), and only one filter at a time; breakdown rows of fewer than 3 visitors are hidden (a page one person saw may be a reset link with its token in the path); with a filter, every overview number (totals, previous period, each point of the series) of fewer than 3 visitors shows as zero; realtime lists pages and referrers only when those metrics are public and at least 3 visitors were there; exports are not available, and each client may make 120 calls a minute. Wrong tokens count as failed logins.
+
+Stored recordings are anyone's data, so `replay`, `snapshot` and `session` decode a bounded amount per call (bytes and JSON objects); `replay` answers `"truncated": true` when a recording was larger, and only events with rrweb's shape are passed on.
 
 ```sh
 curl -u admin:… "https://stats.example.com/dashboard/api/overview?site=example&from=2026-09-01&to=2026-09-30"

@@ -1,7 +1,7 @@
 // Session replays: recorded visits (sampled) and an rrweb player. Inputs are masked at recording time.
 import { card, el, table } from '../charts.js';
 import * as fmt from '../fmt.js';
-import { loadPlayer } from '../player.js';
+import { loadPlayer, sanitizeEvents } from '../player.js';
 import { labelFor } from '../widgets.js';
 
 export const attachFirst = true;
@@ -50,6 +50,7 @@ async function renderPlayer(root, ctx, key) {
   const wrap = el('div', { class: 'player-wrap' });
   c.body.appendChild(wrap);
   const width = Math.max(320, Math.min(1100, wrap.clientWidth || 900));
-  new Player({ target: wrap, props: { events: rep.events, width, height: Math.round(width * 0.62), autoPlay: false, showController: true, skipInactive: true } });
+  new Player({ target: wrap, props: { events: sanitizeEvents(rep.events), width, height: Math.round(width * 0.62), autoPlay: false, showController: true, skipInactive: true } });
   c.body.appendChild(el('p', { class: 'note', text: fmt.num(rep.events.length) + ' recorded events in ' + rep.chunks + ' chunks. Password fields are never recorded; other inputs are masked unless configured otherwise.' }));
+  if (rep.truncated) c.body.appendChild(el('p', { class: 'note', text: 'This recording is larger than one view decodes: only its beginning is shown.' }));
 }

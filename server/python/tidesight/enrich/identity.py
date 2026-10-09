@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 from ..config import Config
 

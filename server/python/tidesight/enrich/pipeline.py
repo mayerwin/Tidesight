@@ -15,7 +15,7 @@ import logging
 import os
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from ..config import Config, SiteConfig
 from ..storage import connect
@@ -29,7 +29,8 @@ from .util import b36, jdump, num, status_code, to_int, to_str, url_parts
 
 log = logging.getLogger("tidesight.enrich")
 
-PIPELINE_VERSION = 2  # bump when hit processing changes
+PIPELINE_VERSION = 3  # bump when hit processing changes
+DAY_MS = 86400000
 
 # Hit types copied to the typed tables.
 CLICK_TYPES = ("click", "rage", "dead", "errclick")
@@ -164,7 +165,7 @@ class Enricher:
                     break
                 with transaction(conn):
                     affected = self._batch(conn, rows, stats)
-                    stats["sessions"] += sessions.rebuild(conn, self.cfg, affected, reader, rconn, self)
+                    stats["sessions"] += sessions.rebuild(conn, self.cfg, affected, reader, rconn, self, stats)
                     set_state(conn, "enrich", version, rows[-1]["hit_id"])
                 stats["hits"] += len(rows)
                 stats["batches"] += 1
@@ -184,14 +185,31 @@ class Enricher:
         affected: Set[str] = set()
         reqs: Dict[int, Dict[str, Any]] = {}
         for row in rows:
-            rid = row["request_id"]
-            if rid not in reqs:
-                reqs[rid] = self.request(conn, row)
-            req = reqs[rid]
-            key = self.hit(conn, row, req, stats)
+            conn.execute("SAVEPOINT hit")
+            try:
+                rid = row["request_id"]
+                if rid not in reqs:
+                    reqs[rid] = self.request(conn, row)
+                key = self.hit(conn, row, reqs[rid], stats)
+                conn.execute("RELEASE hit")
+            except Exception as exc:  # one bad hit must never stop the others, nor every later run
+                conn.execute("ROLLBACK TO hit")
+                conn.execute("RELEASE hit")
+                self.failed(conn, "hit", exc, stats, hit_id=row["hit_id"])
+                continue
             if key:
                 affected.add(key)
         return affected
+
+    def failed(self, conn: sqlite3.Connection, stage: str, exc: BaseException, stats: Dict[str, Any],
+               hit_id: Optional[int] = None, session_key: Optional[str] = None) -> None:
+        """Record what could not be derived (the raw data stays; a later version may handle it)."""
+        stats["failures"] = stats.get("failures", 0) + 1
+        if stats["failures"] <= 5:
+            log.warning("enrichment skipped %s %s: %s", stage, hit_id if hit_id is not None else session_key,
+                        repr(exc)[:300])
+        conn.execute("INSERT INTO failures(at, stage, hit_id, session_key, error) VALUES (?, ?, ?, ?, ?)",
+                     (int(time.time() * 1000), stage, hit_id, session_key, repr(exc)[:500]))
 
     # -- requests ---------------------------------------------------------------
 
@@ -212,8 +230,8 @@ class Enricher:
         user_agent = headers.get("user-agent")
         hints = {k: v for k, v in headers.items() if k.startswith("sec-ch-ua")}
         ua_id = self.ua_id(conn, user_agent, hints, None)
-        sent = envelope.get("sent")
-        skew = row["received_at"] - int(sent) if isinstance(sent, (int, float)) and not isinstance(sent, bool) else None
+        sent = to_int(envelope.get("sent"))  # a clock more than a year off is not a clock: ignore it
+        skew = row["received_at"] - sent if sent is not None and abs(row["received_at"] - sent) < 366 * DAY_MS else None
         out = {
             "request_id": row["request_id"], "received_at": row["received_at"], "site_id": row["site_id"],
             "site_ok": row["site_ok"], "endpoint": row["endpoint"], "client_ip": ip, "ip_source": ip_source,
@@ -295,7 +313,8 @@ class Enricher:
         if cts is None or req.get("skew_ms") is None:
             return received
         ts = cts + req["skew_ms"]
-        return received if ts > received + 60000 else ts
+        # Not in the future, and not more than 30 days late (a batch kept offline): otherwise server time.
+        return received if ts > received + 60000 or ts < received - 30 * DAY_MS else ts
 
     def session_key(self, conn: sqlite3.Connection, row: sqlite3.Row, req: Dict[str, Any], ts: int) -> str:
         site = row["site_id"] or ""
@@ -344,18 +363,7 @@ class Enricher:
         fp = None
         extra: Optional[Dict[str, Any]] = None
         if htype == "pageview":
-            ctx = data.get("ctx") if isinstance(data.get("ctx"), dict) else {}
-            extra = {k: data.get(k) for k in ("title", "ref", "nav", "canon", "lang", "new", "idsrc", "idc")
-                     if data.get(k) is not None}
-            if status_code(data.get("st")) is not None:
-                extra["st"] = status_code(data.get("st"))
-            if row["endpoint"] == "pixel":
-                extra.setdefault("title", data.get("title"))
-                extra.setdefault("ref", data.get("r"))
-            sub = {k: ctx.get(k) for k in ("sw", "sh", "vw", "vh", "dpr", "lang", "tz", "uad", "ua", "tp")
-                   if ctx.get(k) is not None}
-            if sub:
-                extra["ctx"] = sub
+            extra = pageview_extra(data, pixel=row["endpoint"] == "pixel")
         elif htype == "engagement":
             ms = to_int(data.get("ms"))
             sd = to_int(data.get("sd"))
@@ -366,7 +374,7 @@ class Enricher:
         elif htype == "fp":
             fp = to_str(data.get("h"), 64)
             if isinstance(data.get("bot"), dict):
-                extra = {"bot": data["bot"]}
+                extra = {"bot": bot_signals(data["bot"])}
         conn.execute(
             "INSERT OR REPLACE INTO hits(hit_id, request_id, site_id, site_ok, session_key, page_key, type, name, ts, "
             "received_at, dup, vid, uid, url, ns, sn, pn, ms, sd, fp, extra) "
@@ -438,6 +446,80 @@ class Enricher:
             fields = {k: v for k, v in d.items() if k not in ("t", "id", "ts", "pid", "url", "sid", "vid")}
             conn.execute("INSERT OR REPLACE INTO misc VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                          base + (htype, jdump(fields)))
+
+
+# What a pageview keeps in hits.extra. Raw values are whatever a client sent (a title can be a list, a number
+# 1e999, a referrer a megabyte): only bounded text and finite numbers go on to the derived tables.
+_PV_TEXT = {"title": 512, "ref": 2048, "nav": 32, "canon": 2048, "lang": 35, "idsrc": 16}
+_CTX_TEXT = {"lang": 35, "tz": 64, "ua": 1024}
+_CTX_NUM = ("sw", "sh", "vw", "vh", "dpr", "tp")
+
+
+def _number(v: Any) -> Optional[Any]:
+    n = num(v)
+    return None if n is None else (int(n) if n == int(n) else n)
+
+
+def _clean_uad(uad: Dict[str, Any]) -> Dict[str, Any]:
+    """navigator.userAgentData as the tracker sends it, keeping only well-typed, bounded fields."""
+    out: Dict[str, Any] = {}
+    for k in ("platform", "platformVersion", "model", "architecture", "bitness", "uaFullVersion"):
+        v = to_str(uad.get(k), 128)
+        if v is not None:
+            out[k] = v
+    for k in ("mobile", "wow64"):
+        if isinstance(uad.get(k), bool):
+            out[k] = uad[k]
+    for k in ("brands", "fullVersionList"):
+        items = uad.get(k)
+        if isinstance(items, list):
+            out[k] = [{"brand": to_str(i.get("brand"), 128) or "", "version": to_str(i.get("version"), 64) or ""}
+                      for i in items[:20] if isinstance(i, dict)]
+    if isinstance(uad.get("formFactors"), list):
+        out["formFactors"] = [to_str(f, 32) for f in uad["formFactors"][:10] if to_str(f, 32)]
+    return out
+
+
+def pageview_extra(data: Dict[str, Any], pixel: bool = False) -> Dict[str, Any]:
+    extra: Dict[str, Any] = {}
+    for k, n in _PV_TEXT.items():
+        v = to_str(data.get(k), n)
+        if v is not None:
+            extra[k] = v
+    if pixel:
+        for k, src, n in (("title", "title", 512), ("ref", "r", 2048)):
+            if k not in extra and to_str(data.get(src), n) is not None:
+                extra[k] = to_str(data.get(src), n)
+    if status_code(data.get("st")) is not None:
+        extra["st"] = status_code(data.get("st"))
+    if to_int(data.get("new")) is not None:
+        extra["new"] = to_int(data.get("new"))
+    idc = data.get("idc")
+    if isinstance(idc, dict):
+        ids = {k: to_str(idc.get(k), 64) for k in ("cookie", "ls") if to_str(idc.get(k), 64)}
+        if ids:
+            extra["idc"] = ids
+    ctx = data.get("ctx") if isinstance(data.get("ctx"), dict) else {}
+    sub: Dict[str, Any] = {}
+    for k in _CTX_NUM:
+        if _number(ctx.get(k)) is not None:
+            sub[k] = _number(ctx.get(k))
+    for k, n in _CTX_TEXT.items():
+        if to_str(ctx.get(k), n) is not None:
+            sub[k] = to_str(ctx.get(k), n)
+    if isinstance(ctx.get("uad"), dict):
+        sub["uad"] = _clean_uad(ctx["uad"])
+    if sub:
+        extra["ctx"] = sub
+    return extra
+
+
+def bot_signals(b: Dict[str, Any]) -> Dict[str, Any]:
+    """The tracker's automation signals (fp.bot), well-typed and bounded."""
+    out: Dict[str, Any] = {k: _number(b.get(k)) for k in ("wd", "pl", "lg", "oz", "hl", "co") if _number(b.get(k)) is not None}
+    if isinstance(b.get("au"), list):
+        out["au"] = [to_str(a, 64) for a in b["au"][:20] if to_str(a, 64)]
+    return out
 
 
 def run(cfg: Config, rebuild: bool = False, max_seconds: Optional[float] = None) -> Dict[str, Any]:

@@ -34,6 +34,7 @@ regex data), so an upgrade triggers a recompute. Bot detection reuses
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from functools import lru_cache
@@ -211,7 +212,9 @@ def _js_strings(value: Any) -> Tuple[str, ...]:
 def _js_number(value: Any) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return int(value)
+    if isinstance(value, float) and not math.isfinite(value):  # 1e999 parses as infinity
+        return None
+    return int(max(-2 ** 31, min(value, 2 ** 31)))
 
 
 def _from_js(js: Any) -> Dict[str, Any]:
