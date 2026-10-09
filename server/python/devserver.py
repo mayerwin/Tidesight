@@ -32,6 +32,7 @@ from tidesight.wsgi import create_app  # noqa: E402
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 128  # parallel browser tests open many connections at once
 
 
 class QuietHandler(WSGIRequestHandler):

@@ -334,6 +334,18 @@ DERIVED_MIGRATIONS: List[Tuple[int, List[str]]] = [
             PRIMARY KEY (site_id, day, dim, value)
         ) WITHOUT ROWID""",
     ]),
+    # Joins from typed tables to sessions (API filters) need session_key indexes.
+    (2, [
+        "CREATE INDEX IF NOT EXISTS events_session ON events(session_key)",
+        "CREATE INDEX IF NOT EXISTS clicks_session ON clicks(session_key)",
+        "CREATE INDEX IF NOT EXISTS vitals_session ON vitals(session_key)",
+        "CREATE INDEX IF NOT EXISTS perf_session ON perf(session_key)",
+        "CREATE INDEX IF NOT EXISTS errors_session ON errors(session_key)",
+        "CREATE INDEX IF NOT EXISTS forms_session ON forms(session_key)",
+        "CREATE INDEX IF NOT EXISTS searches_session ON searches(session_key)",
+        "CREATE INDEX IF NOT EXISTS misc_session ON misc(session_key)",
+        "CREATE INDEX IF NOT EXISTS pageviews_site_path ON pageviews(site_id, path, day)",
+    ]),
 ]
 
 

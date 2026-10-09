@@ -101,6 +101,7 @@ class Enricher:
         stats = self._process(conn, version, max_seconds, batch_size)
         stats["identity"] = identity.run(conn, self.cfg)
         stats["rollup"] = rollup.run(conn, self.cfg)
+        conn.execute("PRAGMA optimize")
         if rebuilding:
             stats["rollups_carried"] = self._carry_rollups(conn)
         conn.close()
@@ -393,6 +394,8 @@ class Enricher:
                                  to_str(d.get("href"), 2048), to_str(d.get("lk"), 8), to_int(d.get("n")),
                                  to_str(d.get("msg"), 500)))
         elif htype == "vital":
+            if pkey:  # a vital may be re-sent with a final value (upd: 1): the last one per page wins
+                conn.execute("DELETE FROM vitals WHERE page_key = ? AND metric = ?", (pkey, to_str(d.get("n"), 16)))
             conn.execute("INSERT OR REPLACE INTO vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                          base + (to_str(d.get("n"), 16), num(d.get("val")), to_str(d.get("r"), 8), to_str(d.get("el")),
                                  to_str(d.get("nt"), 24)))
@@ -404,6 +407,11 @@ class Enricher:
             msg = to_str(d.get("msg"), 1000)
             src = to_str(d.get("src") or d.get("res"), 1000)
             grp = hashlib.sha1("|".join([kind, msg or "", src or "", str(d.get("line") or "")]).encode("utf-8")).hexdigest()[:16]
+            if d.get("upd") and pkey:  # an occurrence count for an error already reported on this page
+                cur = conn.execute("UPDATE errors SET n = MAX(COALESCE(n, 1), ?) WHERE page_key = ? AND grp = ?",
+                                   (to_int(d.get("n")) or 1, pkey, grp))
+                if cur.rowcount:
+                    return
             conn.execute("INSERT OR REPLACE INTO errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                          base + (kind, msg, to_str(d.get("src"), 1000), to_int(d.get("line")), to_int(d.get("col")),
                                  to_str(d.get("stack"), 4096), to_str(d.get("tag"), 32), to_str(d.get("res"), 2048),

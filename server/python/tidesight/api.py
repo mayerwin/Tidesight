@@ -316,7 +316,7 @@ class Api:
                     "COUNT(*) AS sessions, COALESCE(SUM(s.pageviews), 0) AS pageviews, "
                     "ROUND(1.0 * SUM(s.bounce) / COUNT(*), 4) AS bounce_rate, CAST(AVG(s.duration_ms) AS INTEGER) AS avg_duration, "
                     "CAST(AVG(s.engaged_ms) AS INTEGER) AS avg_engaged "
-                    "FROM sessions s WHERE " + where + " GROUP BY value ORDER BY visitors DESC, sessions DESC LIMIT ?",
+                    "FROM sessions s WHERE " + where + " GROUP BY 1 ORDER BY visitors DESC, sessions DESC LIMIT ?",
                     args + [limit])]
                 if dim == "city":
                     extra = {(r["city"] or "(none)"): r["country"] for r in conn.execute(
@@ -339,17 +339,17 @@ class Api:
             "CAST(AVG(p.engaged_ms) AS INTEGER) AS avg_engaged, CAST(AVG(p.scroll_max) AS INTEGER) AS avg_scroll, "
             "SUM(p.is_entry) AS entries, SUM(p.is_exit) AS exits, "
             "SUM(CASE WHEN p.is_entry = 1 AND s.bounce = 1 THEN 1 ELSE 0 END) AS bounces, "
-            "CAST(AVG(p.duration_ms) AS INTEGER) AS avg_time FROM pageviews p JOIN sessions s ON s.session_key = p.session_key "
-            "WHERE p.day BETWEEN ? AND ? AND " + where + " GROUP BY value ORDER BY pageviews DESC LIMIT ?",
-            [q.start, q.end] + args + [limit])]
+            "CAST(AVG(p.duration_ms) AS INTEGER) AS avg_time FROM pageviews p CROSS JOIN sessions s ON s.session_key = p.session_key "
+            "WHERE p.site_id = ? AND p.day BETWEEN ? AND ? AND " + where + " GROUP BY 1 ORDER BY pageviews DESC LIMIT ?",
+            [q.site_id, q.start, q.end] + args + [limit])]
 
     def _events(self, conn: sqlite3.Connection, q: Query, limit: int) -> List[Dict[str, Any]]:
         where, args = q.session_where("s")
         return [dict(r) for r in conn.execute(
             "SELECT COALESCE(e.name, '(none)') AS value, COUNT(*) AS count, COUNT(DISTINCT s.visitor_key) AS visitors, "
             "COUNT(DISTINCT s.session_key) AS sessions, SUM(e.value) AS total_value FROM events e "
-            "JOIN sessions s ON s.session_key = e.session_key WHERE e.day BETWEEN ? AND ? AND " + where +
-            " GROUP BY value ORDER BY count DESC LIMIT ?", [q.start, q.end] + args + [limit])]
+            "JOIN sessions s ON s.session_key = e.session_key WHERE e.site_id = ? AND e.day BETWEEN ? AND ? AND " + where +
+            " GROUP BY 1 ORDER BY count DESC LIMIT ?", [q.site_id, q.start, q.end] + args + [limit])]
 
     def ep_pages(self, params: Dict[str, str], public: bool) -> Any:
         q = self.q(params, public)
@@ -372,9 +372,9 @@ class Api:
                 return {"rows": self._events(conn, q, q.limit(100))}
             where, args = q.session_where("s")
             rows = conn.execute(
-                "SELECT e.props, e.value, e.day FROM events e JOIN sessions s ON s.session_key = e.session_key "
-                "WHERE e.name = ? AND e.day BETWEEN ? AND ? AND " + where + " LIMIT 100000",
-                [name, q.start, q.end] + args).fetchall()
+                "SELECT e.props, e.value, e.day FROM events e CROSS JOIN sessions s ON s.session_key = e.session_key "
+                "WHERE e.site_id = ? AND e.name = ? AND e.day BETWEEN ? AND ? AND " + where + " LIMIT 100000",
+                [q.site_id, name, q.start, q.end] + args).fetchall()
         finally:
             conn.close()
         props: Dict[str, Counter] = defaultdict(Counter)
@@ -444,7 +444,7 @@ class Api:
             where, args = q.session_where("s")
             pvs = conn.execute("SELECT p.session_key, p.ts, p.path FROM pageviews p JOIN sessions s ON s.session_key = p.session_key "
                                "WHERE " + where + " ORDER BY p.ts", args).fetchall()
-            evs = conn.execute("SELECT e.session_key, e.ts, e.name FROM events e JOIN sessions s ON s.session_key = e.session_key "
+            evs = conn.execute("SELECT e.session_key, e.ts, e.name FROM events e CROSS JOIN sessions s ON s.session_key = e.session_key "
                                "WHERE " + where + " ORDER BY e.ts", args).fetchall()
         finally:
             conn.close()
@@ -526,7 +526,7 @@ class Api:
             where, args = q.session_where("s")
             countries = [dict(r) for r in conn.execute(
                 "SELECT COALESCE(country, '(none)') AS value, COUNT(DISTINCT visitor_key) AS visitors, COUNT(*) AS sessions "
-                "FROM sessions s WHERE " + where + " GROUP BY value ORDER BY visitors DESC", args)]
+                "FROM sessions s WHERE " + where + " GROUP BY 1 ORDER BY visitors DESC", args)]
             points = [dict(r) for r in conn.execute(
                 "SELECT country, city, ROUND(AVG(lat), 3) AS lat, ROUND(AVG(lon), 3) AS lon, COUNT(DISTINCT visitor_key) AS visitors "
                 "FROM sessions s WHERE " + where + " AND lat IS NOT NULL GROUP BY country, city ORDER BY visitors DESC LIMIT 1000",
@@ -540,11 +540,12 @@ class Api:
         conn = self.derived()
         try:
             where, args = q.session_where("s")
-            vit = conn.execute("SELECT v.metric, v.value, v.rating, v.path, v.day FROM vitals v JOIN sessions s "
-                               "ON s.session_key = v.session_key WHERE v.day BETWEEN ? AND ? AND " + where,
-                               [q.start, q.end] + args).fetchall()
-            perf = conn.execute("SELECT p.data FROM perf p JOIN sessions s ON s.session_key = p.session_key "
-                                "WHERE p.day BETWEEN ? AND ? AND " + where + " LIMIT 50000", [q.start, q.end] + args).fetchall()
+            vit = conn.execute("SELECT v.metric, v.value, v.rating, v.path, v.day FROM vitals v CROSS JOIN sessions s "
+                               "ON s.session_key = v.session_key WHERE v.site_id = ? AND v.day BETWEEN ? AND ? AND " + where,
+                               [q.site_id, q.start, q.end] + args).fetchall()
+            perf = conn.execute("SELECT p.data FROM perf p CROSS JOIN sessions s ON s.session_key = p.session_key "
+                                "WHERE p.site_id = ? AND p.day BETWEEN ? AND ? AND " + where + " LIMIT 50000",
+                                [q.site_id, q.start, q.end] + args).fetchall()
         finally:
             conn.close()
         by_metric: Dict[str, List[float]] = defaultdict(list)
@@ -587,16 +588,16 @@ class Api:
             grp = params.get("grp")
             if grp:
                 rows = [dict(r) for r in conn.execute(
-                    "SELECT e.*, s.browser, s.os, s.device_type, s.visitor_key FROM errors e JOIN sessions s "
-                    "ON s.session_key = e.session_key WHERE e.grp = ? AND e.day BETWEEN ? AND ? AND " + where +
-                    " ORDER BY e.ts DESC LIMIT 100", [grp, q.start, q.end] + args)]
+                    "SELECT e.*, s.browser, s.os, s.device_type, s.visitor_key FROM errors e CROSS JOIN sessions s "
+                    "ON s.session_key = e.session_key WHERE e.site_id = ? AND e.grp = ? AND e.day BETWEEN ? AND ? AND "
+                    + where + " ORDER BY e.ts DESC LIMIT 100", [q.site_id, grp, q.start, q.end] + args)]
                 return {"occurrences": rows}
             rows = [dict(r) for r in conn.execute(
                 "SELECT e.grp, e.kind, e.msg, e.src, e.line, e.res, COUNT(*) AS events, SUM(COALESCE(e.n, 1)) AS occurrences, "
                 "COUNT(DISTINCT e.session_key) AS sessions, COUNT(DISTINCT s.visitor_key) AS visitors, MIN(e.ts) AS first_seen, "
-                "MAX(e.ts) AS last_seen FROM errors e JOIN sessions s ON s.session_key = e.session_key "
-                "WHERE e.day BETWEEN ? AND ? AND " + where + " GROUP BY e.grp ORDER BY occurrences DESC LIMIT ?",
-                [q.start, q.end] + args + [q.limit(100)])]
+                "MAX(e.ts) AS last_seen FROM errors e CROSS JOIN sessions s ON s.session_key = e.session_key "
+                "WHERE e.site_id = ? AND e.day BETWEEN ? AND ? AND " + where + " GROUP BY e.grp ORDER BY occurrences DESC LIMIT ?",
+                [q.site_id, q.start, q.end] + args + [q.limit(100)])]
         finally:
             conn.close()
         return {"rows": rows}
@@ -614,12 +615,14 @@ class Api:
             if device:
                 dev_sql, dev_args = " AND s.device_type = ?", [device]
             clicks = [dict(r) for r in conn.execute(
-                "SELECT c.kind, c.x, c.y, c.ex, c.ey, c.ew, c.eh, c.pw, c.ph, c.vw, c.vh, c.sel, c.tag, c.txt, c.href "
-                "FROM clicks c JOIN sessions s ON s.session_key = c.session_key WHERE c.path = ? AND c.day BETWEEN ? AND ? AND "
-                + where + dev_sql + " ORDER BY c.ts DESC LIMIT 10000", [page, q.start, q.end] + args + dev_args)]
+                "SELECT c.kind, c.x, c.y, c.ex, c.ey, c.vw, c.ph, c.sel "
+                "FROM clicks c CROSS JOIN sessions s ON s.session_key = c.session_key WHERE c.site_id = ? AND c.path = ? "
+                "AND c.day BETWEEN ? AND ? AND " + where + dev_sql + " ORDER BY c.ts DESC LIMIT 10000",
+                [q.site_id, page, q.start, q.end] + args + dev_args)]
             depth = [r[0] for r in conn.execute(
-                "SELECT p.scroll_max FROM pageviews p JOIN sessions s ON s.session_key = p.session_key WHERE p.path = ? "
-                "AND p.day BETWEEN ? AND ? AND " + where + dev_sql, [page, q.start, q.end] + args + dev_args)]
+                "SELECT p.scroll_max FROM pageviews p CROSS JOIN sessions s ON s.session_key = p.session_key WHERE p.site_id = ? "
+                "AND p.path = ? AND p.day BETWEEN ? AND ? AND " + where + dev_sql,
+                [q.site_id, page, q.start, q.end] + args + dev_args)]
         finally:
             conn.close()
         by_sel: Dict[str, Counter] = defaultdict(Counter)
@@ -795,8 +798,9 @@ class Api:
         try:
             where, args = q.session_where("s")
             rows = conn.execute(
-                "SELECT f.form, f.action, f.field, f.ms, f.filled, f.session_key, f.last FROM forms f JOIN sessions s "
-                "ON s.session_key = f.session_key WHERE f.day BETWEEN ? AND ? AND " + where, [q.start, q.end] + args).fetchall()
+                "SELECT f.form, f.action, f.field, f.ms, f.filled, f.session_key, f.last FROM forms f CROSS JOIN sessions s "
+                "ON s.session_key = f.session_key WHERE f.site_id = ? AND f.day BETWEEN ? AND ? AND " + where,
+                [q.site_id, q.start, q.end] + args).fetchall()
         finally:
             conn.close()
         forms: Dict[str, Dict[str, Any]] = {}
@@ -833,9 +837,9 @@ class Api:
             where, args = q.session_where("s")
             rows = [dict(r) for r in conn.execute(
                 "SELECT LOWER(TRIM(x.query)) AS value, COUNT(*) AS searches, COUNT(DISTINCT s.visitor_key) AS visitors, "
-                "AVG(x.results) AS avg_results FROM searches x JOIN sessions s ON s.session_key = x.session_key "
-                "WHERE x.day BETWEEN ? AND ? AND " + where + " GROUP BY value ORDER BY searches DESC LIMIT ?",
-                [q.start, q.end] + args + [q.limit(100)])]
+                "AVG(x.results) AS avg_results FROM searches x CROSS JOIN sessions s ON s.session_key = x.session_key "
+                "WHERE x.site_id = ? AND x.day BETWEEN ? AND ? AND " + where + " GROUP BY 1 ORDER BY searches DESC LIMIT ?",
+                [q.site_id, q.start, q.end] + args + [q.limit(100)])]
         finally:
             conn.close()
         return {"rows": rows}

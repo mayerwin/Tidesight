@@ -303,11 +303,17 @@ class Config:
         self.enrich: Dict[str, Any] = sections["enrich"]
         self.dashboard: Dict[str, Any] = sections["dashboard"]
 
-        data_dir = os.path.expanduser(self.server["data_dir"] or "data")
-        if not os.path.isabs(data_dir):  # relative paths are relative to the config file
-            data_dir = os.path.join(base_dir, data_dir)
-        self.data_dir = os.path.abspath(data_dir)
+        def resolve(path: str) -> str:  # relative paths are relative to the config file
+            path = os.path.expanduser(path)
+            return os.path.abspath(path if os.path.isabs(path) else os.path.join(base_dir, path))
+
+        self.data_dir = resolve(self.server["data_dir"] or "data")
         self.server["data_dir"] = self.data_dir
+        for section, key in (("server", "static_dir"), ("server", "dashboard_dir"), ("server", "log_file"),
+                             ("enrich", "geo_dir"), ("enrich", "bot_list")):
+            values = getattr(self, section)
+            if values[key]:
+                values[key] = resolve(values[key])
 
         defaults = raw.get("defaults", {})
         if not isinstance(defaults, dict):

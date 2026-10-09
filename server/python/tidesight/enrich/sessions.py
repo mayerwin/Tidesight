@@ -186,7 +186,7 @@ def rebuild_one(conn: sqlite3.Connection, cfg: Config, key: str, reader: Any,
         "bot_reasons": json.dumps(verdict.get("reasons") or []), "internal": req.get("internal") or 0,
         "client_ip": req.get("client_ip"), "ck": req.get("ck"), "fp": fp_row["fp"] if fp_row is not None else None,
         "has_js": has_js, "has_replay": has_replay,
-        "errors": sum(1 for r in rows if r["type"] == "error"),
+        "errors": conn.execute("SELECT COUNT(*) FROM errors WHERE session_key = ?", (key,)).fetchone()[0],
         "rage_clicks": sum(1 for r in rows if r["type"] == "rage"),
         "dead_clicks": sum(1 for r in rows if r["type"] == "dead"),
     }

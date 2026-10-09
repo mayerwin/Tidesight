@@ -673,7 +673,7 @@ def build_hits(envelope: Dict[str, Any], max_events: int,
         if drop_fp and etype == "fp":
             continue
         hits.append(HitRecord(
-            seq=seq, data=_dumps(ev), type=etype, name=_str(ev.get("n"), 200),
+            seq=seq, data=_dumps(ev), type=etype, name=ev["n"][:200] if isinstance(ev.get("n"), str) and ev["n"] else None,
             client_ts=_int(ev.get("ts")), event_id=_str(ev.get("id"), 64),
             visitor_id=_str(ev.get("vid"), 64) or vid, session_id=_str(ev.get("sid"), 64) or sid,
             page_id=_str(ev.get("pid"), 64), user_id=_str(ev.get("uid"), 200) or uid,

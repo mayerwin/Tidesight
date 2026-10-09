@@ -340,6 +340,13 @@ def test_invalid_events_and_truncation(connector):
     assert connector.request_for(vid)["error"] == "bad_events:2"
 
 
+def test_name_column_only_from_string_n(connector):
+    vid = _vid()
+    env = _env(vid, events=[{"t": "rage", "n": 3}, {"t": "event", "n": "signup"}, {"t": "event", "n": ""}, {"t": "form", "n": {"x": 1}}])
+    assert connector.post(env)[0] == 204
+    assert [h["name"] for h in connector.hits_for(vid)] == [None, "signup", None, None]
+
+
 def test_preflight(connector):
     status, headers, _ = connector.request("OPTIONS", "/collect", headers={"Origin": "https://conf.example",
                                                                           "Access-Control-Request-Method": "POST"})

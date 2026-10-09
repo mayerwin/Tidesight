@@ -121,12 +121,17 @@ def test_generated_secret_is_persistent(tmp_path):
     assert loads(text + 'secret = "fixed"\n').secret == "fixed"
 
 
-def test_data_dir_relative_to_config_file(tmp_path):
+def test_paths_relative_to_config_file(tmp_path):
     path = tmp_path / "conf" / "tidesight.toml"
     path.parent.mkdir()
     path.write_text("[server]\n")
     cfg = load(str(path))
     assert cfg.data_dir == os.path.join(str(tmp_path), "conf", "data")
+    path.write_text('[server]\ndata_dir = "d"\nlog_file = "logs/ts.log"\n[enrich]\ngeo_dir = "geo"\n')
+    cfg = load(str(path))
+    base = os.path.join(str(tmp_path), "conf")
+    assert cfg.data_dir == os.path.join(base, "d") and cfg.enrich["geo_dir"] == os.path.join(base, "geo")
+    assert cfg.server["log_file"] == os.path.join(base, "logs", "ts.log") and cfg.server["static_dir"] == ""
 
 
 def test_config_holder_reloads(tmp_path):
