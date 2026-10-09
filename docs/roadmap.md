@@ -1,81 +1,60 @@
 # Roadmap
 
-Status of each phase and what remains. Update this file when a phase item lands or the plan changes.
+Status of each phase and what remains. Update this file when a roadmap item lands or the plan changes.
 
 Legend: ✅ done · 🚧 in progress · ⬜ not started
 
 ## Phase 0 — Hosting test 🚧
 
-`tools/sqlite_host_test.py`: a single file, standard library only, runnable over SSH **and** as a Passenger/CGI request. It reports:
+✅ `tools/sqlite_host_test.py`: single file, standard library only (Python 3.6+), runnable over SSH, as CGI or under Passenger (token-protected). It reports Python and SQLite versions and features (JSON1, FTS5, UPSERT, window functions, RETURNING, STRICT), the data directory's filesystem (local or network), WAL and DELETE journal modes (and WAL persistence), multi-process insert concurrency with a concurrent reader in both modes (errors, lock retries, throughput, p50/p95/p99 latency), integrity and row counts, concurrent spool appends, whether the data directory is served over HTTP, runtime modules, outbound HTTPS, and a PASS/WARN/FAIL summary with the recommended `storage_mode` and `journal_mode`. Verified locally (Windows, NTFS: PASS with WAL).
 
-1. Python version, the `sqlite3` module version and the SQLite library version (JSON1 and FTS5 availability, plus `RETURNING`, which needs SQLite ≥ 3.35).
-2. The filesystem type of the data directory (`stat -f`, `/proc/mounts`), to tell local disk from NFS.
-3. Whether `PRAGMA journal_mode=WAL` works and survives a reconnect, and whether rollback-journal mode (`DELETE`) works.
-4. **Concurrency:** N processes (e.g. 8) each insert M rows (e.g. 2,000) with `busy_timeout`. Reports errors, `database is locked` counts, throughput and p50/p95/p99 insert latency, in both WAL and DELETE modes.
-5. **Durability:** `PRAGMA integrity_check` after the run; row counts equal N×M.
-6. Whether the data directory is outside the web root and not served over HTTP.
-7. Whether `os.fork`/`multiprocessing`, `gzip` and `zlib` are available.
+⬜ **Run it on the Dreamhost account** (see `docs/deploy-dreamhost.md`, step 2), record the result here, and set `storage_mode` / `journal_mode` in the production configuration.
 
-It ends with a PASS/WARN/FAIL summary. Expected outcome: PASS with WAL or DELETE mode. If it fails, use `storage_mode = "spool"`.
+## Phase 1 — Collector + core tracker ✅
 
-**Remaining:** run it on the Dreamhost account and record the result here, then set `storage_mode` and `journal_mode` in the production config.
+- Collector (`collect.py`): `/collect`, `/chunk`, `/p.gif`, `/config.js|json`, `/health`, static tracker files; per-site config with hot reload; validation and size limits; flagged storage of malformed and unknown-site hits; per-key rate limiting in the insert transaction; CORS; secrets redaction; privacy switches; optional server cookie; spool mode and automatic spool fallback.
+- Schema: `raw_requests` + `raw_hits` (typed hot columns + raw JSON), `replay.db` chunks, numbered migrations.
+- Tracker core (`ts.js`, ~6 KB gzip): pageviews with full context and high-entropy Client Hints, SPA routes (History API, hash routes), custom events, identify, visitor id in cookie + localStorage + optional server cookie, sessions (idle timeout, midnight split), engagement (visible, focused, not idle) with heartbeats, batching, gzip, beacon on unload, bounded offline retry, cached config, plugin loader with per-session sampling.
+- Deployment: `passenger_wsgi.py`, `collect.cgi`, `docs/deploy-dreamhost.md`, `config/tidesight.example.toml`.
+- Tests: pytest (collector, storage, config, concurrency), Playwright (core).
 
-## Phase 1 — Collector + core tracker (MVP) ⬜
+The original 4 KB target for the core was not met: with context, identity restoration, SPA routing, engagement and offline retry it is ~6 KB gzip (the build enforces 6 KB).
 
-- **Collector:** `/collect`, `/p.gif`, `/config.js`, `/health`; per-site config; input validation and size limits (64 KB per request, larger for chunks); per-IP rate limiting in SQLite; CORS.
-- **Schema:** raw storage (`raw_requests`, `raw_hits`) with typed columns for the hottest fields plus JSON for the rest; numbered migrations.
-- **Tracker core:** pageviews including SPA navigation (History API + `hashchange`), title, referrer, UTM and click IDs; custom events (`tidesight.track(name, props)`); identity (visitor id, session id with a 30-minute idle timeout, fingerprint signals); engagement time counted only while visible, plus heartbeats; batching and reliable delivery.
-- **Deployment:** `passenger_wsgi.py`, `docs/deploy-dreamhost.md`, `config/tidesight.example.toml`.
-- **Tests:** pytest for the collector, Playwright for the tracker.
+## Phase 2 — Enrichment ✅
 
-## Phase 2 — Enrichment (re-runnable) ⬜
+Client IP decision, geolocation (pure-Python MaxMind DB reader; GeoLite2, DB-IP Lite, IPinfo Lite; downloads), UA + Client Hints parsing, bot classification (UA patterns, automation signals, hosting ASNs), sessions and pageviews rebuilt from hits (clock-skew correction, retry de-duplication, pixel sessions), GA4 channel attribution (including the AI Assistant channel), typed event tables, staged identity stitching with per-id confidence, daily rollups. Versioned: a parser, database or algorithm change rebuilds `derived.db` and swaps it in.
 
-Each job keeps a version number per row, so changing a parser triggers a recompute.
+## Phase 3 — Behaviour plugins ✅
 
-- **Geo:** country, region, city, latitude/longitude, time zone, ASN/ISP and hosting/VPN flag, from offline databases: MaxMind GeoLite2 City + ASN (free licence key) or DB-IP Lite (no key, CC-BY). Several providers can be stored side by side.
-- **Device:** browser, OS, device type, brand and model from the User-Agent and Client Hints.
-- **Bots:** known bot UAs, datacenter ASNs, `navigator.webdriver`, headless signals, no-JS hits. Bots are **flagged, never deleted**.
-- **Sessions and visitors:** sessions rebuilt from raw hits; identity stitching combines the visitor id, the cookieless hash and the fingerprint into a confidence-scored visitor key; entry/exit pages, bounce, new vs returning, source/medium/channel (GA4-style default channel rules).
-- **Rollups:** daily aggregates for the dashboard.
+Fingerprint and automation signals, clicks with element-relative heatmap coordinates, outbound links and downloads, rage/dead/error clicks, scroll depth, form analytics (never values), Web Vitals, Navigation Timing, long tasks, errors (de-duplicated per page), resize/visibility/copy/selection, mouse movement, ad-blocker detection, site search, 404 pages. Each switchable and sampled.
 
-## Phase 3 — Behaviour plugins ⬜
+## Phase 4 — Session replay ✅
 
-Each switchable, each with a sampling rate.
+rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `replay.db`, masking (passwords always, inputs by default, `ts-mask`/`ts-block`), DOM snapshots for heatmap backgrounds, rrweb player in the dashboard.
 
-- Click tracking (selector, text, link target), outbound links, downloads, mailto/tel.
-- Scroll depth (25/50/75/90/100 % plus maximum reached).
-- Form analytics: field focus, time, abandonment, submit. **Field values are never captured.**
-- Rage clicks, dead clicks and error clicks (as in Clarity and Hotjar).
-- Web Vitals (LCP, CLS, INP, FCP, TTFB) and Navigation Timing.
-- JS errors (message, stack, source, line), unhandled rejections and resource load failures.
-- Click heatmaps with element-relative coordinates plus page and viewport size, so heatmaps survive layout changes.
-- Mouse-movement heatmaps: sampled points, heavy, stored in `replay.db`.
-- Site-search query capture (configurable URL parameter).
-- 404 tracking (the site opts in by flagging its error pages).
+## Phase 5 — Dashboard & API ✅
 
-## Phase 4 — Session replay ⬜
+`api.py` (read-only JSON, HTTP Basic auth, public share pages with tokens, CSV/JSON export) and the static dashboard: overview, realtime, pages, sources/channels, geography map, devices, events and properties, funnels, retention cohorts, heatmaps (clicks, rage/dead, mouse, scroll), replays, forms, site search, performance, errors, sessions, visit timelines, visitor profiles, status. `tools/demo.py` generates realistic demo data.
 
-- rrweb recording, lazy-loaded only when the session is sampled in (per-site rate). Chunks are compressed and stored in `replay.db`.
-- Masking: password fields always, all inputs by default (configurable), and any element with a `ts-mask` class.
-- Player in the dashboard, linked from a session's event timeline.
+## Phase 6 — Privacy mode, maintenance, connectors ✅
 
-## Phase 5 — Dashboard & API ⬜
+- ✅ `jobs.py privacy-clean` (IP truncation/hashing with geo kept, fingerprint/replay/mouse deletion, retention windows; dry run first; automatic backup), DNT/GPC honouring, `backup` (online, gzip, rotated), `vacuum`, `archive` (yearly files that enrichment still reads), `export`.
+- ✅ Conformance suite for connectors and the resolved JSON configuration.
+- ✅ PHP (7.4+, PDO SQLite or SQLite3), Node (22.13+, `node:sqlite`) and Cloudflare Worker (D1) connectors, each passing the conformance suite, plus differential tests against the Python collector on generated inputs. Not yet tried on a live Apache/nginx host or on Cloudflare itself (only on PHP's built-in server and a local D1 shim).
 
-- `api.py`: authenticated read-only JSON (HTTP Basic auth over HTTPS to start).
-- Views: realtime-ish (last 30 minutes, polling); overview, sources/channels, pages, entry/exit; geo map, devices/browsers; events, funnels, retention cohorts; performance, errors; heatmaps, replays; per-visitor timeline.
-- Optional public stats page per site (selected metrics only), as Plausible does with shared links.
-- CSV/JSON export.
+## Ideas for later
 
-## Phase 6 — Privacy mode, maintenance, connectors ⬜
-
-- `jobs.py privacy-clean`: hash or truncate IPs in raw data (/24 for IPv4, /48 for IPv6, or a salted hash); drop fingerprint fields and replay; apply retention windows; honour DNT/GPC from now on. Every step is a separate flag, dry-run first, with an automatic backup.
-- Vacuum/optimise; archive old raw data into yearly database files.
-- Other connectors (PHP, Node, Cloudflare Worker + D1), conforming to `docs/protocol.md` and the shared conformance suite.
+- Goals/conversions defined per site (instead of GA4's "2+ pageviews or 10 s" engagement rule only).
+- Custom channel groupings (e.g. AI traffic beyond GA4's list).
+- Several dashboard users with roles; email reports and alerts (traffic drops, error spikes).
+- An optional consent mode in the tracker (wait for a consent call before setting identifiers).
+- Tracker core below 4 KB by moving context collection to a plugin.
+- Faster enrichment for very large sites (bulk inserts, parallel rebuilds).
 
 ## Open questions for the owner
 
-1. **Dreamhost plan details:** the domain or subdomain for the collector, SSH access, and Passenger availability. Phase 0 answers most of this.
-2. **Dashboard authentication:** HTTP Basic is enough to start. Multiple users later?
+1. **Dreamhost:** the collector subdomain, SSH credentials for running the Phase 0 test, and confirmation that Passenger is available.
+2. **Dashboard authentication:** HTTP Basic is in place; are several users with different rights needed later?
 3. **Public stats page:** which metrics should be public by default, per site?
-4. **Licence:** MIT adopted provisionally (rrweb is MIT; GeoLite2 terms must be respected when distributing data, which Tidesight never bundles).
-5. **Which sites come first?** They will drive the first config and the tests.
+4. **Licence:** MIT adopted provisionally (rrweb is MIT; GeoLite2 and DB-IP data are never bundled).
+5. **Which sites come first?** They will drive the first configuration.

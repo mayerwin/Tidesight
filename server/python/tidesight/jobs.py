@@ -194,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="tidesight.jobs", description="Tidesight maintenance jobs (cron).")
     ap.add_argument("--config", help="config file (default: $TIDESIGHT_CONFIG or conventional locations)")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("-q", "--quiet", action="store_true", help="print nothing unless something fails (for cron)")
     sub = ap.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("cron", help="load the spool, enrich, roll up (run every few minutes)")
@@ -268,12 +269,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING if args.quiet else logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = None if getattr(args, "no_config", False) else load(args.config)
     started = time.time()
     result = args.func(cfg, args)
-    if result:
+    if result and not args.quiet:
         if isinstance(result, dict):
             result.setdefault("seconds", round(time.time() - started, 2))
         _print(result)

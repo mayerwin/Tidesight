@@ -14,55 +14,63 @@ Tidesight is self-hosted web analytics for any number of sites. A small JavaScri
 |---|---|
 | Principles, decision log, trade-offs | `docs/design.md` |
 | Components, data flow, database files | `docs/architecture.md` |
+| Installing and using the tracker (commands, markup, CSP) | `docs/tracker.md` |
 | Wire protocol (endpoints, payloads, versioning) | `docs/protocol.md` |
+| Read API for the dashboard and scripts | `docs/api.md` |
 | SQLite schema and migrations | `docs/schema.md` |
 | Every data point, its source and default | `docs/datapoints.md` |
 | Configuration reference | `docs/configuration.md` |
 | Privacy mode and clean-up jobs | `docs/privacy.md` |
 | Deployment on Dreamhost | `docs/deploy-dreamhost.md` |
-| Writing another connector | `docs/connectors.md` |
+| Connectors (PHP, Node, Worker) and writing another | `docs/connectors.md` |
 | Phases, status, open questions | `docs/roadmap.md` |
 
 ## Repository layout
 
 ```
-AGENTS.md  README.md  LICENSE
+AGENTS.md  README.md  LICENSE  pytest.ini
 config/tidesight.example.toml     # annotated example configuration
 docs/                             # see the table above
-tools/sqlite_host_test.py         # Phase 0 hosting test (single file, stdlib only)
+tools/sqlite_host_test.py         # Phase 0 hosting test (single file, stdlib only, Python 3.6+)
+tools/demo.py                     # realistic demo data through the real collector and jobs
 tracker/
-  src/core.js                     # pageviews, events, identity, sessions, engagement, delivery
-  src/plugins/*.js                # behaviour plugins, loaded on demand
-  build.mjs                       # esbuild → build/
-  build/                          # committed minified bundles (deployed as-is)
-  test/                           # Playwright tests + fixture site
+  src/core.js                     # pageviews, events, identity, sessions, engagement, delivery, plugin API
+  src/plugins/*.js                # fp, clicks, scroll, forms, perf, errors, ux, mouse, replay, adblock
+  src/lib/*.js                    # helpers bundled into plugins (selectors, chunk upload)
+  build.mjs                       # esbuild → build/ (core budget 6 KB gzip, enforced)
+  build/                          # committed bundles, deployed as-is (incl. vendored rrweb recorder)
+  test/                           # Playwright specs, fixture site, test config
 server/python/
   tidesight/collect.py            # WSGI ingest app (stdlib only)
-  tidesight/storage.py            # SQLite + spool writers, migrations (stdlib only)
-  tidesight/config.py             # config loading and defaults
-  tidesight/enrich/               # re-runnable enrichment jobs
-  tidesight/jobs.py               # cron CLI
-  tidesight/api.py                # dashboard read API
-  passenger_wsgi.py, collect.cgi  # hosting entry points
-  devserver.py                    # local development server
-  tests/                          # pytest
-server/php/  server/node/  server/worker/   # other connectors
-dashboard/                        # static dashboard (no build step)
+  tidesight/storage.py            # SQLite + spool writers, raw migrations (stdlib only)
+  tidesight/config.py, _toml.py   # config loading, defaults, resolved JSON; TOML fallback parser
+  tidesight/anonymize.py          # IP truncation/hashing (collector and privacy-clean)
+  tidesight/enrich/               # pipeline, sessions, identity, rollup, geo/mmdb, ua, bots, sources, db
+  tidesight/api.py, wsgi.py, auth.py   # read API, web app (dashboard + share pages + collector), Basic auth
+  tidesight/jobs.py, maintenance.py    # cron CLI: enrich, rollup, backup, privacy-clean, archive, export…
+  passenger_wsgi.py, collect.cgi  # hosting entry points (copy into the app/web directory)
+  devserver.py                    # local server (--no-auth, --test-api, --static)
+  tests/                          # pytest, incl. test_conformance.py for every connector
+server/php/  server/node/  server/worker/   # other connectors (same protocol and schema)
+dashboard/
+  index.html, app.css, js/        # static dashboard, ES modules, no build step
+  vendor/                         # committed: fonts, rrweb-player, world map (refresh: npm run vendor)
 ```
 
 ## Setup and commands
 
-Python 3.9+ (on this Windows machine: `py -3.10`); Node 18+ for the tracker build and browser tests.
+Python 3.9+ (on this Windows machine: `py -3.10`); Node 18+ for the tracker build and browser tests (22.13+ for the Node connector); PHP 7.4+ to run the PHP connector's conformance tests.
 
 | Task | Command (from the repo root unless noted) |
 |---|---|
-| Python tests | `python -m pytest server/python/tests` |
-| Connector conformance | `python -m pytest server/python/tests/test_conformance.py` |
+| Python tests | `python -m pytest` (all of `server/python/tests`) |
+| Connector conformance | `TIDESIGHT_CONNECTORS=php python -m pytest server/python/tests/test_conformance.py` |
 | Install tracker tooling | `cd tracker && npm install && npx playwright install chromium` |
 | Build the tracker | `cd tracker && npm run build` |
-| Tracker tests | `cd tracker && npm test` |
-| Local server | `python server/python/devserver.py --config config/dev.toml` |
-| Enrichment jobs | `python -m tidesight.jobs --config <file> enrich` (run with `server/python` on `PYTHONPATH`) |
+| Tracker tests | `cd tracker && npm test` (builds first; starts the dev server on ports 8787/8788) |
+| Demo data + dashboard | `python tools/demo.py --out demo-data` then `python server/python/devserver.py --config demo-data/tidesight.toml --no-auth --port 8790` → `/dashboard/` |
+| Refresh dashboard vendor files | `cd dashboard && npm install && npm run vendor` |
+| Jobs (cron) | `cd server/python && python -m tidesight.jobs --config <file> cron` (also `enrich`, `status`, `backup`, …) |
 | Phase 0 hosting test | `python tools/sqlite_host_test.py --help` |
 
 ## Hard rules
@@ -89,12 +97,13 @@ These are non-negotiable. The reasoning is in `docs/design.md`.
 **JavaScript tracker**
 - Plain ES2019 in `src/`, no runtime dependencies in core. Each plugin is a separate file registered through the core plugin API.
 - Every handler and public function is wrapped so it cannot throw into the host page.
-- Keep the core small (target < 4 KB gzip for `ts.js`); the build prints sizes.
+- Keep the core small: the build fails above 6 KB gzip for `ts.js` (the original target was 4 KB). Prefer putting new behaviour in a plugin.
 - Rebuild (`npm run build`) and commit `tracker/build/` with any change to `tracker/src/`.
 
 **SQLite**
 - Parameterised queries only.
-- Each schema change is a new numbered migration in `storage.py` (raw databases) or `enrich/db.py` (`derived.db`), applied automatically and idempotently. Document it in `docs/schema.md`.
+- Each schema change is a new numbered migration in `storage.py` (raw databases) or `enrich/db.py` (`derived.db`), applied automatically and idempotently. Document it in `docs/schema.md`. Raw-schema changes must be mirrored in the PHP, Node and Worker connectors (the conformance suite compares schemas).
+- API queries joining a typed table to `sessions` drive from the typed table (`CROSS JOIN`) and constrain its `site_id` and `day`; check `EXPLAIN QUERY PLAN` on demo data (`tools/demo.py`) for anything new.
 - Heavy data goes to `replay.db`; derived data goes to `derived.db`; `events.db` stays raw.
 - Timestamps are UTC milliseconds (integers). Keep both server receive time and client time.
 - Raw payloads and header maps are JSON text. Promote a field to a real column only when queries need it.
