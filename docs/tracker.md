@@ -4,7 +4,7 @@ How to add Tidesight to a site and send it more than pageviews. What the tracker
 
 ## Install
 
-Add one tag to the `<head>` of every page, with your collector's host and the site id from the configuration (`[sites.<id>]`):
+Add one tag to the `<head>` of every page, with your collector's host and the property id (the dashboard shows the whole tag in the property's "Tracking code" tab; for a site of the configuration file, the id is the `[sites.<id>]` table's name):
 
 ```html
 <script async src="https://stats.example.com/ts.js" data-site="example"></script>

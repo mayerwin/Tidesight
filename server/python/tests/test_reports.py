@@ -274,6 +274,15 @@ def test_sign_in_with_a_session_cookie(world):  # noqa: F811
     assert call(app, "GET", "/dashboard/api/me", headers={"Cookie": cookie}).code == 401
 
 
+def test_the_cookie_path_follows_a_folder_install():
+    from tidesight.wsgi import _dashboard_path
+    # CGI in a folder, with a rewrite that hides collect.cgi: the browser's path counts.
+    assert _dashboard_path({"REQUEST_URI": "/tidesight/dashboard/api/login", "SCRIPT_NAME": "/tidesight/collect.cgi",
+                            "PATH_INFO": "/dashboard/api/login"}) == "/tidesight/dashboard/"
+    assert _dashboard_path({"SCRIPT_NAME": "", "PATH_INFO": "/dashboard/api/login"}) == "/dashboard/"
+    assert _dashboard_path({"REQUEST_URI": "/x;y/dashboard/api/login"}) == "/"  # nothing odd in a Set-Cookie
+
+
 def test_sign_in_guessing_is_throttled_across_processes(world):  # noqa: F811
     app = _app(world)
     codes = [_login(app, password="guess").code for _ in range(11)]
