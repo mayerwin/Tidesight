@@ -162,14 +162,12 @@ class Running:
         return self.rows("events.db", "SELECT * FROM raw_hits WHERE visitor_id = ? ORDER BY seq", (vid,))
 
 
-@pytest.fixture(scope="module", params=sorted(LAUNCHERS))
-def connector(request, tmp_path_factory):
-    name = request.param
-    root = tmp_path_factory.mktemp("conformance-" + name)
+def _launch(name: str, root: Any, config: str = CONFIG, ready: str = "/health") -> Running:
+    """Start a connector with a configuration; `ready` is a path that answers 200 once it serves."""
     data = str(root / "data").replace("\\", "/")
     toml_path = str(root / "tidesight.toml")
     with open(toml_path, "w", encoding="utf-8") as fh:
-        fh.write(CONFIG.format(data=data, secret=SECRET))
+        fh.write(config.format(data=data, secret=SECRET))
     cfg = loads(open(toml_path, encoding="utf-8").read(), toml_path)
     json_path = str(root / "tidesight.json")
     with open(json_path, "w", encoding="utf-8") as fh:
@@ -182,7 +180,7 @@ def connector(request, tmp_path_factory):
     deadline = time.time() + 30
     while time.time() < deadline:
         try:
-            urllib.request.urlopen(base + "/health", timeout=2).read()
+            urllib.request.urlopen(base + ready, timeout=2).read()
             break
         except Exception:
             if proc.poll() is not None:
@@ -190,16 +188,30 @@ def connector(request, tmp_path_factory):
             time.sleep(0.2)
     else:
         proc.kill()
+        log.close()
         pytest.fail("%s connector did not start (see %s)" % (name, root / "server.log"))
     if proc.poll() is not None:
+        log.close()
         pytest.fail("%s connector exited: %s" % (name, open(str(root / "server.log")).read()[-2000:]))
-    yield Running(name, base, data, proc)
-    proc.terminate()
+    running = Running(name, base, data, proc)
+    running.log = log
+    return running
+
+
+def _stop(running: Running) -> None:
+    running.proc.terminate()
     try:
-        proc.wait(10)
+        running.proc.wait(10)
     except subprocess.TimeoutExpired:
-        proc.kill()
-    log.close()
+        running.proc.kill()
+    running.log.close()
+
+
+@pytest.fixture(scope="module", params=sorted(LAUNCHERS))
+def connector(request, tmp_path_factory):
+    running = _launch(request.param, tmp_path_factory.mktemp("conformance-" + request.param))
+    yield running
+    _stop(running)
 
 
 def _vid() -> str:
@@ -355,7 +367,36 @@ def test_preflight(connector):
     assert "POST" in headers["access-control-allow-methods"]
 
 
+def test_lone_surrogates_become_replacement_characters(connector):
+    # Text cut in the middle of an emoji reaches JSON as a lone surrogate escape, which UTF-8 cannot hold.
+    vid = _vid()
+    env = _env(vid, events=[{"t": "event", "id": "e1-" + vid, "ts": 1728380012001, "pid": "p" + vid[1:],
+                             "n": "party \ud83c", "p": {"label": "\udf89 done", "ok": "\U0001f389"}}], title="\ud83c")
+    assert connector.post(env)[0] == 204
+    hit = connector.hits_for(vid)[0]
+    assert hit["name"] == "party �"
+    assert json.loads(hit["data"])["p"] == {"label": "� done", "ok": "\U0001f389"}
+    assert "�" in hit["data"] and "\\u" not in hit["data"]
+    req = connector.request_for(vid)
+    assert json.loads(req["envelope"])["title"] == "�" and req["error"] is None
+
+
+def test_storage_failure_without_spool_fallback_answers_503(connector, tmp_path):
+    if connector.name == "worker":
+        pytest.skip("D1 has no spool fallback; a failed batch always answers 503")
+    os.makedirs(str(tmp_path / "data" / "events.db"))  # a directory: the database cannot be opened
+    running = _launch(connector.name, tmp_path, CONFIG.replace("[server]\n", "[server]\nspool_fallback = false\n"),
+                      ready="/")
+    try:
+        status, headers, _ = running.post(_env(_vid()))
+        assert status == 503 and headers.get("retry-after") == "60"
+    finally:
+        _stop(running)
+
+
 def test_rate_limit(connector):
+    if time.time() % 60 > 50:  # the limit counts per clock minute: do not straddle two
+        time.sleep(61 - time.time() % 60)
     client = uuid.uuid4().hex
     codes = [connector.post(_env(_vid()), client=client)[0] for _ in range(7)]
     assert codes == [204] * 5 + [429] * 2
@@ -366,6 +407,8 @@ def test_server_cookie(connector):
     _, headers, _ = connector.post(_env(vid))
     cookie = headers.get("set-cookie", "")
     assert cookie.startswith("ts_svid=%s.1728380000000; Domain=.conf.example; Path=/; Max-Age=34560000; SameSite=Lax" % vid)
+    _, headers, _ = connector.post(_env(vid + "\n"))  # no header splitting
+    assert "set-cookie" not in headers
 
 
 def test_privacy_truncate_and_dnt(connector):

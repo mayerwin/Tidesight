@@ -22,6 +22,7 @@ import logging
 import mimetypes
 import os
 import re
+import sqlite3
 import sys
 import time
 import zlib
@@ -52,9 +53,13 @@ ALWAYS_SECRET = ("authorization", "proxy-authorization")
 SERVER_ENV_KEYS = ("SERVER_PROTOCOL", "REQUEST_SCHEME", "HTTPS", "SSL_PROTOCOL", "SSL_CIPHER", "HTTP2",
                    "H2PUSH", "SERVER_NAME", "SERVER_PORT", "REMOTE_PORT", "SERVER_SOFTWARE")
 
-_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-_ORIGIN_RE = re.compile(r"^(null|[A-Za-z][A-Za-z0-9+.-]*://[^\s/?#,]+)$")
-_STATIC_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# \Z rather than $, which also matches before a trailing newline.
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
+_ORIGIN_RE = re.compile(r"^(null|[A-Za-z][A-Za-z0-9+.-]*://[^\s/?#,]+)\Z")
+_STATIC_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_DOMAIN_RE = re.compile(r"^\.?[A-Za-z0-9.-]+\Z")
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+_SURROGATE_ESCAPE_RE = re.compile(r"\\u[dD][89a-fA-F]")
 _STATIC_TYPES = {".js": "application/javascript; charset=utf-8", ".map": "application/json; charset=utf-8",
                  ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
                  ".txt": "text/plain; charset=utf-8"}
@@ -99,6 +104,21 @@ def _reject_constant(name: str) -> Any:
 
 def _dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _replace_surrogates(value: Any) -> Any:
+    """Lone UTF-16 surrogates become U+FFFD in every string, keys included.
+
+    JSON can carry them as \\uD83D escapes (a string cut in the middle of an emoji) but UTF-8, and so
+    SQLite, cannot: without this the whole request would fail to store.
+    """
+    if isinstance(value, str):
+        return _SURROGATE_RE.sub("�", value)
+    if isinstance(value, dict):
+        return {_replace_surrogates(k): _replace_surrogates(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_surrogates(v) for v in value]
+    return value
 
 
 def origin_of(url: Optional[str]) -> Optional[str]:
@@ -355,9 +375,12 @@ class Collector:
         store = self.store(cfg)
         limit = cfg.server["rate_limit_per_minute"]
         key = self._rate_key(cfg, environ)
-        if kind == "chunk":
-            return store.write_chunk(rec, key, limit)
-        return store.write_request(rec, key, limit)
+        try:
+            if kind == "chunk":
+                return store.write_chunk(rec, key, limit)
+            return store.write_request(rec, key, limit)
+        except (sqlite3.Error, OSError) as exc:  # no spool fallback configured, or the spool failed too
+            raise StorageError("could not store the record: %s" % exc) from exc
 
     def _count(self, cfg: Config, site_id: Optional[str], name: str) -> None:
         try:
@@ -476,6 +499,8 @@ class Collector:
             return None, "bad_json: %s" % str(exc)[:120], encoding, data
         if not isinstance(obj, dict):
             return None, "not_an_object", encoding, data
+        if _SURROGATE_ESCAPE_RE.search(text):  # only \uD800-\uDFFF escapes can produce lone surrogates
+            obj = _replace_surrogates(obj)
         return obj, None, encoding, data
 
     def _server_cookie(self, site: SiteConfig, envelope: Dict[str, Any], environ: Dict[str, Any]) -> Optional[str]:
@@ -485,7 +510,7 @@ class Collector:
             return None
         vt = _int(envelope.get("vt"))
         value = "%s.%d" % (vid, vt) if vt is not None and vt > 0 else vid
-        if not re.match(r"^\.?[A-Za-z0-9.-]+$", domain):
+        if not _DOMAIN_RE.match(domain):
             return None
         secure = environ.get("wsgi.url_scheme") == "https" or environ.get("HTTPS", "").lower() in ("on", "1")
         parts = ["ts_svid=%s" % value, "Domain=%s" % domain, "Path=/",

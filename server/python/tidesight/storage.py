@@ -21,6 +21,7 @@ import base64
 import json
 import logging
 import os
+import re
 import socket
 import sqlite3
 import threading
@@ -160,6 +161,18 @@ def connect(path: str, journal_mode: str = "wal", synchronous: str = "normal",
     return conn
 
 
+_ADD_COLUMN_RE = re.compile(r"^ALTER TABLE (\w+) ADD COLUMN (\w+)", re.IGNORECASE)
+
+
+def _column_exists(conn: sqlite3.Connection, sql: str) -> bool:
+    """True for an ADD COLUMN whose column is already there: a database that lost its user_version (e.g. a
+    Cloudflare D1 export) then migrates cleanly instead of failing on a duplicate column."""
+    m = _ADD_COLUMN_RE.match(sql.strip())
+    if not m:
+        return False
+    return any(row[1] == m.group(2) for row in conn.execute("PRAGMA table_info(%s)" % m.group(1)))
+
+
 def migrate(conn: sqlite3.Connection, migrations: Sequence[Tuple[int, List[str]]]) -> int:
     """Apply pending migrations; safe to call concurrently from several processes."""
     current = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -173,7 +186,8 @@ def migrate(conn: sqlite3.Connection, migrations: Sequence[Tuple[int, List[str]]
             if version <= current:
                 continue
             for sql in statements:
-                conn.execute(sql)
+                if not _column_exists(conn, sql):
+                    conn.execute(sql)
             conn.execute("PRAGMA user_version=%d" % version)
             current = version
         conn.execute("COMMIT")
@@ -613,8 +627,8 @@ class FallbackStore:
         except sqlite3.Error as exc:
             log.error("SQLite write failed (%s); writing to the spool instead", exc)
             try:
-                getattr(self.spool, method)(*args, **kwargs)
-                return SPOOLED
+                outcome = getattr(self.spool, method)(*args, **kwargs)
+                return SPOOLED if outcome == STORED else outcome  # RATE_LIMITED: only a counter was written
             except OSError as exc2:
                 raise StorageError("could not store the record: %s / %s" % (exc, exc2))
 

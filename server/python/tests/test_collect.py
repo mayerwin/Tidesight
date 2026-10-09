@@ -5,11 +5,13 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import sqlite3
 from urllib.parse import quote
 
 import pytest
 
 from conftest import envelope
+from tidesight import collect
 
 
 def test_valid_batch_is_stored_raw(harness):
@@ -369,8 +371,23 @@ def test_server_cookie(make_harness):
     assert "SameSite=Lax" in cookie and "Secure" in cookie
     r = h.post(envelope(vid="bad id!"))
     assert "set-cookie" not in r.headers
+    r = h.post(envelope(vid="visitor00000001\n"))  # no header splitting
+    assert "set-cookie" not in r.headers
     r = h.post(envelope(), headers={"Origin": "https://evil.com"})
     assert "set-cookie" not in r.headers
+
+
+def test_lone_surrogates_become_replacement_characters(harness):
+    # Text cut in the middle of an emoji reaches JSON as a lone surrogate escape, which UTF-8 cannot hold.
+    ev = {"t": "event", "id": "ev1", "ts": 1728380012001, "pid": "page0001", "url": "https://example.com/",
+          "n": "party \ud83c", "p": {"label": "\udf89 done", "k\ud83c": 1, "ok": "\U0001f389"}}
+    r = harness.post(envelope([ev], title="\ud83c"))
+    assert r.code == 204
+    hit = harness.events("SELECT name, data FROM raw_hits")[0]
+    assert hit["name"] == "party �"
+    assert json.loads(hit["data"])["p"] == {"label": "� done", "k�": 1, "ok": "\U0001f389"}
+    req = harness.events("SELECT envelope, error FROM raw_requests")[0]
+    assert json.loads(req["envelope"])["title"] == "�" and req["error"] is None
 
 
 def test_static_files(harness, tmp_path):
@@ -406,3 +423,25 @@ def test_storage_failure_falls_back_to_spool(harness):
         spool_files += [os.path.join(root, f) for f in files]
     assert len(spool_files) == 1
     assert os.path.exists(events_db)
+
+
+class _Locked:
+    def __getattr__(self, name):
+        raise sqlite3.OperationalError("database is locked")
+
+
+def test_rate_limit_still_applies_while_falling_back_to_the_spool(make_harness, monkeypatch):
+    monkeypatch.setattr(collect, "now_ms", lambda: 1728380000000)  # one minute window
+    h = make_harness(rate=2)
+    h.post(envelope())  # creates the database
+    h.app._store.primary.events_conn = lambda: _Locked()
+    assert [h.post(envelope()).code for _ in range(3)] == [204, 204, 429]
+
+
+def test_storage_failure_without_fallback_answers_503(make_harness):
+    h = make_harness()
+    h.cfg.server["spool_fallback"] = False
+    assert h.post(envelope()).code == 204
+    h.app._store.events_conn = lambda: _Locked()
+    r = h.post(envelope())
+    assert r.code == 503 and r.headers["retry-after"] == "60"

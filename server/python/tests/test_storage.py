@@ -29,6 +29,16 @@ def test_migrations_are_idempotent(tmp_path):
     conn.close()
 
 
+def test_migrations_survive_a_lost_user_version(tmp_path):
+    # A database exported from Cloudflare D1 has the tables but not the user_version.
+    conn = connect(str(tmp_path / "events.db"))
+    migrate(conn, EVENTS_MIGRATIONS)
+    conn.execute("PRAGMA user_version=0")
+    assert migrate(conn, EVENTS_MIGRATIONS) == EVENTS_MIGRATIONS[-1][0]
+    assert [r[1] for r in conn.execute("PRAGMA table_info(raw_requests)")].count("geo") == 1
+    conn.close()
+
+
 def test_readonly_connection(tmp_path):
     path = str(tmp_path / "events.db")
     conn = connect(path)
