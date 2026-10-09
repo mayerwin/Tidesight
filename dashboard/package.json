@@ -1,0 +1,20 @@
+{
+  "name": "tidesight-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tidesight dashboard: static files, no build step. `npm run vendor` refreshes the vendored assets in vendor/ (committed).",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "vendor": "node vendor.mjs"
+  },
+  "devDependencies": {
+    "@fontsource-variable/fraunces": "^5.3.0",
+    "@fontsource-variable/ibm-plex-sans": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "i18n-iso-countries": "^7.14.0",
+    "rrweb-player": "^2.1.7",
+    "topojson-client": "^3.1.0",
+    "world-atlas": "^2.0.2"
+  }
+}

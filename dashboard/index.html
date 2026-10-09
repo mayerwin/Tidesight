@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tidesight</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail" aria-label="Navigation">
+      <a class="brand" href="#/overview">
+        <svg class="brand-mark" viewBox="0 0 34 34" aria-hidden="true">
+          <circle cx="17" cy="17" r="15.5" fill="none" stroke="#9fd1ff" stroke-opacity=".5"/>
+          <circle cx="17" cy="17" r="4" fill="#9fd1ff"/>
+          <path class="wave" d="M3 22c3.5-3 7-3 10.5 0s7 3 10.5 0 7-3 7 0" fill="none" stroke="#e9eef3" stroke-width="1.6" stroke-linecap="round"/>
+          <path class="wave" d="M5 26.5c3-2.4 6-2.4 9 0s6 2.4 9 0 4.5-2 6 0" fill="none" stroke="#9fd1ff" stroke-width="1.2" stroke-linecap="round" opacity=".7"/>
+        </svg>
+        <span class="brand-name">Tidesight<small>Analytics</small></span>
+      </a>
+      <div class="site-picker"><select id="site" aria-label="Site"></select></div>
+      <nav class="nav" id="nav"></nav>
+      <div class="rail-foot">
+        <button id="theme" type="button" title="Switch theme">Theme</button>
+        <span id="version"></span>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="page-head">
+        <div>
+          <h1 class="page-title" id="title">Overview</h1>
+          <p class="page-sub" id="subtitle"></p>
+        </div>
+      </div>
+      <div class="filters" id="filters"></div>
+      <section id="view" aria-live="polite"></section>
+      <p class="foot-credit" id="credit"></p>
+    </main>
+  </div>
+</body>
+</html>
