@@ -368,3 +368,20 @@ def test_page_status_from_meta_and_status_event(tmp_path, monkeypatch):
     pipeline.run(cfg)
     rows = query_db(derived_path(cfg.data_dir), "SELECT path, status FROM pageviews ORDER BY seq")
     assert [(r["path"], r["status"]) for r in rows] == [("/missing", 404), ("/gone", 410), ("/ok", None)]
+
+
+def test_per_hit_lookups_have_indexes(world):
+    # Without them every hit scans a table, and enrichment time grows with the square of the data.
+    pipeline.run(world)
+    conn = sqlite3.connect(derived_path(world.data_dir))
+
+    def indexed(table, cols):
+        for idx in conn.execute("PRAGMA index_list(%s)" % table):
+            if [r[2] for r in conn.execute("PRAGMA index_info(%s)" % idx[1])][:len(cols)] == cols:
+                return True
+        return False
+
+    for table, cols in (("vitals", ["page_key", "metric"]), ("errors", ["page_key", "grp"]),
+                        ("hits", ["session_key"]), ("errors", ["session_key"]), ("pageviews", ["session_key"])):
+        assert indexed(table, cols), (table, cols)
+    conn.close()

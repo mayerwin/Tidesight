@@ -346,6 +346,12 @@ DERIVED_MIGRATIONS: List[Tuple[int, List[str]]] = [
         "CREATE INDEX IF NOT EXISTS misc_session ON misc(session_key)",
         "CREATE INDEX IF NOT EXISTS pageviews_site_path ON pageviews(site_id, path, day)",
     ]),
+    # Re-sent Web Vitals and error counts update the row of their page: without these, every vital scanned the
+    # whole table (enrichment time grew with the square of the data).
+    (3, [
+        "CREATE INDEX IF NOT EXISTS vitals_page ON vitals(page_key, metric)",
+        "CREATE INDEX IF NOT EXISTS errors_page ON errors(page_key, grp)",
+    ]),
 ]
 
 
