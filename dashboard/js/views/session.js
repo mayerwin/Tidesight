@@ -45,7 +45,7 @@ export async function render(root, ctx) {
   const visitorLink = el('a', { href: '#/visitor?' + new URLSearchParams({ site: ctx.site, key: s.visitor_key }), text: s.uid || s.visitor_key });
   info.body.appendChild(kv([
     ['Started', fmt.when(s.started_at)], ['Duration', fmt.duration(s.duration_ms)], ['Engaged', fmt.duration(s.engaged_ms)],
-    ['Visitor', visitorLink], ['Visit number', s.session_number], ['Pages', s.pageviews], ['Events', s.events],
+    ['Visitor', visitorLink], ['Visit number', s.session_number], ['Pages', s.pageviews], ['Custom events', s.events],
     ['Landing', s.entry_url], ['Referrer', s.referrer], ['Source', [s.source, s.medium].filter(Boolean).join(' / ')], ['Campaign', s.campaign],
     ['Channel', s.channel], ['Location', [s.city, s.region_name, labelFor('country', s.country)].filter(Boolean).join(', ')],
     ['Network', s.as_org], ['Device', [labelFor('device', s.device_type), s.device_brand, s.device_model].filter(Boolean).join(' · ')],

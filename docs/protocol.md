@@ -99,7 +99,7 @@ All paths are relative to the collector's base URL (e.g. `https://stats.example.
 | `new` | 1 when the visitor id was created on this page load. |
 | `idsrc` | Where the visitor id came from: `cookie`, `ls` (localStorage), `server` (server cookie), `new`. |
 | `idc` | Identity conflict, when the cookie and localStorage held different ids: `{"cookie": "…", "ls": "…"}`. |
-| `st` | Status flagged by the page (e.g. `404`), from `<meta name="ts:status" content="404">` or `tidesight('status', 404)`. |
+| `st` | Status flagged by the page (e.g. `404`) with `<meta name="ts:status" content="404">`. |
 | `props` | Custom properties passed to a manual pageview. |
 | `ctx` | Client context, see below. |
 
@@ -155,6 +155,10 @@ Sent when the page is hidden or left, on SPA route changes (for the previous pag
 #### `identify`
 
 `uid` (string) and `traits` (flat object). The user id is also sent in the envelope (`uid`) from then on.
+
+#### `status`
+
+`st`: a status the page reports after its pageview was sent (`tidesight('status', 404)`), for pages that learn it late, such as an SPA route whose content was not found. Enrichment applies it to the pageview with the same `pid` (the last one wins).
 
 #### `fp` (fingerprint)
 
@@ -308,4 +312,4 @@ Visitor-visible names used by the official tracker. Other trackers should use th
   bot signals moved from `ctx.bot` to `fp.bot`, ad-blocker detection from `ctx.ab` to the `adblock` event;
   `perf` transfer size is `tsz` (`ts` is every event's client time); `vital` and `error` updates carry `upd: 1`;
   replay chunks carry `rec`. Collectors fill the `name` column only from a string `n` (several event types use
-  `n` as a count).
+  `n` as a count). `tidesight('status')` sends a `status` event rather than setting `st` on a later pageview.

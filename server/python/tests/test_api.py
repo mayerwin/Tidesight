@@ -111,6 +111,27 @@ def test_people_endpoints(api):
     assert status["files"]["events.db"] > 0 and status["enrich"]["last_id"] > 0
 
 
+def test_not_found_pages(tmp_path, monkeypatch):
+    cfg = make_config(tmp_path)
+    tr = Traffic(cfg, monkeypatch)
+    tr.batch(T0, "visitorNF0001", "sessN1", [
+        pv("n1", "pN1", "https://example.com/old", T0 - 100, ref="https://blog.example.org/post", ns=1, sn=1, pn=1, st=404),
+        pv("n2", "pN2", "https://example.com/", T0 + 1000, ref="https://example.com/old", sn=1, pn=2),
+    ])
+    tr.batch(T0 + 60000, "visitorNF0002", "sessN2", [
+        pv("n3", "pN3", "https://example.com/old", T0 + 59000, ns=1, sn=1, pn=1, st=404),
+        pv("n4", "pN4", "https://example.com/gone", T0 + 61000, ref="https://example.com/old", sn=1, pn=2),
+        {"t": "status", "id": "n5", "pid": "pN4", "ts": T0 + 61500, "url": "https://example.com/gone", "st": 410},
+    ])
+    tr.h.close()
+    pipeline.run(cfg)
+    rows = Api(cfg).call("not_found", dict(RANGE))["rows"]
+    assert [(r["value"], r["status"], r["pageviews"], r["visitors"]) for r in rows] == [("/old", 404, 2, 2), ("/gone", 410, 1, 1)]
+    assert rows[0]["referrers"] == [{"value": "https://blog.example.org/post", "count": 1}]
+    assert rows[1]["referrers"] == [{"value": "https://example.com/old", "count": 1}]
+    assert (rows[0]["last_seen"], rows[1]["last_seen"]) == (T0 + 59000, T0 + 61000)
+
+
 def test_realtime(tmp_path, monkeypatch):
     import time as _time
     cfg = make_config(tmp_path)

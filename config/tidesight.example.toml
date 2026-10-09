@@ -108,7 +108,6 @@ copy_paste = false
 text_selection = false
 site_search = true
 not_found = true                         # pages flagged with <meta name="ts:status" content="404">
-ecommerce = false
 mouse_moves = false                      # heavy: stored in replay.db
 replay = false                           # heavy: rrweb session replay
 dom_snapshots = false                    # heavy: DOM snapshots for heatmap backgrounds

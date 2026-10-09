@@ -213,6 +213,9 @@ def _rebuild_pageviews(conn: sqlite3.Connection, key: str, site_id: str, tz: str
         extra = _extra(pv)
         host, path, query, frag = url_parts(pv["url"])
         st = extra.get("st")
+        for r in page_rows:  # reported after the pageview: tidesight('status', 404)
+            if r["type"] == "status":
+                st = _extra(r).get("st", st)
         conn.execute(
             "INSERT OR REPLACE INTO pageviews(page_key, hit_id, site_id, session_key, ts, day, hour, url, host, path, "
             "query, hash, title, referrer, nav, status, seq, engaged_ms, scroll_max, duration_ms, is_entry, is_exit) "

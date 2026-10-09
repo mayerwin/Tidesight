@@ -148,7 +148,6 @@ FEATURE_DEFAULTS: Dict[str, bool] = {
     "text_selection": False,
     "site_search": True,
     "not_found": True,
-    "ecommerce": False,
     "mouse_moves": False,
     "replay": False,
     "dom_snapshots": False,

@@ -24,6 +24,14 @@ def to_int(v: Any) -> Optional[int]:
     return int(n) if n is not None else None
 
 
+def status_code(v: Any) -> Optional[int]:
+    """A page status (e.g. 404) from a number or a numeric string, or None."""
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    n = to_int(v)
+    return n if n is not None and 100 <= n <= 999 else None
+
+
 def to_str(v: Any, n: int = 500) -> Optional[str]:
     if isinstance(v, str):
         return v[:n]

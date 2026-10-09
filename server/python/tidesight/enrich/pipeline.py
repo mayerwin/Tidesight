@@ -25,11 +25,11 @@ from .geo import GeoLookup
 from .ip import IP_VERSION, client_ip, cookieless_hash, in_networks, networks
 from .raw import RawReader, raw_paths
 from .timeutil import local_day
-from .util import b36, jdump, num, to_int, to_str, url_parts
+from .util import b36, jdump, num, status_code, to_int, to_str, url_parts
 
 log = logging.getLogger("tidesight.enrich")
 
-PIPELINE_VERSION = 1  # bump when hit processing changes
+PIPELINE_VERSION = 2  # bump when hit processing changes
 
 # Hit types copied to the typed tables.
 CLICK_TYPES = ("click", "rage", "dead", "errclick")
@@ -345,8 +345,10 @@ class Enricher:
         extra: Optional[Dict[str, Any]] = None
         if htype == "pageview":
             ctx = data.get("ctx") if isinstance(data.get("ctx"), dict) else {}
-            extra = {k: data.get(k) for k in ("title", "ref", "nav", "canon", "lang", "st", "new", "idsrc", "idc")
+            extra = {k: data.get(k) for k in ("title", "ref", "nav", "canon", "lang", "new", "idsrc", "idc")
                      if data.get(k) is not None}
+            if status_code(data.get("st")) is not None:
+                extra["st"] = status_code(data.get("st"))
             if row["endpoint"] == "pixel":
                 extra.setdefault("title", data.get("title"))
                 extra.setdefault("ref", data.get("r"))
@@ -359,6 +361,8 @@ class Enricher:
             sd = to_int(data.get("sd"))
         elif htype == "scroll":
             sd = to_int(data.get("max")) or to_int(data.get("d"))
+        elif htype == "status" and status_code(data.get("st")) is not None:
+            extra = {"st": status_code(data.get("st"))}
         elif htype == "fp":
             fp = to_str(data.get("h"), 64)
             if isinstance(data.get("bot"), dict):

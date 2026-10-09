@@ -60,7 +60,7 @@ Everything Tidesight can record, where it comes from, and whether it is on by de
 - **Site search** queries (configurable URL parameters).
 - **404 pages** (the site flags them).
 - **Custom events and properties.**
-- **Revenue / ecommerce events** (GA4-style `purchase` schema) *(off until needed)*.
+- **Revenue / ecommerce events:** custom events with GA4's ecommerce names and parameters (`purchase`, `add_to_cart`, `refund`…) and a numeric value, which the dashboard sums per event.
 
 ## Performance and errors
 

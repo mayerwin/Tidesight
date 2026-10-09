@@ -352,3 +352,19 @@ def test_export_and_backup(world, tmp_path):
     assert names == ["derived.db", "events.db"]
     with gzip.open(os.path.join(b["backup"], "events.db.gz"), "rb") as fh:
         assert fh.read(16) == b"SQLite format 3\x00"
+
+
+def test_page_status_from_meta_and_status_event(tmp_path, monkeypatch):
+    cfg = make_config(tmp_path)
+    tr = Traffic(cfg, monkeypatch)
+    tr.batch(T0, "visitorSTAT01", "sessS1", [
+        pv("s1", "pS1", "https://example.com/missing", T0 - 100, ns=1, sn=1, pn=1, st=404),
+        pv("s2", "pS2", "https://example.com/gone", T0 + 1000, sn=1, pn=2),
+        {"t": "status", "id": "s3", "pid": "pS2", "ts": T0 + 1100, "url": "https://example.com/gone", "st": "410"},
+        pv("s4", "pS3", "https://example.com/ok", T0 + 2000, sn=1, pn=3),
+        {"t": "status", "id": "s5", "pid": "pS3", "ts": T0 + 2100, "url": "https://example.com/ok", "st": "oops"},
+    ])
+    tr.h.close()
+    pipeline.run(cfg)
+    rows = query_db(derived_path(cfg.data_dir), "SELECT path, status FROM pageviews ORDER BY seq")
+    assert [(r["path"], r["status"]) for r in rows] == [("/missing", 404), ("/gone", 410), ("/ok", None)]

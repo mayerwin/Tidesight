@@ -363,6 +363,28 @@ class Api:
             r["bounce_rate"] = round(r["bounces"] / r["entries"], 4) if r["entries"] else None
         return {"rows": rows}
 
+    def ep_not_found(self, params: Dict[str, str], public: bool) -> Any:
+        """Pages flagged with an error status (404 and other 4xx/5xx), with the referrers that lead to them."""
+        q = self.q(params, public)
+        conn = self.derived()
+        try:
+            where, args = q.session_where("s")
+            base = ("FROM pageviews p CROSS JOIN sessions s ON s.session_key = p.session_key "
+                    "WHERE p.site_id = ? AND p.day BETWEEN ? AND ? AND p.status >= 400 AND " + where)
+            rows = [dict(r) for r in conn.execute(
+                "SELECT p.path AS value, p.status, COUNT(*) AS pageviews, COUNT(DISTINCT s.visitor_key) AS visitors, "
+                "MAX(p.ts) AS last_seen " + base + " GROUP BY p.path, p.status ORDER BY pageviews DESC LIMIT ?",
+                [q.site_id, q.start, q.end] + args + [q.limit(100)])]
+            refs: Dict[Tuple[str, int], Counter] = defaultdict(Counter)
+            for r in conn.execute("SELECT p.path, p.status, p.referrer " + base + " AND p.referrer > ''",
+                                  [q.site_id, q.start, q.end] + args):
+                refs[(r["path"], r["status"])][r["referrer"]] += 1
+        finally:
+            conn.close()
+        for r in rows:
+            r["referrers"] = [{"value": v, "count": n} for v, n in refs[(r["value"], r["status"])].most_common(3)]
+        return {"rows": rows}
+
     def ep_events(self, params: Dict[str, str], public: bool) -> Any:
         q = self.q(params, public)
         conn = self.derived()

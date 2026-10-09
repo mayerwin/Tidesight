@@ -112,6 +112,8 @@ SOURCES = [  # (weight, landing referrer, query string to add, landing pages)
     (3, "https://github.com/tidesight/tidesight", "", ["/docs/getting-started", "/docs/api"]),
     (2, "https://www.reddit.com/r/selfhosted/", "", ["/blog/self-hosting-analytics", "/"]),
     (1, "https://www.youtube.com/", "", ["/"]),
+    (1, "https://www.reddit.com/r/selfhosted/", "", ["/docs/install"]),  # links to pages that no longer exist
+    (1, "https://t.co/abc123", "", ["/blog/tides-explained"]),
 ]
 
 PAGES = {
@@ -130,6 +132,8 @@ PAGES = {
     "/blog/whats-new": ("What's new in October · Blog", ["/pricing", "/features"]),
     "/about": ("About · Tidesight", ["/", "/pricing"]),
 }
+NOT_FOUND = ("Page not found · Tidesight", ["/", "/docs/getting-started"])
+BROKEN = {"/docs/install", "/blog/tides-explained", "/docs/configuration"}  # 404 pages (meta ts:status)
 
 # Clickable elements per page: id, page box at 1280px (x, y, w, h), label, href
 ELEMENTS = {
@@ -375,9 +379,11 @@ def session(rng: random.Random, poster: Poster, p: Dict[str, Any], at: int, sn: 
         url = ORIGIN + path + (("?" + qs) if (first and qs) else "")
         if path == "/docs/search":
             url = ORIGIN + path + "?q=" + rng.choice(["webhooks", "export csv", "privacy mode", "spool", "geoip", "replay"])
-        title = PAGES.get(path, ("Page", []))[0]
+        title = NOT_FOUND[0] if path in BROKEN else PAGES.get(path, ("Page", []))[0]
         pv = {"t": "pageview", "id": rid(rng, 12), "ts": t, "pid": pid, "url": url, "title": title, "ref": referrer,
               "nav": "navigate", "sn": sn, "pn": i + 1, "ctx": ctx}
+        if path in BROKEN:
+            pv["st"] = 404
         if first:
             pv["idsrc"] = "new" if sn == 1 else "cookie"
             if sn == 1:
@@ -470,10 +476,13 @@ def session(rng: random.Random, poster: Poster, p: Dict[str, Any], at: int, sn: 
         if replay:
             stats["replays"] += 1 if first else 0
         # Next page.
-        nxt = PAGES.get(path, ("", ["/"]))[1]
+        nxt = NOT_FOUND[1] if path in BROKEN else PAGES.get(path, ("", ["/"]))[1]
         referrer = url
         t += dwell + rng.randint(500, 3000)
-        path = rng.choice(nxt + (["/docs/search"] if path.startswith("/docs") and rng.random() < 0.2 else []))
+        if path == "/docs/api" and rng.random() < 0.06:
+            path = "/docs/configuration"  # a broken internal link
+        else:
+            path = rng.choice(nxt + (["/docs/search"] if path.startswith("/docs") and rng.random() < 0.2 else []))
         first = False
     env = {"v": 1, "site": SITE, "vid": p["vid"], "vt": p["vt"], "sid": sid, "uid": p["uid"], "sent": t, "lib": "ts.js/0.1.0", "try": 0,
            "events": events}
