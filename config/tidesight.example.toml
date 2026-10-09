@@ -63,8 +63,9 @@ bot_list = ""                            # optional path to crawler-user-agents.
 internal_ips = []                        # CIDRs flagged as internal traffic (e.g. your office)
 
 [dashboard]
-# Who may sign in (the dashboard's form; scripts may use HTTP Basic). Create a hash with:
-#   python -m tidesight.jobs hash-password --user admin
+# Who may sign in (the dashboard's form; scripts may use HTTP Basic). The easy way leaves this table empty:
+#   python -m tidesight.jobs user set admin     (asks for the password; keeps its hash in data_dir/users.json)
+# Users written here win over users.json. Create a hash with:  python -m tidesight.jobs hash-password --user admin
 users = {}                               # e.g. { admin = "pbkdf2_sha256$600000$...$..." }
 admins = []                              # who may add, change and delete properties; empty = every user
 session_days = 30                        # how long "Keep me signed in" lasts

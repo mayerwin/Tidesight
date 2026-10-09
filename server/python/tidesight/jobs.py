@@ -12,6 +12,7 @@
     python -m tidesight.jobs --config … purge-site ID [--apply]
     python -m tidesight.jobs --config … vacuum
     python -m tidesight.jobs --config … status
+    python -m tidesight.jobs --config … user set NAME | user remove NAME | user list
     python -m tidesight.jobs hash-password
 
 Run with server/python on PYTHONPATH (or from that directory).
@@ -30,6 +31,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from . import __version__
+from . import users as users_mod
 from .auth import hash_password
 from .config import Config, load
 from .storage import load_spool
@@ -205,6 +207,63 @@ def cmd_purge_site(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     return purge_site(cfg, args.site, apply=args.apply)
 
 
+def _new_password(name: str, from_stdin: bool) -> str:
+    if from_stdin:  # for scripts: the first line of standard input
+        password = sys.stdin.readline().rstrip("\r\n")
+    else:
+        password = getpass.getpass("Password for %s: " % name)
+        if getpass.getpass("Repeat it: ") != password:
+            raise SystemExit("The passwords differ: nothing changed.")
+    if len(password) < users_mod.MIN_PASSWORD:
+        raise SystemExit("Use at least %d characters: nothing changed." % users_mod.MIN_PASSWORD)
+    return password
+
+
+def cmd_user(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
+    """Dashboard users kept in data_dir/users.json (those of the configuration file are changed there)."""
+    try:
+        return _user(cfg, args)
+    except (users_mod.UsersError, TimeoutError) as exc:
+        raise SystemExit("%s: nothing changed." % exc)
+
+
+def _user(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
+    admins = cfg.dashboard.get("admins") or []
+    if args.action == "list":
+        stored = users_mod.read(cfg.data_dir)
+        rows = [{"user": n, "where": "configuration file"} for n in sorted(cfg.file_users)]
+        rows += [{"user": n, "where": "users.json"} for n in sorted(stored) if n not in cfg.file_users]
+        for row in rows:
+            row["admin"] = not admins or row["user"] in admins
+        return {"users": rows}
+    name = args.name or ""
+    if not name:
+        raise SystemExit("Name the user: user %s NAME" % args.action)
+    if name in cfg.file_users:
+        raise SystemExit("%s is defined in the configuration file (%s, [dashboard] users): change it there."
+                         % (name, cfg.path))
+    if args.action == "remove":
+        if not users_mod.update(cfg.data_dir, lambda table: table.pop(name, None) is not None):
+            raise SystemExit("There is no user %s in %s." % (name, users_mod.path(cfg.data_dir)))
+        return {"removed": name}
+    if not users_mod.NAME_RE.match(name):
+        raise SystemExit("A user name has 1 to 64 letters, digits and . _ @ + - (and starts with a letter or digit).")
+    encoded = hash_password(_new_password(name, args.password_stdin))
+
+    def put(table: Dict[str, str]) -> bool:
+        existed = name in table
+        table[name] = encoded
+        return existed
+
+    changed = users_mod.update(cfg.data_dir, put)
+    url = (cfg.server.get("public_url") or "").rstrip("/")
+    out: Dict[str, Any] = {"user": name, "password": "changed (their sessions ended)" if changed else "set",
+                           "sign_in": (url or "") + "/dashboard/"}
+    if admins and name not in admins:
+        out["note"] = "not in [dashboard] admins: may read every report, not change properties"
+    return out
+
+
 def cmd_hash_password(cfg: Optional[Config], args: argparse.Namespace) -> Dict[str, Any]:
     password = args.password
     if not password:
@@ -212,7 +271,8 @@ def cmd_hash_password(cfg: Optional[Config], args: argparse.Namespace) -> Dict[s
         if getpass.getpass("Repeat: ") != password:
             raise SystemExit("passwords differ")
     encoded = hash_password(password)
-    print("Add this to the [dashboard] users table of your config:")
+    print("Add this to the [dashboard] users table of your config (or let `user set %s` keep it in users.json):"
+          % args.user)
     print('  %s = "%s"' % (args.user, encoded))
     return {}
 
@@ -295,6 +355,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("config-json", help="write the resolved configuration as JSON (for other connectors)")
     p.add_argument("--out", default="-", help="output file (default stdout); created with mode 600")
     p.set_defaults(func=cmd_config_json)
+
+    p = sub.add_parser("user", help="dashboard users: set (add, or change a password), remove, list")
+    p.add_argument("action", choices=["set", "remove", "list"])
+    p.add_argument("name", nargs="?", default=None)
+    p.add_argument("--password-stdin", action="store_true", help="read the password from standard input")
+    p.set_defaults(func=cmd_user)
 
     p = sub.add_parser("hash-password", help="hash a dashboard password for the config")
     p.add_argument("--user", default="admin")

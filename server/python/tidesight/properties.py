@@ -13,7 +13,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Type
 
 log = logging.getLogger("tidesight.config")
 
@@ -29,10 +29,9 @@ def path(data_dir: str) -> str:
     return os.path.join(data_dir, FILE)
 
 
-def read_tables(data_dir: str) -> Dict[str, Dict[str, Any]]:
-    """The managed site tables ({} when the file does not exist). A file that exists but cannot be read (a
-    passing lock on Windows is retried) or parsed raises PropertiesError."""
-    p = path(data_dir)
+def read_json_table(p: str, key: str, error: Type[Exception]) -> Dict[str, Any]:
+    """The `key` table of a JSON file of the data directory ({} when the file does not exist). A file that exists
+    but cannot be read (a passing lock on Windows is retried) or parsed raises `error`."""
     for attempt in range(20):
         try:
             with open(p, "r", encoding="utf-8") as fh:
@@ -42,31 +41,20 @@ def read_tables(data_dir: str) -> Dict[str, Dict[str, Any]]:
             return {}
         except PermissionError as exc:  # Windows: being replaced at this very moment
             if attempt == 19:
-                raise PropertiesError("%s could not be read: %s" % (p, exc))
+                raise error("%s could not be read: %s" % (p, exc))
             time.sleep(0.05)
         except (OSError, ValueError, RecursionError) as exc:
-            raise PropertiesError("%s could not be read: %s" % (p, exc))
-    sites = doc.get("sites") if isinstance(doc, dict) else None
-    if not isinstance(sites, dict):
-        raise PropertiesError("%s has no \"sites\" table" % p)
-    return {k: v for k, v in sites.items() if isinstance(k, str) and isinstance(v, dict)}
+            raise error("%s could not be read: %s" % (p, exc))
+    table = doc.get(key) if isinstance(doc, dict) else None
+    if not isinstance(table, dict):
+        raise error("%s has no \"%s\" table" % (p, key))
+    return {k: v for k, v in table.items() if isinstance(k, str)}
 
 
-def load_tables(data_dir: str) -> Dict[str, Dict[str, Any]]:
-    """The managed site tables, {} when there are none or the file is broken (reported)."""
-    try:
-        return read_tables(data_dir)
-    except PropertiesError as exc:
-        log.error("%s: its properties are ignored", exc)
-        return {}
-
-
-def save_tables(data_dir: str, tables: Dict[str, Dict[str, Any]]) -> None:
-    """Write atomically (a reader never sees half a file), readable by this account only."""
-    os.makedirs(data_dir, exist_ok=True)
-    p = path(data_dir)
+def write_json(p: str, doc: Dict[str, Any]) -> None:
+    """Write a JSON file atomically (a reader never sees half a file), readable by this account only."""
+    os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = "%s.%d.tmp" % (p, os.getpid())
-    doc = {"format": "tidesight-properties/1", "updated_at": int(time.time() * 1000), "sites": tables}
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2, sort_keys=True)
@@ -85,11 +73,33 @@ def save_tables(data_dir: str, tables: Dict[str, Dict[str, Any]]) -> None:
             time.sleep(0.05)
 
 
+def read_tables(data_dir: str) -> Dict[str, Dict[str, Any]]:
+    """The managed site tables ({} when the file does not exist). A file that exists but cannot be read or parsed
+    raises PropertiesError."""
+    sites = read_json_table(path(data_dir), "sites", PropertiesError)
+    return {k: v for k, v in sites.items() if isinstance(v, dict)}
+
+
+def load_tables(data_dir: str) -> Dict[str, Dict[str, Any]]:
+    """The managed site tables, {} when there are none or the file is broken (reported)."""
+    try:
+        return read_tables(data_dir)
+    except PropertiesError as exc:
+        log.error("%s: its properties are ignored", exc)
+        return {}
+
+
+def save_tables(data_dir: str, tables: Dict[str, Dict[str, Any]]) -> None:
+    """Write atomically (a reader never sees half a file), readable by this account only."""
+    write_json(path(data_dir), {"format": "tidesight-properties/1", "updated_at": int(time.time() * 1000),
+                                "sites": tables})
+
+
 @contextlib.contextmanager
-def locked(data_dir: str, timeout: float = 10.0) -> Iterator[None]:
+def locked(data_dir: str, timeout: float = 10.0, name: str = ".properties.lock") -> Iterator[None]:
     """One writer at a time (several dashboard processes may save at once): an exclusive lock on a lock file."""
     os.makedirs(data_dir, exist_ok=True)
-    fh = open(os.path.join(data_dir, ".properties.lock"), "a+")
+    fh = open(os.path.join(data_dir, name), "a+")
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -104,7 +114,7 @@ def locked(data_dir: str, timeout: float = 10.0) -> Iterator[None]:
                 break
             except OSError:
                 if time.monotonic() > deadline:
-                    raise TimeoutError("properties.json is locked by another process")
+                    raise TimeoutError("%s is locked by another process" % name.strip(".").replace(".lock", ".json"))
                 time.sleep(0.05)
         yield
     finally:

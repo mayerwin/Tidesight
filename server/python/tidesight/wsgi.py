@@ -55,6 +55,9 @@ DASHBOARD_DIRS = {"js", "vendor"}
 # Files other than pages run nothing: an SVG opened on its own cannot run a script.
 ASSET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; sandbox"
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
+NO_USERS_TEXT = (b"The dashboard is off until a user is added. On the server, in Tidesight's server/python folder, run:\n\n"
+                 b"    python3 -m tidesight.jobs user set NAME\n\n"
+                 b"It asks for the password. Then reload this page.\n")
 
 
 def _respond(start_response: StartResponse, status: str, headers: List[Tuple[str, str]], body: bytes = b"",
@@ -310,8 +313,7 @@ class App:
             return self.dashboard_api(cfg, environ, start_response, path[len("/dashboard/api/"):])
         if self.require_auth and not cfg.dashboard["users"]:
             return _respond(start_response, "403 Forbidden", [("Content-Type", "text/plain; charset=utf-8")],
-                            b"The dashboard is disabled until you add users to [dashboard] in the config.\n"
-                            b"Create a password hash with: python -m tidesight.jobs hash-password\n")
+                            NO_USERS_TEXT)
         # The page and its scripts hold no data: they load signed out too (the sign-in form). Only a signed-in
         # page gets the CSP that lists the sites' origins (replays and heatmaps load their assets).
         rel = path[len("/dashboard/"):]
@@ -343,8 +345,8 @@ class App:
         if endpoint == "logout":
             return self.logout(cfg, environ, start_response)
         if self.require_auth and not cfg.dashboard["users"]:
-            return _json(start_response, "403 Forbidden", {"error": "The dashboard is disabled until users are added to "
-                                                           "[dashboard] in the configuration.", "setup": True})
+            return _json(start_response, "403 Forbidden", {"error": "The dashboard is off until a user is added: "
+                                                           "python3 -m tidesight.jobs user set NAME", "setup": True})
         user, how, denied = self._authenticate(cfg, environ, start_response)
         if denied is not None:
             return denied

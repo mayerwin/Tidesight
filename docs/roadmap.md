@@ -15,7 +15,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - Collector (`collect.py`): `/collect`, `/chunk`, `/p.gif`, `/config.js|json`, `/health`, static tracker files; per-site config with hot reload; validation and size limits; flagged storage of malformed and unknown-site hits; per-key rate limiting in the insert transaction; CORS; secrets redaction; privacy switches; optional server cookie; spool mode and automatic spool fallback.
 - Schema: `raw_requests` + `raw_hits` (typed hot columns + raw JSON), `replay.db` chunks, numbered migrations.
 - Tracker core (`ts.js`, ~8 KB gzip of a 20 KB budget): pageviews with full context and high-entropy Client Hints, SPA routes (History API, hash routes), custom events, identify, visitor id in cookie + localStorage + optional server cookie, sessions (idle timeout, midnight split), engagement (visible, focused, not idle) with heartbeats, batching, gzip, keepalive delivery on unload, bounded offline retry, cached config, plugin loader with per-session sampling.
-- Deployment: `passenger_wsgi.py`, `collect.cgi`, `docs/deploy-dreamhost.md`, `config/tidesight.example.toml`.
+- Deployment: `tidesight.fcgi` (FastCGI), `collect.cgi`, `passenger_wsgi.py`, `docs/deploy-dreamhost.md`, `config/tidesight.example.toml`.
 - Tests: pytest (collector, storage, config, concurrency), Playwright (core).
 
 The core's budget is 20 KB gzip (the build enforces it). The original 4 KB target was dropped: size must never cost functionality or robustness.
@@ -60,17 +60,20 @@ rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `re
 
 - ✅ An audit of the new dashboard (sign-in, the properties and changes API, reports and files) with its findings fixed: sign-in attempts counted before the password check (a burst of concurrent guesses stops at the limit, in every process), an unreadable `properties.json` never written over nor dropped by a running process, public filters of one exact value and at most 100 rows, API calls only from the dashboard itself (not from sibling subdomains), sign-out by `POST` only, duplicate session cookies refused, segments and notes changed only by their author or an admin, throttle keys hashed, public call allowances kept in `web.db` under CGI, the dashboard folder limited to its own files, `--no-auth` answering on localhost only, strict date and id checks.
 
+- ✅ **FastCGI on Dreamhost** (2026-10-09). Dreamhost no longer offers Passenger on shared plans, so the web app runs as a FastCGI program under Apache's mod_fcgid (`tidesight.fcgi`, a standard-library FastCGI server in `tidesight/fcgi.py`): one process answers request after request (about 10 ms a request, against 150 ms for CGI), and replaces itself when its code changes. Dashboard users are added with `jobs.py user set NAME` (`data_dir/users.json`), and the nightly backup now keeps `web.db`, `properties.json` and `users.json` too.
+- ✅ **Installed on `tidesight.erwinmayer.com`** (2026-10-09): code in `~/tidesight`, data in `~/tidesight-data` (geo databases loaded), FastCGI entry point and `.htaccess` in the web directory, cron jobs (every 2 minutes, nightly backup, monthly geo update, weekly vacuum). Checked over HTTP: health, tracker, configuration, collect (plain), dashboard sign-in and API. Waiting on the owner: the DNS record at Cloudflare, the certificate, Extra Web Security off (it refuses compressed batches), and a first user.
+
 ## Ideas for later
 
 - Custom channel groupings (e.g. AI traffic beyond GA4's list).
-- Managing dashboard users from the dashboard (they are in the configuration file); email reports and alerts (traffic drops, error spikes).
+- Managing dashboard users from the dashboard (today: `jobs.py user` on the server, or the configuration file); email reports and alerts (traffic drops, error spikes).
 - Funnels saved per property and built from goals.
 - An optional consent mode in the tracker (wait for a consent call before setting identifiers).
 - Faster enrichment for very large sites (bulk inserts, parallel rebuilds).
 
 ## Open questions for the owner
 
-1. **Dreamhost:** which subdomain hosts the collector (e.g. `stats.erwinmayer.com`), and Passenger switched on for it in the panel (SSH access works; the hosting test passed). `erwinmayer.com` itself is served by Cloudflare Pages, so a folder on Dreamhost (`erwinmayer.com/tidesight`) would not be reachable without a proxy on the Pages side (`docs/deploy-dreamhost.md`).
+1. **Dreamhost:** settled: `tidesight.erwinmayer.com`, with FastCGI (Passenger is gone from Dreamhost's shared plans). Its DNS lives at Cloudflare (as for `erwinmayer.com`, served by Cloudflare Pages): an `A` record `tidesight` → `173.236.254.123` (DNS only) is needed, then the Let's Encrypt certificate and Extra Web Security off in the panel.
 2. **Dashboard users:** sign-in sessions and admins (`[dashboard] admins`) are in place; are other roles needed?
 3. **Public stats page:** which metrics should be public by default, per site?
 4. **Licence:** MIT adopted provisionally (rrweb is MIT; GeoLite2 and DB-IP data are never bundled).

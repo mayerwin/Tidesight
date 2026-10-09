@@ -330,10 +330,9 @@ function showLogin(setup = false, message = '') {
   if (setup) {
     root.replaceChildren(el('div', { class: 'login-card' }, brand(),
       el('h1', { text: 'Almost there' }),
-      el('p', { text: 'The dashboard is off until a user is added to the configuration file. On the server, create a password hash:' }),
-      el('pre', { class: 'code', text: 'python -m tidesight.jobs hash-password --user admin' }),
-      el('p', { text: 'then add it to tidesight.toml and reload this page:' }),
-      el('pre', { class: 'code', text: '[dashboard]\nusers = { admin = "pbkdf2_sha256$…" }' })));
+      el('p', { text: 'The dashboard is off until a user is added. On the server, in Tidesight\'s server/python folder, run:' }),
+      el('pre', { class: 'code', text: 'python3 -m tidesight.jobs user set admin' }),
+      el('p', { text: 'It asks for the password. Then reload this page.' })));
     return;
   }
   const user = el('input', { class: 'input', name: 'username', autocomplete: 'username', required: true, autofocus: true, 'aria-label': 'User name' });

@@ -52,12 +52,14 @@ def _utc_day_start(day: str) -> int:
 
 def backup(cfg: Config, dest: Optional[str] = None, keep: int = 7, with_replay: bool = False,
            with_derived: bool = False, with_archives: bool = False) -> Dict[str, Any]:
-    """Consistent online copies (SQLite backup API), gzip-compressed, rotated."""
+    """Consistent online copies (SQLite backup API), gzip-compressed, rotated: the raw data, the dashboard's own
+    data (web.db: segments, notes) and the settings kept in the data directory (properties, users)."""
     root = dest or os.path.join(cfg.data_dir, "backups")
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     target = os.path.join(root, stamp)
     os.makedirs(target, exist_ok=True)
-    names = ["events.db"] + (["replay.db"] if with_replay else []) + (["derived.db"] if with_derived else [])
+    names = (["events.db", "web.db"] + (["replay.db"] if with_replay else [])
+             + (["derived.db"] if with_derived else []))
     if with_archives:
         names += [os.path.join("archive", os.path.basename(p)) for p in raw_paths(cfg.data_dir)
                   if os.path.basename(os.path.dirname(p)) == "archive"]
@@ -79,6 +81,11 @@ def backup(cfg: Config, dest: Optional[str] = None, keep: int = 7, with_replay: 
             shutil.copyfileobj(fin, fout, 1024 * 1024)
         os.remove(tmp)
         done.append({"file": name, "gz_mb": round(os.path.getsize(tmp + ".gz") / 1e6, 2)})
+    for name in ("properties.json", "users.json"):  # written atomically: a plain copy is consistent
+        src_path = os.path.join(cfg.data_dir, name)
+        if os.path.exists(src_path):
+            shutil.copy2(src_path, os.path.join(target, name))
+            done.append({"file": name})
     # Rotation: keep the newest `keep` backup folders.
     folders = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)) and d[:8].isdigit())
     removed = []

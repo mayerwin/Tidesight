@@ -45,7 +45,7 @@ dashboard (static) ──► wsgi.py: sign-in (session cookie, or HTTP Basic for
 - **Collector domain.** Prefer a subdomain per deployment (e.g. `stats.example.com`). The tracker is served from the same host, never from a third-party CDN.
 - **First-party identity.** The tracker sets its identifiers on the *site's* domain with JS cookies and localStorage, as GA's `_ga` does, so identity survives third-party-cookie blocking. When the collector shares the site's registrable domain, it can also set a server cookie (`ts_svid`) as a longer-lived backup.
 - **Multi-site.** Each site has an id and a list of allowed origins. Hits from unknown sites or origins are stored, flagged (`site_status`) and kept out of reports, never silently dropped.
-- **Shared hosting.** On Dreamhost the collector runs under Passenger (`passenger_wsgi.py`) with a CGI fallback (`collect.cgi`). Static files (tracker, dashboard) can be served directly from the app's `public/` directory. Background work runs from cron. See `docs/deploy-dreamhost.md`.
+- **Shared hosting.** On Dreamhost the web app runs as a FastCGI program (`tidesight.fcgi`, the standard-library FastCGI server in `tidesight/fcgi.py`): Apache's mod_fcgid starts it on demand and keeps it for request after request, and it makes way for a fresh process when its code changes. Plain CGI (`collect.cgi`) and Passenger (`passenger_wsgi.py`) run the same app elsewhere. Background work runs from cron. See `docs/deploy-dreamhost.md`.
 
 ## Data flow
 
@@ -64,6 +64,7 @@ dashboard (static) ──► wsgi.py: sign-in (session cookie, or HTTP Basic for
 | `derived.db` | jobs | Everything computed: lookups, sessions, pageviews, visitors, rollups, job state. Can be deleted and rebuilt. |
 | `web.db` | dashboard | Sign-in sessions (token hashes), the sign-in throttle, saved segments, annotations, and the properties whose data `jobs.py cron` is to delete. Deleting it signs everyone out and forgets segments and notes. |
 | `properties.json` | dashboard | The properties added in the dashboard, as `[sites.<id>]` tables (written atomically, under a lock). |
+| `users.json` | `jobs.py user` | Dashboard users and their password hashes, merged with the configuration file's `[dashboard] users` (written atomically, under a lock). |
 
 The schema and its migrations are documented in `docs/schema.md`.
 

@@ -42,7 +42,7 @@ One TOML file configures the collector, the jobs and the dashboard. Start from `
 | `store_raw_body` | `false` | Also keep the raw body of requests that parsed fine. |
 | `spool_fallback` | `true` | When SQLite fails, write the request to the spool instead of answering 503. |
 | `allow_data_in_web_root` | `false` | The collector refuses to run (`503`, logged) when the data directory, the configuration file or the log file is inside the web server's document root (`DOCUMENT_ROOT`), where its databases or secret could be downloaded. Set to `true` only if that directory is otherwise protected. |
-| `log_file` | `""` | Error log; stderr (the host's error log) when empty. |
+| `log_file` | `""` | Error log; stderr (the host's error log) when empty. Set it under FastCGI on Dreamhost, which does not show a FastCGI program's own messages in the site's error log. |
 | `resolved_config_file` | `""` | When set, `jobs.py cron` rewrites this file with the resolved configuration (as `config-json`) whenever it changed: properties added in the dashboard reach the PHP and Node connectors this way. |
 
 ## `[headers]`
@@ -91,7 +91,7 @@ Days to keep, applied by `jobs.py privacy-clean --retention --apply`; `0` keeps 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `users` | `{}` | `{name = "pbkdf2_sha256$…"}`: who may sign in (the dashboard's form, or HTTP Basic for scripts). The dashboard is off until at least one user exists. Hash a password with `python -m tidesight.jobs hash-password --user NAME`; changing a user's hash ends their sessions. |
+| `users` | `{}` | `{name = "pbkdf2_sha256$…"}`: who may sign in (the dashboard's form, or HTTP Basic for scripts), besides the users of `data_dir/users.json`. The dashboard is off until at least one user exists. The easy way: `python -m tidesight.jobs user set NAME` asks for a password and keeps its hash in `users.json` (`user remove NAME`, `user list`); a user defined here wins over `users.json` and is changed here (hash a password with `jobs.py hash-password --user NAME`). Changing a user's password ends their sessions. |
 | `admins` | `[]` | Users who may add, change and delete properties in the dashboard. Empty: every user. Others can still read every report, save segments and add annotations. |
 | `session_days` | `30` | How long "Keep me signed in" lasts (a session without it lasts 12 hours). |
 | `realtime_minutes` | `30` | Window of the realtime view. |

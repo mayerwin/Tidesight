@@ -8,7 +8,7 @@ Self-hosted web analytics that keeps every raw hit. Traffic ebbs and flows like 
 </picture>
 
 - **Collect** with a small JavaScript tracker (`ts.js`, about 6 KB gzip) and plugins loaded on demand.
-- **Ingest** with a Python collector that uses only the standard library and appends every hit, raw, to SQLite. It runs on cheap shared hosting: Passenger WSGI or CGI, cron, no daemons.
+- **Ingest** with a Python collector that uses only the standard library and appends every hit, raw, to SQLite. It runs on cheap shared hosting: FastCGI or CGI (or Passenger WSGI), cron, no daemons.
 - **Analyse** with re-runnable jobs that derive sessions, geography, devices, bots, channels and visitor identity, and a dashboard on top of a small JSON API.
 
 Tidesight works for any number of sites and is data-rich by default. A privacy mode (IP truncation or hashing, retention windows, DNT/GPC, no fingerprinting) is a configuration change plus a clean-up job.
@@ -86,7 +86,7 @@ Every command, the page markup (error pages, masking, elements to leave out), si
 
 ## Deploy
 
-On Dreamhost or any host with Passenger (or plain CGI) and cron, follow [`docs/deploy-dreamhost.md`](docs/deploy-dreamhost.md): check the host with `tools/sqlite_host_test.py`, copy and edit [`config/tidesight.example.toml`](config/tidesight.example.toml), install `passenger_wsgi.py`, and add the cron lines. Updates are a `git pull`: database migrations run automatically, and when the way data is derived changes, the next enrichment rebuilds it from the raw hits.
+On Dreamhost or any host with FastCGI (or plain CGI, or Passenger) and cron, follow [`docs/deploy-dreamhost.md`](docs/deploy-dreamhost.md): check the host with `tools/sqlite_host_test.py`, copy and edit [`config/tidesight.example.toml`](config/tidesight.example.toml), install `passenger_wsgi.py`, and add the cron lines. Updates are a `git pull`: database migrations run automatically, and when the way data is derived changes, the next enrichment rebuilds it from the raw hits.
 
 A host that runs PHP but not Python web apps can ingest with the [PHP connector](server/php/README.md) and keep Python for the cron jobs only; [Node](server/node/README.md) and [Cloudflare Workers](server/worker/README.md) work too.
 

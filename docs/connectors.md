@@ -4,7 +4,7 @@ A **connector** is the server-side ingest script: it implements the wire protoco
 
 | Connector | Where | Runs on | Storage |
 |---|---|---|---|
-| Python (reference) | `server/python/tidesight/collect.py` | Passenger WSGI, CGI, any WSGI server | SQLite (stdlib `sqlite3`), spool fallback |
+| Python (reference) | `server/python/tidesight/collect.py` | FastCGI (`tidesight.fcgi`), CGI, Passenger WSGI, any WSGI server | SQLite (stdlib `sqlite3`), spool fallback |
 | PHP | `server/php/` | Apache or nginx with PHP 7.4+, 64-bit (any shared host) | PDO SQLite or SQLite3, spool fallback |
 | Node | `server/node/` | Node 22.13+ (built-in `node:sqlite`) | SQLite, spool fallback |
 | Cloudflare Worker | `server/worker/` | Cloudflare Workers | D1 (SQLite-compatible), same schema; no spool |
@@ -45,7 +45,7 @@ The Python collector is the reference; when in doubt, mirror it. In short:
 - **One transaction per request** (`BEGIN IMMEDIATE`, rate-limit update and inserts, `COMMIT`), and the migrations with the same `PRAGMA user_version`.
 - **Responses:** status codes, `Cache-Control: no-store`, CORS (reflect or allowed origins), `Accept-CH`, and the optional `ts_svid` server cookie. `/config.js` is `(typeof window.tidesight=="function"?window.tidesight:window.tidesight=function(){(tidesight.q=tidesight.q||[]).push(arguments)})("_config",<json>);` followed by a newline, `<json>` being the public document serialized as Python's `json.dumps(…, separators=(",", ":"), sort_keys=True)`.
 - **Spool mode:** allowances are kept in memory per process, separately for the events and the chunks streams (as `events.db` and `replay.db` keep theirs); refusal counters are written summed, at most once a minute.
-- **Web root:** unless `allow_data_in_web_root`, a connector that sees a `DOCUMENT_ROOT` (PHP, Python under CGI or Passenger) refuses every request with `503` when the real path of its data directory, configuration file or log file is inside it.
+- **Web root:** unless `allow_data_in_web_root`, a connector that sees a `DOCUMENT_ROOT` (PHP, Python under FastCGI, CGI or Passenger) refuses every request with `503` when the real path of its data directory, configuration file or log file is inside it.
 - **Migrations:** `events.db` version 3 and `replay.db` version 2 index `rate_limits(minute)`, so old minutes are deleted without a full scan; delete them in bounded batches.
 - **Logging:** full details for the first 5 errors of each minute (per process, or per data directory where each request is its own process), then only a count: a flood of failing requests must not fill a small host's disk.
 

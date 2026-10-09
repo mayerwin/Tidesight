@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import properties
+from . import properties, users
 
 try:  # Python 3.11+
     import tomllib as _toml_impl  # type: ignore
@@ -398,6 +398,18 @@ class Config:
             if values[key]:
                 values[key] = resolve(values[key])
 
+        # Users added with `jobs.py user set` (data_dir/users.json); the configuration file's users win.
+        self.file_users: Dict[str, Any] = dict(self.dashboard["users"])
+        self.users_error: Optional[str] = None
+        stored: Dict[str, str] = {}
+        if load_properties:
+            try:
+                stored = users.read(self.data_dir)
+            except users.UsersError as exc:
+                self.users_error = str(exc)
+                self.warnings.append("%s (its users cannot sign in)" % exc)
+        self.dashboard["users"] = {**stored, **self.file_users}
+
         defaults = raw.get("defaults", {})
         if not isinstance(defaults, dict):
             raise ConfigError("[defaults] must be a table")
@@ -678,13 +690,24 @@ class ConfigHolder:
         self._interval = check_interval
         self._static = config is not None and path is None
 
-    def _stat(self) -> Tuple[Optional[float], Optional[float]]:
-        """Modification times of the configuration file and of properties.json (both are watched)."""
+    def _stat(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """Modification times of the configuration file, properties.json and users.json (all are watched)."""
         try:
             main = os.stat(self._path).st_mtime if self._path else None
         except OSError:
             main = None
-        return main, properties.mtime(self._config.data_dir)
+        return main, properties.mtime(self._config.data_dir), users.mtime(self._config.data_dir)
+
+    def _worse(self, fresh: Config) -> Optional[str]:
+        """Why a freshly loaded configuration must not replace the current one: properties.json or users.json
+        cannot be read now (a moment's lock, a bad edit), and dropping what they hold would stop properties
+        from being served, or sign users out. Then the previous configuration stays, and the files are read again
+        at the next check."""
+        if fresh.properties_error and not self._config.properties_error:
+            return fresh.properties_error
+        if fresh.users_error and not self._config.users_error:
+            return fresh.users_error
+        return None
 
     def _rebuild(self) -> Config:
         if self._static or not self._path:  # a configuration given as an object: rebuild it from its tables
@@ -695,8 +718,9 @@ class ConfigHolder:
         """Reload now (after the dashboard changed a property)."""
         with self._lock:
             fresh = self._rebuild()
-            if fresh.properties_error and not self._config.properties_error:
-                log.error("config reload: %s; keeping the previous configuration", fresh.properties_error)
+            problem = self._worse(fresh)
+            if problem:
+                log.error("config reload: %s; keeping the previous configuration", problem)
             else:
                 self._config = fresh
                 self._mtime = self._stat()
@@ -713,10 +737,9 @@ class ConfigHolder:
             if mtime != self._mtime:
                 try:
                     fresh = self._rebuild()
-                    # A properties.json that cannot be read now (a moment's lock, a bad edit) must not drop the
-                    # properties this process serves: keep the previous configuration and look again later.
-                    if fresh.properties_error and not self._config.properties_error:
-                        log.error("config reload: %s; keeping the previous configuration", fresh.properties_error)
+                    problem = self._worse(fresh)
+                    if problem:
+                        log.error("config reload: %s; keeping the previous configuration", problem)
                     else:
                         self._config = fresh
                         self._mtime = mtime

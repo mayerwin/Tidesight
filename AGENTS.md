@@ -4,7 +4,7 @@ Instructions for coding agents (Claude Code, Codex, …) working in this reposit
 
 ## Project in one paragraph
 
-Tidesight is self-hosted web analytics for any number of sites. A small JavaScript tracker (`tracker/`) sends events to a standard-library-only Python collector (`server/python/`) that appends them, raw, to SQLite. Re-runnable cron jobs derive sessions, geography, devices, bots and identity into a separate database, and a static dashboard reads them through a small JSON API. It must run on cheap shared hosting (Dreamhost: Passenger WSGI or CGI, cron, no daemons).
+Tidesight is self-hosted web analytics for any number of sites. A small JavaScript tracker (`tracker/`) sends events to a standard-library-only Python collector (`server/python/`) that appends them, raw, to SQLite. Re-runnable cron jobs derive sessions, geography, devices, bots and identity into a separate database, and a static dashboard reads them through a small JSON API. It must run on cheap shared hosting (Dreamhost: FastCGI or CGI, cron, no daemons).
 
 **Before changing behaviour, read `docs/design.md`** (principles and decisions). Current status and next steps: `docs/roadmap.md`.
 
@@ -51,7 +51,9 @@ server/python/
   tidesight/wsgi.py, auth.py, webdb.py    # web app (dashboard + share pages + collector), sign-in sessions, web.db
   tidesight/admin.py, properties.py       # properties, segments, annotations (properties.json is stdlib-only: config loads it)
   tidesight/jobs.py, maintenance.py    # cron CLI: enrich, rollup, backup, privacy-clean, archive, export…
-  passenger_wsgi.py, collect.cgi  # hosting entry points (copy into the app/web directory)
+  tidesight/fcgi.py               # standard-library FastCGI server (mod_fcgid), CGI fallback, code-change restart
+  tidesight/users.py              # dashboard users in data_dir/users.json (jobs.py user set/remove/list)
+  tidesight.fcgi, collect.cgi, passenger_wsgi.py   # hosting entry points (copy into the web directory)
   devserver.py                    # local server (--no-auth, --test-api, --static)
   tests/                          # pytest, incl. test_conformance.py for every connector
 server/php/  server/node/  server/worker/   # other connectors (same protocol and schema)
