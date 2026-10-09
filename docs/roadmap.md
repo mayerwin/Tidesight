@@ -36,6 +36,16 @@ rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `re
 
 `api.py` (read-only JSON, HTTP Basic auth, public share pages with tokens, CSV/JSON export) and the static dashboard: overview, realtime, pages, sources/channels, geography map, devices, events and properties, funnels, retention cohorts, heatmaps (clicks, rage/dead, mouse, scroll), replays, forms, site search, performance, errors, sessions, visit timelines, visitor profiles, status. `tools/demo.py` generates realistic demo data.
 
+## Phase 5b — Dashboard 2: properties, analysis, exports ✅
+
+- ✅ **Properties in the dashboard:** add (a three-step wizard: domains with www and subdomain options, name, time zone; what to record; the tracking code with a live check for the first hit), configure (general, tracking code with the refused origins and an "Allow" button, goals, data collection switches and sample rates, privacy, public page and share token) and delete (keeping or deleting the data; the deletion runs in `jobs.py cron`) — stored in `properties.json` next to the configuration file's sites, which stay read-only. A property shows its name, else its most precise domain. Data arriving for an unknown id is offered as a new property. `[dashboard] admins` limits who may change properties.
+- ✅ **Filters and segments:** any dimension, `is`/`is not`/`contains`/`does not contain`/`starts with`, several values, value suggestions with counts, editable chips, clicks on rows to filter in or out, goal filters; saved segments (per property or for all). The traffic setting reads "Humans only / Humans and bots / Bots only".
+- ✅ **Periods:** presets with keyboard shortcuts, a two-month range calendar, previous/next period, and comparisons (previous period, a year before, custom) drawn dashed in charts, with changes in tiles, lists and tables.
+- ✅ **Report tables:** server-side sort, search and paging, totals, shares of the total, a second dimension, a column chooser, row actions (filter, exclude, open the report, open the page, heatmap), plotting up to five rows over time, and exports of every matching row (Excel, CSV, TSV, JSON, or copy); every other table exports what it shows. An Explorer for any dimension.
+- ✅ **Goals and annotations:** goals per property (events or pages, `*` wildcards) with conversions, rates and values, a goal's conversions in every report; notes on charts.
+- ✅ **Export dialog** that says what each download holds: the reports on screen, and each raw dataset with its description, columns and number of rows.
+- ✅ Sign-in page with sessions (instead of the browser's password prompt), a command palette (Ctrl/⌘ K), shortcuts, a freshness indicator, dark mode throughout. Browser tests: `npm run test:dashboard` in `tracker/`.
+
 ## Phase 6 — Privacy mode, maintenance, connectors ✅
 
 - ✅ `jobs.py privacy-clean` (IP truncation/hashing with geo kept, fingerprint/replay/mouse deletion, retention windows; dry run first; automatic backup), DNT/GPC honouring, `backup` (online, gzip, rotated), `vacuum`, `archive` (yearly files that enrichment still reads), `export`.
@@ -50,16 +60,16 @@ rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `re
 
 ## Ideas for later
 
-- Goals/conversions defined per site (instead of GA4's "2+ pageviews or 10 s" engagement rule only).
 - Custom channel groupings (e.g. AI traffic beyond GA4's list).
-- Several dashboard users with roles; email reports and alerts (traffic drops, error spikes).
+- Managing dashboard users from the dashboard (they are in the configuration file); email reports and alerts (traffic drops, error spikes).
+- Funnels saved per property and built from goals; a day-of-week × hour heatmap.
 - An optional consent mode in the tracker (wait for a consent call before setting identifiers).
 - Faster enrichment for very large sites (bulk inserts, parallel rebuilds).
 
 ## Open questions for the owner
 
-1. **Dreamhost:** which subdomain hosts the collector (e.g. `stats.erwinmayer.com`), and Passenger switched on for it in the panel (SSH access works; the hosting test passed).
-2. **Dashboard authentication:** HTTP Basic is in place; are several users with different rights needed later?
+1. **Dreamhost:** which subdomain hosts the collector (e.g. `stats.erwinmayer.com`), and Passenger switched on for it in the panel (SSH access works; the hosting test passed). `erwinmayer.com` itself is served by Cloudflare Pages, so a folder on Dreamhost (`erwinmayer.com/tidesight`) would not be reachable without a proxy on the Pages side (`docs/deploy-dreamhost.md`).
+2. **Dashboard users:** sign-in sessions and admins (`[dashboard] admins`) are in place; are other roles needed?
 3. **Public stats page:** which metrics should be public by default, per site?
 4. **Licence:** MIT adopted provisionally (rrweb is MIT; GeoLite2 and DB-IP data are never bundled).
 5. **Which sites come first?** They will drive the first configuration.

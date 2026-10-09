@@ -66,3 +66,14 @@ python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml enrich --rebuild
 ```
 
 Replay chunks are keyed by `visitor_id` and `session_id` in `replay.db` (`DELETE FROM chunks WHERE visitor_id IN (…)`).
+
+## Deleting a whole property's data
+
+In the dashboard, Properties → the property → Delete → "Delete its data": the property is removed at once, and the next `jobs.py cron` run deletes everything stored under its id (raw requests and hits, archives included, recordings, derived rows, its segments and notes), in short transactions. From the command line, once the site is no longer configured:
+
+```sh
+python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml purge-site OLD_ID            # dry run: what would go
+python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml purge-site OLD_ID --apply
+```
+
+Backups made before keep the data until they are rotated out.

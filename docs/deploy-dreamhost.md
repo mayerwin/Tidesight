@@ -1,6 +1,21 @@
 # Deploying on Dreamhost (shared hosting)
 
-This guide installs Tidesight on a Dreamhost shared plan: the collector, dashboard and API run under Passenger on a subdomain such as `stats.example.com`, and cron runs the jobs. The same steps work on most Passenger hosts. Without Passenger, use the CGI fallback at the end.
+This guide installs Tidesight on a Dreamhost shared plan: the collector, dashboard and API run under Passenger on a subdomain such as `stats.example.com`, and cron runs the jobs. The same steps work on most Passenger hosts. Without Passenger, or in a folder of an existing site, use CGI (at the end).
+
+## Passenger or CGI?
+
+Both run the same application; the difference is how long its process lives.
+
+| | Passenger (a subdomain) | CGI (a subdomain or a folder) |
+|---|---|---|
+| Process | Starts once, then serves request after request (Passenger stops it when idle and starts it again on the next request). | A new Python process for every request: about 0.1–0.3 s of start-up each time on shared hosting. |
+| Tracker requests | Answered in a few milliseconds. | Each pageview and event batch pays the start-up: fine for small sites, heavy for busy ones. |
+| Caches | The configuration, open database connections and checked passwords stay in memory. | Rebuilt for every request (allowances and sign-in throttles are kept in SQLite, so they still hold). |
+| Where | Dreamhost runs Passenger per domain: it takes over the whole (sub)domain, which therefore needs its own website in the panel. | Anywhere CGI scripts run, including a folder of a site you already host (`example.com/tidesight/`). |
+
+Use Passenger on a subdomain such as `stats.example.com` when you can; CGI is the fallback for a folder of an existing site or a host without Passenger. The dashboard works the same in both (signing in sets a session cookie, so the password is checked once, not on every request).
+
+**A folder of a site hosted elsewhere** (for example a domain whose web pages are served by Cloudflare Pages, Netlify or Vercel) is not reachable on Dreamhost, even if the folder exists there: requests for that domain never reach Dreamhost. Point a subdomain at Dreamhost instead (a DNS record where the domain's DNS is managed, plus the subdomain added in the Dreamhost panel), or have the other host forward the folder to that subdomain (a reverse proxy such as a Cloudflare Worker or Pages Function). With a proxy, set `[server] public_url` to the address visitors use, and make the proxy pass the visitor's address in a header (`rate_limit_key`, `rate_limit_proxies`).
 
 Layout used below (replace `USER` and the domain names):
 
@@ -53,7 +68,11 @@ secret = "…"                       # python3 -c "import secrets; print(secrets
 
 [dashboard]
 users = { admin = "pbkdf2_sha256$…" }   # see below
+```
 
+Sites ("properties") are easiest to add in the dashboard once it runs (Properties → Add property: the domain, a time zone, what to record, and the tracking code to paste). They can also be defined in the file, where they stay read-only in the dashboard:
+
+```toml
 [sites.example]
 name = "Example"
 origins = ["https://example.com", "https://www.example.com"]
@@ -115,7 +134,7 @@ Run `geo-update` once by hand right away so the first enrichment has locations. 
 
 ## 7. Add the tracker to your site
 
-In the `<head>` of every page:
+The dashboard shows each property's tracking code (Properties → the property → Tracking code), and turns green when the first hit arrives. In the `<head>` of every page:
 
 ```html
 <script async src="https://stats.example.com/ts.js" data-site="example"></script>
@@ -145,9 +164,9 @@ touch ~/stats.example.com/tmp/restart.txt
 
 Database migrations run automatically. When an update changes how data is derived, the next enrichment rebuilds `derived.db` in the background and swaps it in.
 
-## CGI fallback (no Passenger)
+## CGI (no Passenger, or a folder of an existing site)
 
-Copy `server/python/collect.cgi` into the web directory of `stats.example.com`, `chmod 755` it, and add a `.htaccess` next to it:
+Copy `server/python/collect.cgi` into the web directory of `stats.example.com` (or into a folder of a site, e.g. `~/example.com/tidesight/`), `chmod 755` it, and add a `.htaccess` next to it:
 
 ```apache
 Options +ExecCGI
@@ -158,12 +177,15 @@ RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^(.*)$ collect.cgi/$1 [L,QSA]
 ```
 
-`CGIPassAuth On` (Apache 2.4.13+) lets the dashboard's Basic authentication through; on older Apache use `RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]` instead. CGI starts a process per request: fine for small sites. Copy the tracker files into the web directory to avoid a CGI run per script download.
+In a folder, the addresses gain its name: the tracker is `https://example.com/tidesight/ts.js` and the dashboard `https://example.com/tidesight/dashboard/` (set `public_url = "https://example.com/tidesight/"` so the tracking code the dashboard shows is right). Keep `tidesight.toml` and the data directory outside the web root as above: the collector refuses to run when they are inside it.
+
+`CGIPassAuth On` (Apache 2.4.13+) lets HTTP Basic credentials through, for scripts using the API (the dashboard itself signs in with a cookie); on older Apache use `RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]` instead. CGI starts a process per request: fine for small sites. Copy the tracker files into the web directory to avoid a CGI run per script download.
 
 ## Troubleshooting
 
 - **`/health` fails:** look at `~/stats.example.com/` error log (panel → logs) or set `log_file` in `[server]`. A configuration error is reported there.
 - **Nothing recorded:** open the site with the browser's network panel: `ts.js`, `config.js` and `collect` must answer 200/204. Check `origins` (hits from other origins are stored but flagged: see the dashboard's Status page).
-- **Dashboard asks for a password forever:** the user name or hash is wrong; hashes are created with `jobs.py hash-password`.
+- **Signing in fails:** the user name or hash is wrong; hashes are created with `jobs.py hash-password`. After 10 failures a client waits 10 minutes (`429`).
+- **A property says "No data":** its tracking code is missing, or the site runs on a domain the property does not list: its Tracking code tab shows the refused origins, with a button to allow each.
 - **`database is locked`:** the collector falls back to the spool automatically; if it happens often, use `journal_mode = "delete"` or `storage_mode = "spool"` per the Phase 0 test.
 - **Stale data:** check `~/tidesight-data/cron.log` and `jobs.py status` (last enrichment time).

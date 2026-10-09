@@ -18,7 +18,9 @@ cron ── jobs.py enrich ─► derived.db: client IP, geo, UA/device, bots, s
 cron ── jobs.py rollup ─► derived.db: daily aggregates for fast dashboards
 cron ── jobs.py backup ─► SQLite online backups, rotated
 
-dashboard (static) ──► api.py: read-only JSON, HTTP Basic auth; optional public share pages
+dashboard (static) ──► wsgi.py: sign-in (session cookie, or HTTP Basic for scripts), CSRF rules, report files
+                       api.py + query.py: reports (filters, comparisons, breakdowns, goals); public share pages
+                       admin.py: properties (properties.json), segments and annotations (web.db)
 ```
 
 ## Components
@@ -29,11 +31,13 @@ dashboard (static) ──► api.py: read-only JSON, HTTP Basic auth; optional p
 | Tracker plugins | `tracker/src/plugins/*.js` → `ts/<name>.js` | Fingerprint, clicks and links, scroll, forms, rage/dead/error clicks, Web Vitals and timing, errors, mouse movement, session replay (rrweb), and others. Loaded on demand. |
 | Collector | `server/python/tidesight/collect.py` | WSGI app for the ingest endpoints. Standard library only. |
 | Storage | `server/python/tidesight/storage.py` | SQLite and spool writers, migrations for `events.db` and `replay.db`. |
-| Config | `server/python/tidesight/config.py` | Loads the TOML config, merges per-site settings over defaults. |
+| Config | `server/python/tidesight/config.py`, `properties.py` | Loads the TOML config, merges per-site settings over defaults, and adds the properties made in the dashboard (`properties.json`; the file's sites win). |
 | Enrichment | `server/python/tidesight/enrich/` | Re-runnable jobs that fill `derived.db`. |
 | Jobs CLI | `server/python/tidesight/jobs.py` | `enrich`, `rollup`, `backup`, `load-spool`, `privacy-clean`, `archive`, `export`, … run from cron. |
-| API | `server/python/tidesight/api.py` | Read-only JSON for the dashboard and public share pages. |
-| Dashboard | `dashboard/` | Static front end (no build step) reading the API. |
+| Web app | `server/python/tidesight/wsgi.py`, `auth.py`, `webdb.py` | Routes the dashboard, its API, share pages and the collector; sign-in sessions and throttles (`web.db`). |
+| API | `server/python/tidesight/api.py`, `query.py`, `tabular.py` | Reports for the dashboard and public share pages: the filter and breakdown engine, comparisons, goals, and report files (CSV, TSV, JSON, Excel). |
+| Admin | `server/python/tidesight/admin.py` | Adding, changing and deleting properties, segments and annotations. |
+| Dashboard | `dashboard/` | Static front end (no build step) on the API: reports with rich tables, period comparisons, filters and segments, property management. |
 | Other connectors | `server/php/`, `server/node/`, `server/worker/` | Same wire protocol and schema, checked by the shared conformance suite. |
 
 ## Deployment topology
@@ -58,6 +62,8 @@ dashboard (static) ──► api.py: read-only JSON, HTTP Basic auth; optional p
 | `events.db` | collector (and `load-spool`) | `raw_requests`, `raw_hits`, `rate_limits`, `meta`. The source of truth. |
 | `replay.db` | collector (and `load-spool`) | `chunks`: compressed replay and mouse-movement data. |
 | `derived.db` | jobs | Everything computed: lookups, sessions, pageviews, visitors, rollups, job state. Can be deleted and rebuilt. |
+| `web.db` | dashboard | Sign-in sessions (token hashes), the sign-in throttle, saved segments, annotations, and the properties whose data `jobs.py cron` is to delete. Deleting it signs everyone out and forgets segments and notes. |
+| `properties.json` | dashboard | The properties added in the dashboard, as `[sites.<id>]` tables (written atomically, under a lock). |
 
 The schema and its migrations are documented in `docs/schema.md`.
 

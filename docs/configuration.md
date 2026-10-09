@@ -6,7 +6,9 @@ One TOML file configures the collector, the jobs and the dashboard. Start from `
 
 **Validation:** wrong types and unknown values are errors; unknown keys are warnings (logged, and shown by `jobs.py status`).
 
-**Other connectors** (PHP, Node, Worker) read a resolved JSON version of this file: `python -m tidesight.jobs --config tidesight.toml config-json --out tidesight.json` (it contains the secret: mode 600, outside the web root).
+**Properties added in the dashboard** live in `data_dir/properties.json` (written by the dashboard, in the shape of `[sites.<id>]` tables) and are merged with this file's sites when it loads: a site defined here wins, and stays read-only in the dashboard. The collector picks a change up within 5 seconds (at once in the process that made it; under CGI, at the next request). A broken entry is reported among the warnings and skipped.
+
+**Other connectors** (PHP, Node, Worker) read a resolved JSON version of this file (properties included): `python -m tidesight.jobs --config tidesight.toml config-json --out tidesight.json` (it contains the secret: mode 600, outside the web root). Set `[server] resolved_config_file` and `jobs.py cron` rewrites it whenever the configuration or the properties change.
 
 ## `[server]`
 
@@ -33,7 +35,7 @@ One TOML file configures the collector, the jobs and the dashboard. Start from `
 | `min_free_disk_mb` | `512` | Below this much free space in `data_dir`, writes answer 503. |
 | `cors` | `"reflect"` | `"reflect"` any `Origin` on ingest endpoints, or `"allowed"` origins only. |
 | `accept_ch` | `true` | Send `Accept-CH` for Client Hints. |
-| `public_url` | `""` | Public base URL of the collector (informational). |
+| `public_url` | `""` | Public base URL of the collector, e.g. `"https://stats.example.com/"`: the tracking code the dashboard shows uses it (else the dashboard's own address), and the dashboard accepts changes coming from that origin as well as from its own host. |
 | `secret` | `""` | Long random string for IP hashing, cookieless hashes and tokens. Empty: generated once in `data_dir/.secret`. Never change it casually: cookieless hashes and hashed IPs depend on it. |
 | `static_dir` | `""` | Folder of tracker files served at `/ts.js` and `/ts/…` (default: the repository's `tracker/build`). |
 | `dashboard_dir` | `""` | Folder of dashboard files served at `/dashboard/` (default: the repository's `dashboard`). |
@@ -41,6 +43,7 @@ One TOML file configures the collector, the jobs and the dashboard. Start from `
 | `spool_fallback` | `true` | When SQLite fails, write the request to the spool instead of answering 503. |
 | `allow_data_in_web_root` | `false` | The collector refuses to run (`503`, logged) when the data directory, the configuration file or the log file is inside the web server's document root (`DOCUMENT_ROOT`), where its databases or secret could be downloaded. Set to `true` only if that directory is otherwise protected. |
 | `log_file` | `""` | Error log; stderr (the host's error log) when empty. |
+| `resolved_config_file` | `""` | When set, `jobs.py cron` rewrites this file with the resolved configuration (as `config-json`) whenever it changed: properties added in the dashboard reach the PHP and Node connectors this way. |
 
 ## `[headers]`
 
@@ -48,7 +51,7 @@ One TOML file configures the collector, the jobs and the dashboard. Start from `
 |---|---|---|
 | `secret_patterns` | `["*token*", "*key*", "*secret*", "*password*", "*auth*", "*session*", "*jwt*", "*assertion*", "*credential*", "*signature*", "*cookie*"]` | Header names (glob, case-insensitive) whose values are replaced by `[redacted]`. `Authorization` and `Proxy-Authorization` always are. The `Referer` is kept with the secrets in its URL redacted (`redact_params`, `redact_paths`), and kept `ts_*` cookie values end at a comma (past it is another Cookie header the server merged in). |
 | `drop` | `[]` | Header names never stored. |
-| `cookie_names` | `["ts_*"]` | Cookie names whose values are kept; other cookies are only counted. |
+| `cookie_names` | `["ts_*"]` | Cookie names whose values are kept; other cookies are only counted. The dashboard's sign-in cookie (`ts_login`) is never kept. |
 
 ## `[privacy]`
 
@@ -88,11 +91,13 @@ Days to keep, applied by `jobs.py privacy-clean --retention --apply`; `0` keeps 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `users` | `{}` | `{name = "pbkdf2_sha256$…"}` for HTTP Basic auth. The dashboard is off until at least one user exists. Hash a password with `python -m tidesight.jobs hash-password --user NAME`. |
+| `users` | `{}` | `{name = "pbkdf2_sha256$…"}`: who may sign in (the dashboard's form, or HTTP Basic for scripts). The dashboard is off until at least one user exists. Hash a password with `python -m tidesight.jobs hash-password --user NAME`; changing a user's hash ends their sessions. |
+| `admins` | `[]` | Users who may add, change and delete properties in the dashboard. Empty: every user. Others can still read every report, save segments and add annotations. |
+| `session_days` | `30` | How long "Keep me signed in" lasts (a session without it lasts 12 hours). |
 | `realtime_minutes` | `30` | Window of the realtime view. |
 | `asset_origins` | `[]` | Origins, besides the sites' own, that replays, heatmap backgrounds and the framed live page may load images, styles, fonts and media from (e.g. a CDN: `["https://cdn.example.net"]`). The dashboard's Content Security Policy blocks every other host, so a recording sent by anyone cannot make your browser contact a server of their choosing. |
 
-The dashboard throttles password guessing (after 10 failed logins from a client within 10 minutes, its attempts answer `429` for the rest of the window; the client is identified as in `rate_limit_key`), refuses cross-site API requests (`Sec-Fetch-Site: cross-site`), and serves its pages with a strict Content Security Policy (no inline scripts, frames only from the sites' origins).
+The dashboard signs in with a form and a session cookie (`ts_login`: HttpOnly, `SameSite=Strict`, limited to the dashboard's path; only its hash is stored, in `data_dir/web.db`). It throttles password guessing (after 10 failed sign-ins from a client within 10 minutes, its attempts answer `429` for the rest of the window; the count is kept in memory and in `web.db`, so it holds under CGI too; the client is identified as in `rate_limit_key`), refuses cross-site API requests (`Sec-Fetch-Site: cross-site`), requires its own header and origin on every change (`docs/api.md`), and serves its pages with a strict Content Security Policy (no inline scripts, frames only from the sites' origins; signed out, no site is named at all). `web.db` also holds saved segments and annotations; deleting it signs everyone out and forgets them, nothing else.
 
 ## Sites
 
@@ -100,8 +105,8 @@ The dashboard throttles password guessing (after 10 failed logins from a client 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `name` | the id | Display name. |
-| `origins` | `[]` | Allowed origins, e.g. `["https://example.com", "https://*.example.com"]`. Empty: any origin. Hits from other origins are stored but flagged. |
+| `name` | the id | Display name. Without one, the dashboard shows the most precise domain of `origins` (`blog.example.com`; `example.com` for `example.com` with `www.example.com`). |
+| `origins` | `[]` | Allowed origins, e.g. `["https://example.com", "https://*.example.com"]`. Empty: any origin. Hits from other origins are stored but flagged (the property's settings list the refused origins, with a button to allow one). |
 | `timezone` | `"UTC"` | IANA zone: days, hours and the midnight session split use it. |
 | `session_timeout_min` | `30` | Idle time that ends a session. |
 | `split_session_at_midnight` | `true` | Start a new session at midnight in `timezone`. |
@@ -122,6 +127,7 @@ The dashboard throttles password guessing (after 10 failed logins from a client 
 | `public_metrics` | `["visitors", "pageviews", "pages", "sources", "countries", "devices"]` | What the public page shows (`events` and `realtime` can be added). |
 | `share_token` | `""` | When set, the public page requires `?t=<token>`. |
 | `max_hits_per_day` | `0` (off) | Stored hits per UTC day; beyond it, requests for the site answer 429 until midnight UTC. Off by default: anyone can send hits, so a flood could use the quota up and lock real visitors out for the rest of the day. Set it when bounded storage matters more than availability. |
+| `goals` | `[]` | Conversions: `[{name = "Signup", type = "event", match = "signup"}, {name = "Thank you", type = "page", match = "/thank-you*"}]`. A visit converts when it sends a custom event, or views a page, matching `match` (`*` matches anything; `?` and `[` are literal). Each goal gets an `id` from its name (or `id = "…"`). Reports then show conversions and conversion rates (`docs/api.md`); the dashboard edits them for its own properties. |
 
 ### Limits and abuse protection
 

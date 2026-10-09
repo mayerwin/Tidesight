@@ -16,7 +16,7 @@ Tidesight is self-hosted web analytics for any number of sites. A small JavaScri
 | Components, data flow, database files | `docs/architecture.md` |
 | Installing and using the tracker (commands, markup, CSP) | `docs/tracker.md` |
 | Wire protocol (endpoints, payloads, versioning) | `docs/protocol.md` |
-| Read API for the dashboard and scripts | `docs/api.md` |
+| Dashboard API (reports, changes, sign-in, files) for the dashboard and scripts | `docs/api.md` |
 | SQLite schema and migrations | `docs/schema.md` |
 | Every data point, its source and default | `docs/datapoints.md` |
 | Configuration reference | `docs/configuration.md` |
@@ -40,20 +40,23 @@ tracker/
   build.mjs                       # esbuild → build/ (core budget 20 KB gzip, enforced)
   build/                          # committed bundles, deployed as-is (incl. vendored rrweb recorder)
   test/                           # Playwright specs, fixture site, test config
+  test/dashboard/                 # dashboard browser tests (playwright.dashboard.config.mjs, serve.py)
 server/python/
   tidesight/collect.py            # WSGI ingest app (stdlib only)
   tidesight/storage.py            # SQLite + spool writers, raw migrations (stdlib only)
   tidesight/config.py, _toml.py   # config loading, defaults, resolved JSON; TOML fallback parser
   tidesight/anonymize.py          # IP truncation/hashing (collector and privacy-clean)
   tidesight/enrich/               # pipeline, sessions, identity, rollup, geo/mmdb, ua, bots, sources, db
-  tidesight/api.py, wsgi.py, auth.py   # read API, web app (dashboard + share pages + collector), Basic auth
+  tidesight/api.py, query.py, tabular.py  # reports API, filter/breakdown engine, report files (CSV/TSV/JSON/XLSX)
+  tidesight/wsgi.py, auth.py, webdb.py    # web app (dashboard + share pages + collector), sign-in sessions, web.db
+  tidesight/admin.py, properties.py       # properties, segments, annotations (properties.json is stdlib-only: config loads it)
   tidesight/jobs.py, maintenance.py    # cron CLI: enrich, rollup, backup, privacy-clean, archive, export…
   passenger_wsgi.py, collect.cgi  # hosting entry points (copy into the app/web directory)
   devserver.py                    # local server (--no-auth, --test-api, --static)
   tests/                          # pytest, incl. test_conformance.py for every connector
 server/php/  server/node/  server/worker/   # other connectors (same protocol and schema)
 dashboard/
-  index.html, app.css, js/        # static dashboard, ES modules, no build step
+  index.html, app.css, js/        # static dashboard, ES modules, no build step (views/ one module per page)
   vendor/                         # committed: fonts, rrweb-player, world map (refresh: npm run vendor)
 ```
 
@@ -68,6 +71,7 @@ Python 3.9+ (on this Windows machine: `py -3.10`); Node 18+ for the tracker buil
 | Install tracker tooling | `cd tracker && npm install && npx playwright install chromium` |
 | Build the tracker | `cd tracker && npm run build` |
 | Tracker tests | `cd tracker && npm test` (builds first; starts the dev server on ports 8787/8788) |
+| Dashboard tests | `cd tracker && npm run test:dashboard` (demo data; servers on 8795 open, 8796 with sign-in) |
 | Demo data + dashboard | `python tools/demo.py --out demo-data` then `python server/python/devserver.py --config demo-data/tidesight.toml --no-auth --port 8790` → `/dashboard/` |
 | Refresh dashboard vendor files | `cd dashboard && npm install && npm run vendor` |
 | Jobs (cron) | `cd server/python && python -m tidesight.jobs --config <file> cron` (also `enrich`, `status`, `backup`, …) |

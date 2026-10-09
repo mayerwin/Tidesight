@@ -1,12 +1,13 @@
 # Database schema
 
-Tidesight keeps three SQLite files in `server.data_dir`. Their schemas are created and upgraded by numbered migrations, applied automatically and idempotently, and tracked with `PRAGMA user_version`. Every connector creates exactly the same `events.db` and `replay.db` schema (checked by the conformance suite).
+Tidesight keeps four SQLite files in `server.data_dir`. Their schemas are created and upgraded by numbered migrations, applied automatically and idempotently, and tracked with `PRAGMA user_version`. Every connector creates exactly the same `events.db` and `replay.db` schema (checked by the conformance suite).
 
 | File | Written by | Purpose | Migrations |
 |---|---|---|---|
 | `events.db` | collector, `load-spool` | Raw requests and hits: the source of truth. | `EVENTS_MIGRATIONS` in `server/python/tidesight/storage.py` |
 | `replay.db` | collector, `load-spool` | Heavy chunks: session replay, mouse movement, DOM snapshots. | `REPLAY_MIGRATIONS` in `storage.py` |
 | `derived.db` | `jobs.py enrich` / `rollup` | Everything computed. Disposable: delete it and run `jobs.py enrich --rebuild`. | `DERIVED_MIGRATIONS` in `server/python/tidesight/enrich/db.py` |
+| `web.db` | the dashboard | Sign-in sessions, the sign-in throttle, segments, annotations, the purge queue. Deleting it signs everyone out and forgets segments and notes. | `MIGRATIONS` in `server/python/tidesight/webdb.py` |
 
 Conventions: timestamps are UTC milliseconds (integers); JSON is stored as text; booleans are 0/1 integers.
 
@@ -110,6 +111,20 @@ Rebuilt from the raw data whenever the pipeline version changes (parsers, geo da
 | `dirty_days`, `daily`, `daily_dim` | Rollups: days to recompute; daily totals and per-dimension aggregates of clean traffic (configured site, allowed origin, not a bot, not internal). |
 
 Migration 2 adds `session_key` indexes on the typed tables and `pageviews(site_id, path, day)`. Migration 3 adds `vitals(page_key, metric)` and `errors(page_key, grp)`, used when a re-sent vital or an error count updates its page's row.
+
+## web.db
+
+The dashboard's own state, apart from the analytics data (only the Python app reads and writes it).
+
+| Table | Contents |
+|---|---|
+| `sessions(token_hash, user, pw_tag, created, expires)` | Sign-in sessions: the SHA-256 of the `ts_login` cookie (never the token), the user, a digest of the user's password hash at sign-in (the session ends when it changes), creation and expiry. At most 100 per user. |
+| `throttle(client, failures, since)` | Failed sign-ins and share-token guesses per client key (the same keyed hash as the collector's allowances), within the 10-minute window; bounded to 20,000 rows. |
+| `segments(id, site_id, name, filters, created_by, created_at)` | Saved filter sets; `site_id` NULL for every property. `filters` is the API's JSON list. |
+| `annotations(id, site_id, day, text, created_by, created_at)` | Notes shown on a property's charts. |
+| `purges(site_id, requested_by, requested_at)` | *(migration 2)* Properties deleted with their data: `jobs.py cron` deletes everything stored under the id (raw and archived hits, recordings, derived rows, segments, notes), then the row. |
+
+Properties added in the dashboard are not in a database: they are `data_dir/properties.json` (`{"format": "tidesight-properties/1", "sites": {id: table}}`), loaded with the configuration file.
 
 ## Adding a migration
 

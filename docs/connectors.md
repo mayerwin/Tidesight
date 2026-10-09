@@ -57,7 +57,7 @@ Only the Python side parses TOML and applies defaults and per-site layering. Oth
 python -m tidesight.jobs --config tidesight.toml config-json --out tidesight.json
 ```
 
-`tidesight.json` (format `tidesight-resolved-config/1`) contains `server` (with the secret), `headers`, `privacy`, `sites` (origins, time zone, server cookie domain, cookie lifetime, merged privacy), `default_site`, and `public` / `public_default`: the exact objects `/config.js` and `/config.json` must return. Regenerate it whenever the TOML changes. It holds the secret: keep it outside the web root, mode 600.
+`tidesight.json` (format `tidesight-resolved-config/1`) contains `server` (with the secret), `headers`, `privacy`, `sites` (origins, time zone, server cookie domain, cookie lifetime, merged privacy), `default_site`, and `public` / `public_default`: the exact objects `/config.js` and `/config.json` must return. Regenerate it whenever the TOML changes, and after properties are added or changed in the dashboard (they are part of it): with `[server] resolved_config_file` set, `jobs.py cron` does so whenever something changed. It holds the secret: keep it outside the web root, mode 600. Every connector keeps `ts_*` cookie values except `ts_login`, the dashboard's sign-in cookie.
 
 ## The conformance suite
 
