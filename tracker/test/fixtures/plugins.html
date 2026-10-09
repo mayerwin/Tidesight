@@ -30,7 +30,12 @@
     <button id="boom" onclick="throw new Error('boom from click')">Throws</button>
     <button id="busy" onclick="var t = performance.now(); while (performance.now() - t < 150) {} this.textContent = 'done'">Busy</button>
     <button id="secret-btn" class="ts-no-track" onclick="this.textContent = 'ok'">Not tracked</button>
+    <button id="masked-btn" onclick="this.dataset.n = 1">Pay with card <span class="ts-mask">4111 1111 1111 1111</span></button>
+    <a id="url-text" href="#done" onclick="return false">https://example.com/reset?token=TEXTSECRET-9</a>
+    <button id="boom-url" onclick="throw new Error('GET https://api.example.com/v1/reset?token=ERRCLICKSECRET failed')">Throws a URL</button>
   </div>
+  <label id="editor-label">Comment <span contenteditable="true">my private draft: call me at 555-0100</span></label>
+  <a id="callPhantom" href="#x">Not automation, just an element with that id</a>
   <div id="log"></div>
 
   <form id="signup" action="/signup" onsubmit="event.preventDefault(); document.getElementById('log').textContent = 'submitted'">

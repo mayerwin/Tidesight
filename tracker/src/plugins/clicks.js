@@ -2,6 +2,7 @@
 // signals (rage_clicks, dead_clicks, error_clicks). One capture listener on the document; nothing is ever read from
 // a field the visitor types into. Elements inside .ts-no-track are ignored.
 import { register, selector, text, closest, listen, pageSize, noTrack } from '../lib/dom.js';
+import { scrubText, errorReason } from '../lib/scrub.js';
 
 // What the visitor meant to click: the nearest interactive element, else the target itself.
 const ACT = 'a[href],area[href],button,[role=button],[role=link],[role=checkbox],[role=menuitem],[role=tab],' +
@@ -31,7 +32,9 @@ register('clicks', (api) => {
       if (a.hasAttribute('download') || (ext && (api.cfg().download_extensions || []).indexOf(ext.toLowerCase()) >= 0)) k = 'dl';
       else if (u.host !== loc.host) k = 'out';
     }
-    return { href: u.href.slice(0, 1000), lk: k && (k === 'dl' ? DL : OUT) ? k : undefined, nav: /^https?:$/.test(p) };
+    const href = api.scrub ? api.scrub(u.href) : u.href; // api.scrub, api.cut: core 0.2+
+    return { href: api.cut ? api.cut(href, 1000) : href.slice(0, 1000), lk: k && (k === 'dl' ? DL : OUT) ? k : undefined,
+      nav: /^https?:$/.test(p) };
   };
 
   // ---- rage clicks: rageN clicks within rageMs and ragePx of each other; one event per burst
@@ -90,7 +93,10 @@ register('clicks', (api) => {
   let last = null;
   const errc = (msg) => {
     const c = last;
-    if (c && now() - c.t <= 1000) { last = null; api.send('errclick', { sel: c.sel, msg: String(msg).slice(0, 500) }); }
+    if (c && now() - c.t <= 1000) {
+      last = null;
+      api.send('errclick', { sel: c.sel, msg: api.cut(scrubText(api, String(msg)), 500) }); // the error plugin's rules
+    }
   };
 
   // ---- the click itself
@@ -106,7 +112,7 @@ register('clicks', (api) => {
     const x = R(e.pageX), y = R(e.pageY);
     if (CLICKS || l.lk) {
       const ev = {
-        sel, tag: el.tagName.toLowerCase(), txt: text(el, textMax, el === t && !closest(t, ACT)), href: l.href, lk: l.lk,
+        sel, tag: el.tagName.toLowerCase(), txt: scrubText(api, text(el, textMax, el === t && !closest(t, ACT))), href: l.href, lk: l.lk,
         btn: e.button, mod: (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0) || undefined,
         vw: w.innerWidth, vh: w.innerHeight
       };
@@ -137,11 +143,8 @@ register('clicks', (api) => {
   }
   if (ERRC) {
     // Bubbling listeners on window: JS errors only (resource errors do not bubble).
-    listen(api, w, 'error', (e) => errc(e.message), { passive: true });
-    listen(api, w, 'unhandledrejection', (e) => {
-      const r = e.reason;
-      errc(r && r.message != null ? r.message : r);
-    }, { passive: true });
+    listen(api, w, 'error', (e) => errc(e.message || errorReason(e.error)), { passive: true });
+    listen(api, w, 'unhandledrejection', (e) => errc(errorReason(e.reason)), { passive: true });
   }
   const done = () => { endBurst(); cancel(); };
   api.on('hide', done);

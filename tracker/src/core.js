@@ -5,30 +5,49 @@
 // Rule: nothing in here may ever throw into the host page.
 ((w, d) => {
   'use strict';
-  const VERSION = '0.1.0';
+  const VERSION = '0.3.0';
+  // Markup on the host page can shadow globals and document properties (DOM clobbering: <a id="tidesight">,
+  // <img name="currentScript">…). Nothing read from them is trusted unless it has the expected type.
   const prev = w.tidesight;
-  if (!d || (prev && prev.v)) return; // no DOM, or already loaded
+  if (!d || (typeof prev === 'function' && prev.v)) return; // no DOM, or already loaded
 
   const nav = w.navigator || {};
   const loc = w.location;
   const now = () => Date.now();
   const noop = () => {};
   const enc = encodeURIComponent;
-  const conf = w.tidesightConfig || {};
-  const script = d.currentScript;
+  const plain = (o) => Object.prototype.toString.call(o) === '[object Object]';
+  const text = (v) => (typeof v === 'string' || typeof v === 'number' ? String(v) : '');
+  const conf = plain(w.tidesightConfig) ? w.tidesightConfig : {};
+  // Document properties through their own accessors: <img name="cookie"> cannot shadow those.
+  const dprop = (n) => {
+    try { for (let o = Object.getPrototypeOf(d); o; o = Object.getPrototypeOf(o)) { const p = Object.getOwnPropertyDescriptor(o, n); if (p) return p; } } catch (e) { /* old browser */ }
+    return null;
+  };
+  const dget = (n) => { const p = dprop(n); try { return p && p.get ? p.get.call(d) : d[n]; } catch (e) { return undefined; } };
+  const script = (() => { const s = dget('currentScript'); return w.HTMLScriptElement && s instanceof w.HTMLScriptElement ? s : null; })();
   const attr = (n) => (script ? script.getAttribute('data-' + n) : null);
   const debug = !!conf.debug || attr('debug') != null;
   const log = (...a) => { if (debug && w.console) console.log('[tidesight]', ...a); };
   const safe = (fn) => function () { try { return fn.apply(this, arguments); } catch (e) { log(e); } };
   const listen = (t, ev, fn, o) => t.addEventListener(ev, safe(fn), o);
-  const siteId = String(conf.site || attr('site') || '');
-  const base = String(conf.api || attr('api') || (script && script.src ? script.src.split(/[?#]/)[0].replace(/[^/]*$/, '') : ''))
-    .replace(/\/+$/, '');
+  const siteId = text(conf.site) || attr('site') || '';
+  // Where the collector is (and the plugins, which load from it as scripts): an http(s) URL, else nothing.
+  const base = (() => {
+    const src = script && script.src ? script.src.split(/[?#]/)[0] : '';
+    const u = text(conf.api) || attr('api') || src.slice(0, src.lastIndexOf('/') + 1);
+    try {
+      const x = u ? new URL(u, loc.href) : null;
+      return x && /^https?:$/.test(x.protocol) ? (x.origin + x.pathname).replace(/\/+$/, '') : '';
+    } catch (e) { return ''; }
+  })();
   const auto = String(conf.auto != null ? conf.auto : attr('auto')) !== 'false';
-  const addScript = (src) => {
+  const addScript = (src, onload) => {
     const s = d.createElement('script');
     s.async = true;
+    s.referrerPolicy = 'origin';
     s.src = src;
+    if (onload) s.onload = safe(onload);
     if (script && script.nonce) s.nonce = script.nonce;
     (d.head || d.documentElement).appendChild(s);
   };
@@ -37,7 +56,11 @@
   const DEF = {
     features: { pageviews: 1, spa: 1, engagement: 1, context: 1, not_found: 1 },
     opts: {}, session_timeout_min: 30, split_session_at_midnight: 1, timezone: 'UTC', cookie_domain: 'auto',
-    cookie_days: 400, hash_mode: 'route', spa_replace: 'path', heartbeat_sec: 30, idle_sec: 300, flush_sec: 5, exclude_paths: []
+    cookie_days: 400, hash_mode: 'route', spa_replace: 'path', heartbeat_sec: 30, idle_sec: 300, flush_sec: 5, exclude_paths: [],
+    redact_params: ['*token*', '*password*', '*passwd*', 'pwd', 'pass', '*secret*', 'key', '*_key', '*-key', '*api_key*', '*api-key*', '*apikey*',
+      '*access_key*', '*private_key*', 'auth', '*authorization*', 'jwt', 'otp', '*mfa*', '*session*', '*sessid*', 'sid', 'ticket',
+      '*signature*', 'sig', '*credential*'],
+    redact_paths: []
   };
   let cfg = DEF;
   let cfgLoaded = 0;
@@ -48,11 +71,12 @@
   const lsGet = (k) => { try { return ls && ls.getItem(k); } catch (e) { return null; } };
   const lsSet = (k, v) => { try { if (ls) { if (v == null) ls.removeItem(k); else ls.setItem(k, v); } } catch (e) { /* full */ } };
   const ckGet = (k) => {
-    try { const m = d.cookie.match('(?:^|;)\\s*' + k + '=([^;]*)'); return m ? decodeURIComponent(m[1]) : null; } catch (e) { return null; }
+    try { const m = String(dget('cookie')).match('(?:^|;)\\s*' + k + '=([^;]*)'); return m ? decodeURIComponent(m[1]) : null; } catch (e) { return null; }
   };
   const ckWrite = (k, v, age, dom) => {
-    d.cookie = k + '=' + v + ';path=/;max-age=' + age + ';samesite=lax' + (dom ? ';domain=' + dom : '') +
-      (loc.protocol === 'https:' ? ';secure' : '');
+    const c = k + '=' + v + ';path=/;max-age=' + age + ';samesite=lax' + (dom ? ';domain=' + dom : '') +
+      (loc.protocol === 'https:' ? ';secure' : ''), p = dprop('cookie');
+    if (p && p.set) p.set.call(d, c); else d.cookie = c;
   };
   let ckDomain = null;
   const findDomain = () => {
@@ -80,6 +104,19 @@
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
     return h >>> 0;
+  };
+  // The first n UTF-16 units of x, never ending in half a character (a lone surrogate cannot be stored).
+  const cut = (x, n) => {
+    const s = String(x);
+    if (s.length <= n) return s;
+    const c = s.charCodeAt(n - 1);
+    return s.slice(0, c >= 0xd800 && c <= 0xdbff ? n - 1 : n);
+  };
+  // Size in UTF-8 bytes, an upper bound (what counts against the collector's limits).
+  const bytes = (s) => {
+    let n = s.length;
+    for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) > 127) n += 2;
+    return n;
   };
 
   // ---- identity: the oldest id found in cookie, localStorage or the server cookie wins
@@ -128,20 +165,134 @@
   // ---- event queue and delivery
   let queue = [], timer = 0, due = 0, started = 0, silent = 0, dropped = 0, leaving = 0;
   let pid = rid(12), pageUrl = loc.href, lastUrl = pageUrl, pageSent = 0;
-  const endpoint = () => base + '/collect';
+  const endpoint = () => base + '/collect?site=' + enc(siteId); // the site in the URL too: refusals before parsing are counted for it
 
-  const globRe = (p) => new RegExp('^' + p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
-  let exPath, exVal;
+  // ---- URL redaction: secrets in URLs (login links, reset tokens, signed URLs…) never leave the browser.
+  // The rules of server/python/tidesight/redact.py, which the collector applies to the Referer it stores, and the
+  // same test vectors. Globs (only * is special, ASCII case-insensitive) are matched in linear time: a hostile URL
+  // must not freeze the page.
+  const REDACTED = 'redacted', MAX_URL = 8000;
+  const fold = (s) => s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+  // Where each * of glob p matched in t, as [start, end] pairs, if p matches all of t; else null.
+  const spans = (p, t) => {
+    const parts = p.split('*'), head = parts[0], tail = parts[parts.length - 1], end = t.length - tail.length, out = [];
+    if (parts.length < 2) return p === t ? out : null;
+    if (end < head.length || t.slice(0, head.length) !== head || t.slice(end) !== tail) return null;
+    let pos = head.length;
+    for (let i = 1; i < parts.length - 1; i++) {
+      const at = t.indexOf(parts[i], pos);
+      if (at < 0 || at + parts[i].length > end) return null;
+      out.push([pos, at]);
+      pos = at + parts[i].length;
+    }
+    out.push([pos, end]);
+    return out;
+  };
+  const strs = (l) => (Array.isArray(l) ? l.filter((p) => typeof p === 'string') : []);
+  const decode = (s) => { try { return decodeURIComponent(s.replace(/\+/g, ' ')); } catch (e) { return s; } }; // malformed: as it is
+  // names and globs: patterns already folded (rx below). depth: how deep in nested parameter values.
+  const pairs = (s, sep, names, globs, depth) => s.split(sep).map((kv) => {
+    const i = kv.indexOf('=');
+    if (i < 1) return kv;
+    const k = kv.slice(0, i), fk = k.length > 256 ? '' : fold(decode(k));
+    if (names.length && (k.length > 256 || names.some((p) => spans(p, fk)))) return kv.slice(0, i + 1) + REDACTED;
+    // A value that is itself a URL or a query with a secret (a login page's ?next=%2Freset%3Ftoken%3D…).
+    return depth < 2 && secretInside(kv.slice(i + 1), names, globs, depth + 1) ? kv.slice(0, i + 1) + REDACTED : kv;
+  }).join(sep);
+  const secretInside = (v, names, globs, depth) => {
+    const s = decode(v);
+    return redact(s, names, globs, depth) !== s ||
+      (s.indexOf('?') < 0 && s.indexOf('#') < 0 && s.indexOf('=') >= 0 && pairs(s, '&', names, globs, depth) !== s);
+  };
+  const redactPath = (path, names, globs, depth) => {
+    if (path.indexOf(';') >= 0) { // path parameters: /shop;jsessionid=…
+      path = path.split('/').map((s) => { const i = s.indexOf(';'); return i < 0 ? s : s.slice(0, i + 1) + pairs(s.slice(i + 1), ';', names, globs, depth); }).join('/');
+    }
+    const fp = globs.length ? fold(path) : '';
+    for (let j = 0; j < globs.length; j++) {
+      const sp = spans(globs[j], fp);
+      if (sp) {
+        for (let i = sp.length - 1; i >= 0; i--) if (sp[i][1] > sp[i][0]) path = path.slice(0, sp[i][0]) + REDACTED + path.slice(sp[i][1]);
+        break;
+      }
+    }
+    return path;
+  };
+  const redact = (u, names, globs, depth) => {
+    const h = u.indexOf('#'), main = h < 0 ? u : u.slice(0, h), q = main.indexOf('?'), base = q < 0 ? main : main.slice(0, q);
+    const c = base.indexOf(':');
+    let start = -1, origin = '', path = base;
+    if (c > 0 && /^[a-z][a-z\d+.-]*$/i.test(base.slice(0, c))) {
+      if (!/^(?:https?|wss?)$/i.test(base.slice(0, c))) return u; // data:, mailto:, javascript:…
+      if (base.slice(c, c + 3) === '://') start = c + 3;
+    } else if (base.slice(0, 2) === '//') start = 2;
+    if (start >= 0) {
+      const j = base.indexOf('/', start);
+      origin = j < 0 ? base : base.slice(0, j);
+      path = j < 0 ? '' : base.slice(j);
+      const at = origin.lastIndexOf('@');
+      if (at > start) origin = origin.slice(0, start) + REDACTED + origin.slice(at); // user:password@
+    }
+    let out = origin + redactPath(path, names, globs, depth);
+    if (q >= 0) out += '?' + pairs(main.slice(q + 1), '&', names, globs, depth);
+    if (h >= 0) { // #a=b&c=d (OAuth implicit flow), a hash route #/path or #!/path, with or without ?query
+      const f = u.slice(h + 1), fq = f.indexOf('?');
+      let head = fq < 0 ? f : f.slice(0, fq);
+      if (head[0] === '/' || head.slice(0, 2) === '!/') {
+        const k = head[0] === '!' ? 1 : 0;
+        head = head.slice(0, k) + redactPath(head.slice(k), names, globs, depth);
+      } else if (fq < 0) {
+        return out + '#' + (f.indexOf('=') > 0 ? pairs(f, '&', names, globs, depth) : f);
+      }
+      out += '#' + head + (fq < 0 ? '' : '?' + pairs(f.slice(fq + 1), '&', names, globs, depth));
+    }
+    return out;
+  };
+  const redactUrl = (u, names, globs) => (typeof u !== 'string' || !u || (!names.length && !globs.length) ? u
+    : redact(u, names.map(fold), globs.map(fold), 0));
+  // A URL cut to MAX_URL characters, without half a %-escape at the end (it would hide what follows from decoding).
+  const cutUrl = (u) => (typeof u === 'string' && u.length > MAX_URL ? cut(u, MAX_URL).replace(/%[\da-f]?$/i, '') : u);
+  let scrubIn, scrubOut, rx = {};
+  const scrub = (u) => { // with the site's patterns; the last answer is kept (the page URL goes in every event)
+    if (rx.cfg !== cfg) rx = { cfg, names: strs(cfg.redact_params).map(fold), globs: strs(cfg.redact_paths).map(fold) };
+    u = cutUrl(u);
+    if (u !== scrubIn || !rx.fresh) {
+      scrubIn = u;
+      rx.fresh = 1;
+      scrubOut = typeof u !== 'string' || !u || (!rx.names.length && !rx.globs.length) ? u
+        : cut(redact(u, rx.names, rx.globs, 0), MAX_URL); // "redacted" can be longer than what it replaced
+    }
+    return scrubOut;
+  };
+  // exclude_paths: globs (case-sensitive) on the path, and on a hash route's path (#/admin/…).
+  let exKey, exVal, exCfg;
   const excluded = () => {
-    if (exPath !== loc.pathname) exVal = (cfg.exclude_paths || []).some((p) => globRe(p).test(exPath = loc.pathname));
+    const hr = /^#!?(\/[^?]*)/.exec(loc.hash), key = loc.pathname + (hr ? '#' + hr[1] : '');
+    if (exKey !== key || exCfg !== cfg) {
+      exKey = key;
+      exCfg = cfg;
+      exVal = strs(cfg.exclude_paths).some((p) => spans(p, loc.pathname) || (hr && spans(p, hr[1])));
+    }
     return exVal;
+  };
+  // A page calling track() in a loop must not flood the collector: at most MAX_EVENTS_PER_MINUTE events a
+  // minute leave this page; the rest are counted and reported in the next batch (`drop`). URLs are cut at
+  // MAX_URL characters by scrub() (a crafted link with a huge #fragment would otherwise make every event too large
+  // to send, and slow to redact).
+  const MAX_EVENTS_PER_MINUTE = 300;
+  let rateMinute = 0, rateCount = 0;
+  const overRate = () => {
+    const m = Math.floor(now() / 6e4);
+    if (m !== rateMinute) { rateMinute = m; rateCount = 0; }
+    return ++rateCount > MAX_EVENTS_PER_MINUTE;
   };
   const enqueue = (ev, fast, touched) => {
     if (silent || !started || excluded()) return;
+    if (overRate()) { dropped++; return; }
     ev.id = rid(12);
     ev.ts = ev.ts || now();
     ev.pid = ev.pid || pid;
-    ev.url = ev.url || loc.href;
+    ev.url = scrub(ev.url || loc.href);
     if (!touched && touch()) ev.ns = 1;
     ev._s = ses.id;
     emit('event', ev);
@@ -169,11 +320,26 @@
     dropped = 0;
     return env;
   };
+  // Batches of at most 50 events and maxBody() bytes: under the collector's limit (`max_kb` in its config)
+  // and the browsers' ~64 KB allowance for beacons and keepalive requests. An event too large to ever be
+  // accepted is dropped (and counted) instead of taking its whole batch down with it.
+  const maxBody = () => Math.min(60, +cfg.max_kb > 0 ? +cfg.max_kb : 64) * 1000 - 1000;
   const flush = (beacon) => {
     if (!started || silent) return;
     clearTimeout(timer);
     timer = 0;
-    while (queue.length) send(envelope(queue.splice(0, 50)), beacon);
+    const max = maxBody();
+    let batch = [], size = 0;
+    const out = () => { if (batch.length) send(envelope(batch), beacon); batch = []; size = 0; };
+    queue.splice(0).forEach((ev) => {
+      let n;
+      try { n = bytes(JSON.stringify(ev)); } catch (e) { n = Infinity; }
+      if (n > max) { dropped++; return; }
+      if (batch.length >= 50 || size + n > max) out();
+      batch.push(ev);
+      size += n + 1;
+    });
+    out();
   };
   const gz = (s) => {
     try {
@@ -182,18 +348,35 @@
         .then((b) => new Blob([b], { type: 'text/plain' }), () => s);
     } catch (e) { return Promise.resolve(s); }
   };
+  // Requests that must survive the page (hidden, left): a keepalive fetch, which sends only the origin as
+  // Referer, else a beacon (which sends what the page's referrer policy allows). Browsers allow ~64 KB of them in
+  // flight per page; past that (counted here) the answer is false and the caller keeps the data for later.
+  let kaBytes = 0;
+  const KEEPALIVE = !!(w.Request && 'keepalive' in w.Request.prototype);
+  const unloadSend = (url, body, creds, failed) => {
+    const n = body.size || bytes(body);
+    if (KEEPALIVE && kaBytes + n <= 6e4) {
+      try {
+        kaBytes += n;
+        const done = () => { kaBytes -= n; };
+        fetch(url, { method: 'POST', body, keepalive: true, mode: 'no-cors', credentials: creds ? 'include' : 'omit', referrerPolicy: 'origin' })
+          .then(done, () => { done(); if (failed) failed(); });
+        return true;
+      } catch (e) { kaBytes -= n; }
+    }
+    try { return !!nav.sendBeacon(url, body); } catch (e) { return false; }
+  };
   const send = (env, beacon) => {
     const body = JSON.stringify(env);
     if (nav.onLine === false) return store(env);
     if (beacon || !w.fetch) {
-      let ok = 0;
-      try { ok = nav.sendBeacon(endpoint(), body); } catch (e) { /* no beacon */ }
-      if (!ok) store(env);
+      if (!unloadSend(endpoint(), body, cfg.server_cookie, () => store(env))) store(env);
       return;
     }
     gz(body)
       .then((b) => fetch(endpoint(), {
-        method: 'POST', body: b, keepalive: (b.size || b.length * 3) < 6e4, credentials: cfg.server_cookie ? 'include' : 'omit'
+        method: 'POST', body: b, keepalive: (b.size || b.length * 3) < 6e4, credentials: cfg.server_cookie ? 'include' : 'omit',
+        referrerPolicy: 'origin' // the page URL travels in the payload (redacted); never in a Referer header
       }))
       .then((r) => { if (r.status === 429 || r.status >= 500) store(env); }, () => store(env));
   };
@@ -210,12 +393,15 @@
     clearTimeout(rTimer);
     rTimer = setTimeout(safe(retry), Math.min(3e5, 1000 * 2 ** env.try));
   };
+  // A few batches at a time, so a backlog (after being offline, say) does not hit the collector all at once.
   const retry = () => {
     if (nav.onLine === false || !started || silent) return;
     const q = readQ();
     if (!q.length) return;
-    if (ls) lsSet('ts_q'); else memQ = [];
-    q.forEach((env) => { env.sent = now(); send(env); });
+    const now5 = q.splice(0, 5);
+    if (ls) lsSet('ts_q', q.length ? JSON.stringify(q) : null); else memQ = q;
+    now5.forEach((env) => { env.sent = now(); send(env); });
+    if (q.length) { clearTimeout(rTimer); rTimer = setTimeout(safe(retry), 2000); }
   };
 
   // ---- client context
@@ -267,7 +453,7 @@
     pageUrl = lastUrl = loc.href;
     resetEngagement();
     const fresh = touch(1), canon = d.querySelector('link[rel=canonical]'), st = d.querySelector('meta[name="ts:status"]');
-    const ev = { t: 'pageview', url: pageUrl, title: d.title, ref: o.ref != null ? o.ref : d.referrer, nav: o.nav || navType(), sn: ses.sn, pn: ses.pn };
+    const ev = { t: 'pageview', url: pageUrl, title: text(dget('title')), ref: scrub(o.ref != null ? o.ref : text(dget('referrer'))), nav: o.nav || navType(), sn: ses.sn, pn: ses.pn };
     if (fresh) ev.ns = 1;
     if (firstPv) {
       firstPv = 0;
@@ -275,7 +461,7 @@
       ev.idsrc = idSrc;
       ev.idc = idConflict;
     }
-    if (canon && canon.href !== pageUrl) ev.canon = canon.href;
+    if (canon && typeof canon.href === 'string' && canon.href !== pageUrl) ev.canon = scrub(canon.href);
     ev.lang = d.documentElement.lang || undefined;
     if (st && cfg.features.not_found) ev.st = +st.content || st.content;
     ev.props = o.props;
@@ -322,7 +508,8 @@
   // ---- engagement: time while the page is visible, focused and not idle
   let engMs = 0, engFrom = 0, engSent = 0, lastAct = now();
   const idleMs = () => cfg.idle_sec * 1000;
-  const engaged = () => d.visibilityState !== 'hidden' && (!d.hasFocus || d.hasFocus()) && now() - lastAct < idleMs();
+  const hidden = () => dget('visibilityState') === 'hidden';
+  const engaged = () => !hidden() && (!d.hasFocus || d.hasFocus()) && now() - lastAct < idleMs();
   const engTick = () => {
     const t = now();
     if (engFrom) engMs += Math.max(0, Math.min(t, lastAct + idleMs()) - engFrom);
@@ -379,15 +566,24 @@
       });
     }
   };
+  // Heavy uploads (replay, mouse, snapshots): at most MAX_CHUNKS_PER_MINUTE a minute from this page, well
+  // under the collector's per-client allowance, whatever a plugin does.
+  const MAX_CHUNKS_PER_MINUTE = 60;
+  let chunkMinute = 0, chunkCount = 0;
   const chunk = (kind, seq, t0, body, beacon, extra) => { // extra: more query parameters, e.g. '&rec=…'
     if (!started || silent || !ses) return;
+    const m = Math.floor(now() / 6e4);
+    if (m !== chunkMinute) { chunkMinute = m; chunkCount = 0; }
+    if (++chunkCount > MAX_CHUNKS_PER_MINUTE) return;
     const url = base + '/chunk?site=' + enc(siteId) + '&k=' + kind + '&vid=' + enc(vis.id) + '&sid=' + enc(ses.id) +
-      '&pid=' + enc(pid) + '&seq=' + seq + '&ts=' + t0 + '&url=' + enc(pageUrl.slice(0, 1000)) + (extra || '');
-    try { if (beacon && nav.sendBeacon(url, body)) return; } catch (e) { /* use fetch */ }
-    if (w.fetch) fetch(url, { method: 'POST', body, keepalive: !!beacon && (body.size || body.length * 3) < 6e4, credentials: 'omit' }).catch(noop);
+      '&pid=' + enc(pid) + '&seq=' + seq + '&ts=' + t0 + '&url=' + enc(cut(scrub(pageUrl), 1000)) + (extra || '');
+    if (beacon && unloadSend(url, body)) return;
+    if (w.fetch) fetch(url, { method: 'POST', body, credentials: 'omit', referrerPolicy: 'origin' }).catch(noop);
   };
   const api = {
-    v: VERSION, site: siteId, on, safe, log, rid, now, hash, gz, chunk, enabled,
+    v: VERSION, site: siteId, base, on, safe, log, rid, now, hash, gz, chunk, enabled, cut, scrub, excluded,
+    redact: (u, names, globs) => redactUrl(u, strs(names), strs(globs)),
+    load: addScript, // a script from the collector (base + '/ts/…'), with the tracker's nonce
     cfg: () => cfg,
     opt: (f, k, def) => { const o = cfg.opts[f]; return o && o[k] != null ? o[k] : def; },
     send: (t, data, fast) => enqueue(Object.assign({ t }, data), fast),
@@ -404,13 +600,23 @@
   };
 
   // ---- public commands
+  // Properties: at most 50 keys (100 characters each), string values cut at 500 characters, nested values
+  // (ecommerce items) kept while the whole stays under MAX_PROPS characters of JSON, else dropped (_trunc: 1).
+  const MAX_PROPS = 24000;
   const props = (p) => {
     if (!p || typeof p !== 'object') return;
     const o = {};
-    Object.keys(p).slice(0, 50).forEach((k) => { const v = p[k]; o[k.slice(0, 100)] = typeof v === 'string' ? v.slice(0, 500) : v; });
-    try { return JSON.parse(JSON.stringify(o)); } catch (e) { /* not serialisable */ }
+    Object.keys(p).slice(0, 50).forEach((k) => { const v = p[k]; o[cut(k, 100)] = typeof v === 'string' ? cut(v, 500) : v; });
+    let j;
+    try { j = JSON.stringify(o); } catch (e) { return; } // not serialisable (a cycle, a BigInt…)
+    if (j.length > MAX_PROPS) {
+      Object.keys(o).forEach((k) => { if (o[k] && typeof o[k] === 'object') delete o[k]; });
+      o._trunc = 1;
+      j = JSON.stringify(o);
+    }
+    return JSON.parse(j);
   };
-  const str = (x, n) => String(x).slice(0, n);
+  const str = cut;
   const cmds = {
     _config: (c) => {
       if (!c || typeof c !== 'object') return;
@@ -460,7 +666,7 @@
     loadVisitor();
     listen(d, 'visibilitychange', () => {
       engTick();
-      if (d.visibilityState === 'hidden') { leaving = 1; engagement('hidden'); emit('hide'); leaving = 0; flush(1); } else retry();
+      if (hidden()) { leaving = 1; engagement('hidden'); emit('hide'); leaving = 0; flush(1); } else retry();
     });
     listen(w, 'pagehide', () => { leaving = 1; engagement('leave'); emit('leave'); leaving = 0; flush(1); });
     listen(w, 'pageshow', (e) => { if (e.persisted && pageSent) pageview({ nav: 'restore' }); });
@@ -471,7 +677,7 @@
     if (cfg.heartbeat_sec > 0) setInterval(safe(() => { if (engaged()) engagement('hb'); }), cfg.heartbeat_sec * 1000);
     const go = safe(() => {
       if (auto) {
-        if (d.prerendering) listen(d, 'prerenderingchange', () => pageview({ nav: 'prerender' }), { once: true });
+        if (dget('prerendering') === true) listen(d, 'prerenderingchange', () => pageview({ nav: 'prerender' }), { once: true });
         else pageview();
       }
       pending.splice(0).forEach(run);
@@ -485,11 +691,11 @@
   const ts = function () { try { run(arguments); } catch (e) { log(e); } };
   ts.v = VERSION;
   Object.keys(cmds).forEach((k) => { if (k[0] !== '_') ts[k] = (...a) => ts(k, ...a); });
-  const q = (prev && prev.q) || [];
+  const q = typeof prev === 'function' && Array.isArray(prev.q) ? prev.q : [];
   w.tidesight = ts;
   if (lsGet('ts_ignore') === '1') silent = 1;
   safe(loadUad)();
-  q.forEach((a) => ts(...a)); // may include a _config from an early config.js
+  q.forEach((a) => { try { ts.apply(null, a); } catch (e) { log(e); } }); // may include a _config from an early config.js
   if (!cfgLoaded) {
     safe(() => {
       let cached;

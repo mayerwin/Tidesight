@@ -1,15 +1,10 @@
 // Helpers for plugins that send heavy data to POST /chunk (mouse movement, replay, DOM snapshots).
 
-// True when the current path matches the site's exclude_paths (same glob rules as the core). The core already
-// drops events on excluded pages; chunks bypass the event queue, so the plugins that send them check this.
-let exPath, exVal;
+// True when the current path matches the site's exclude_paths (the core's test, api.excluded: core 0.3+; with an
+// older core, nothing is sent). The core already drops events on excluded pages; chunks bypass the event queue,
+// so the plugins that send them check this.
 export function excluded(api) {
-  const p = location.pathname, g = api.cfg().exclude_paths || [];
-  if (p !== exPath) {
-    exPath = p;
-    exVal = g.some((x) => new RegExp('^' + String(x).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$').test(p));
-  }
-  return exVal;
+  return api.excluded ? api.excluded() : true;
 }
 
 // Sends the chunks of one kind. Bodies are gzip-compressed first (asynchronous). A chunk still being compressed

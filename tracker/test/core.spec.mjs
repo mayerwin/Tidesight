@@ -1,4 +1,5 @@
 // Core tracker: pageviews, identity, sessions, SPA routes, events, engagement, delivery, robustness.
+import { readFileSync } from 'node:fs';
 import { test, expect, API, sleep, visitorId, getHits, waitForHits, ofType, named, hidePage } from './helpers.mjs';
 
 test('pageview carries page, context, identity and envelope fields', async ({ page, request }) => {
@@ -228,7 +229,7 @@ test('offline batches are kept and retried', async ({ page, context, request }) 
 
 test('failed deliveries (server errors) are retried', async ({ page, request }) => {
   let failures = 0;
-  await page.route(API + '/collect', (route) => {
+  await page.route(API + '/collect?*', (route) => {
     if (failures < 2) { failures++; return route.fulfill({ status: 503, body: '' }); }
     return route.continue();
   });
@@ -331,6 +332,132 @@ test('the API never throws on bad input', async ({ page }) => {
     } catch (e) { return String(e); }
   });
   expect(threw).toBe(false);
+});
+
+test('batches stay under the collector size limit', async ({ page, request }) => {
+  await page.goto('/index.html?site=core');
+  const vid = await visitorId(page);
+  // 30 events of about 4.6 KB: 140 KB in all, more than one request may carry (max_kb 64).
+  await page.evaluate(() => { for (let i = 0; i < 30; i++) tidesight('track', 'big', { i, pad: 'x'.repeat(450), more: Array(10).fill('y'.repeat(400)) }); });
+  const hits = await waitForHits(request, { vid }, (h) => named(h, 'big').length === 30);
+  expect(new Set(named(hits, 'big').map((h) => h.data.p.i)).size).toBe(30); // none refused
+  const perRequest = {};
+  for (const h of named(hits, 'big')) perRequest[h.request_id] = (perRequest[h.request_id] || 0) + 1;
+  expect(Object.keys(perRequest).length).toBeGreaterThanOrEqual(3);
+  expect(Math.max(...Object.values(perRequest))).toBeLessThanOrEqual(13); // 13 × 4.6 KB < 59 KB
+});
+
+test('a page sending events in a loop is capped and the drop is reported', async ({ page, request }) => {
+  await page.clock.install({ time: new Date('2026-06-15T10:00:05Z') });
+  await page.goto('/index.html?site=core');
+  const vid = await visitorId(page);
+  await waitForHits(request, { vid }, (h) => ofType(h, 'pageview').length === 1);
+  await page.evaluate(() => { for (let i = 0; i < 400; i++) tidesight('track', 'loop', { i }); });
+  await waitForHits(request, { vid }, (h) => named(h, 'loop').length >= 290);
+  await page.clock.fastForward('01:00'); // the next minute: events flow again
+  await page.evaluate(() => tidesight('track', 'after'));
+  const hits = await waitForHits(request, { vid }, (h) => named(h, 'after').length === 1, 15000);
+  const loops = named(hits, 'loop').length;
+  expect(loops).toBeLessThan(300); // 300 a minute, the pageview and plugin events included
+  expect(loops).toBeGreaterThan(250);
+  // The count rides on the next batch built after the drops (here, the end of the burst).
+  expect(Math.max(...hits.map((h) => h.envelope.drop || 0))).toBeGreaterThanOrEqual(100);
+});
+
+test('properties are bounded and never end in half a character', async ({ page, request }) => {
+  await page.goto('/index.html?site=core');
+  const vid = await visitorId(page);
+  await page.evaluate(() => {
+    const p = {};
+    for (let i = 0; i < 60; i++) p['k' + i] = 'v';
+    tidesight('track', 'many', p);
+    tidesight('track', 'nested', { plan: 'pro', items: Array(200).fill({ item_name: 'z'.repeat(300) }) });
+    tidesight('track', 'x'.repeat(199) + '\u{1F389}', { s: 'y'.repeat(499) + '\u{1F389}' });
+  });
+  const hits = await waitForHits(request, { vid }, (h) => named(h, 'many').length && named(h, 'nested').length && h.some((x) => x.name && x.name.startsWith('xxx')));
+  expect(Object.keys(named(hits, 'many')[0].data.p).length).toBe(50);
+  expect(named(hits, 'nested')[0].data.p).toEqual({ plan: 'pro', _trunc: 1 });
+  const emoji = hits.find((x) => x.name && x.name.startsWith('xxx'));
+  expect(emoji.name).toBe('x'.repeat(199)); // the emoji did not fit: dropped whole
+  expect(emoji.data.p.s).toBe('y'.repeat(499));
+});
+
+test('secrets in URLs never leave the browser', async ({ page, request }) => {
+  await page.goto('/index.html?site=core&utm_source=news&reset_token=S3CRET&key=K3Y#access_token=T0K&state=1');
+  const vid = await visitorId(page);
+  const hits = await waitForHits(request, { vid }, (h) => ofType(h, 'pageview').length === 1);
+  const url = ofType(hits, 'pageview')[0].data.url;
+  expect(url).toBe('http://127.0.0.1:8788/index.html?site=core&utm_source=news&reset_token=redacted&key=redacted#access_token=redacted&state=1');
+  expect(JSON.stringify(hits)).not.toMatch(/S3CRET|K3Y|T0K/);
+});
+
+test('URL redaction follows the shared test vectors (the collector\'s redact.py)', async ({ page, request }) => {
+  const v = JSON.parse(readFileSync(new URL('../../server/python/tests/redact_vectors.json', import.meta.url), 'utf8'));
+  await page.goto('/index.html?site=core');
+  const vid = await visitorId(page);
+  await waitForHits(request, { vid }, (h) => ofType(h, 'pageview').length === 1);
+  // A plugin receives the core's API, which includes the redaction used for every URL the tracker sends.
+  const groups = [v].concat(v.more || []);
+  const out = await page.evaluate((groups) => new Promise((resolve) => {
+    tidesight('_plugin', 'probe', (api) => resolve(groups.map((g) => g.cases.map((c) => api.redact(c[0], g.redact_params, g.redact_paths)))));
+  }), groups);
+  expect(out).toEqual(groups.map((g) => g.cases.map((c) => c[1])));
+});
+
+test('a hostile URL cannot freeze the page', async ({ page, request }) => {
+  // 100 KB fragment: with patterns compiled to regular expressions, each event took seconds of main thread.
+  await page.goto('/index.html?site=core#' + 'token'.repeat(20000) + '%0A=1');
+  const vid = await visitorId(page);
+  const pv = ofType(await waitForHits(request, { vid }, (h) => ofType(h, 'pageview').length === 1), 'pageview')[0];
+  expect(pv.data.url.length).toBeLessThanOrEqual(8000); // cut, so the event can still be sent
+  expect(pv.data.url).toMatch(/^http:\/\/127\.0\.0\.1:8788\/index\.html\?site=core#tokentoken/);
+  const ms = await page.evaluate(() => {
+    const t = performance.now();
+    for (let i = 0; i < 50; i++) tidesight('track', 'tick', { i });
+    return performance.now() - t;
+  });
+  expect(ms).toBeLessThan(250);
+  await waitForHits(request, { vid }, (h) => named(h, 'tick').length === 50);
+});
+
+test('markup on the page cannot redirect, load scripts into or break the tracker (DOM clobbering)', async ({ page, request }) => {
+  const elsewhere = [];
+  page.on('request', (r) => { if (r.url().startsWith('http://127.0.0.1:8799/') && !r.url().endsWith('/img.png')) elsewhere.push(r.url()); });
+  await page.goto('/clobber.html?site=replay');
+  const vid = await visitorId(page);
+  const pv = ofType(await waitForHits(request, { vid }, (h) => ofType(h, 'pageview').length === 1), 'pageview')[0];
+  expect(pv.site_id).toBe('replay');
+  expect(pv.data.title).toBe('Clobbered'); // document.title is shadowed by <img name="title">: read through its getter
+  expect(pv.data.ref).toBe('');
+  expect(await page.evaluate(() => typeof window.tidesight === 'function' && !!window.tidesight.v)).toBe(true);
+  // The identity cookie was written: through the accessor, as <img name="cookie"> shadows document.cookie.
+  expect(await page.evaluate(() => typeof document.cookie)).toBe('object');
+  expect(await page.evaluate(() => Object.getOwnPropertyDescriptor(Document.prototype, 'cookie').get.call(document)))
+    .toContain('ts_vid=' + vid);
+  // The replay plugin loads rrweb from the collector, not from <img name="currentScript">, and records.
+  await expect.poll(async () => (await (await request.get(API + '/__test/chunks?since=0')).json())
+    .some((c) => c.visitor_id === vid && c.kind === 'replay'), { timeout: 10000 }).toBe(true);
+  await page.evaluate(() => tidesight('track', 'still_works'));
+  await waitForHits(request, { vid }, (h) => named(h, 'still_works').length === 1);
+  expect(elsewhere).toEqual([]);
+});
+
+test('the single-file bundle copes with clobbering markup too', async ({ page, request }) => {
+  await page.goto('/clobber.html?site=core&bundle=ts.all.js');
+  const vid = await visitorId(page);
+  await waitForHits(request, { vid }, (h) => ofType(h, 'pageview').length === 1);
+  expect(await page.evaluate(() => typeof window.tidesight === 'function' && !!window.tidesight.v)).toBe(true);
+});
+
+test('requests send only the origin as Referer, even when the page allows more', async ({ page, request }) => {
+  await page.goto('/referrer.html?site=core&x=PRIVATE-123');
+  const vid = await visitorId(page);
+  await waitForHits(request, { vid }, (h) => ofType(h, 'pageview').length === 1);
+  await page.evaluate(() => tidesight('track', 'last_words'));
+  await page.goto('about:blank'); // the unload batch: a keepalive fetch, not a beacon
+  const hits = await waitForHits(request, { vid }, (h) => named(h, 'last_words').length === 1);
+  for (const h of hits) expect(h.headers.referer).toBe('http://127.0.0.1:8788/');
+  expect(JSON.stringify(hits.map((h) => h.headers))).not.toContain('PRIVATE-123');
 });
 
 test('the single-file bundle works too', async ({ page, request }) => {

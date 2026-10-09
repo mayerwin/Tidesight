@@ -44,11 +44,12 @@ export async function waitForHits(request, filter, predicate, timeout = 10000) {
 export const ofType = (hits, t) => hits.filter((h) => h.type === t);
 export const named = (hits, n) => hits.filter((h) => h.type === 'event' && h.name === n);
 
-// Make the page believe it was hidden (as when switching tabs), which flushes with sendBeacon.
+// Make the page believe it was hidden (as when switching tabs), which flushes with keepalive requests. The
+// tracker reads document properties through their accessors (markup cannot shadow them): replace those.
 export async function hidePage(page) {
   await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
-    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    Object.defineProperty(Document.prototype, 'visibilityState', { get: () => 'hidden', configurable: true });
+    Object.defineProperty(Document.prototype, 'hidden', { get: () => true, configurable: true });
     document.dispatchEvent(new Event('visibilitychange'));
   });
 }

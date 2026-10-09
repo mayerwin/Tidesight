@@ -20,6 +20,7 @@ register('forms', (api) => {
   const formId = (f) => {
     let path;
     try { path = attr(f, 'action') && new URL(attr(f, 'action'), location.href).pathname; } catch (e) { /* bad URL */ }
+    if (path && api.scrub) path = api.scrub(path); // redact_paths, ;jsessionid=…
     return attr(f, 'id') || attr(f, 'name') || path || selector(f);
   };
   const fid = (el) => {

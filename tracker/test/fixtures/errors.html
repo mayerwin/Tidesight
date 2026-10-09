@@ -20,5 +20,7 @@
   <button id="err" onclick="kaboom()">Throw</button>
   <button id="rej" onclick="Promise.reject(new Error('nope'))">Reject</button>
   <button id="res" onclick="var i = document.createElement('img'); i.src = '/missing-image.png'; document.body.appendChild(i)">Broken image</button>
+  <button id="rej-obj" onclick="Promise.reject({access_token: 'ACCESS-TOKEN-SECRET', user: {email: 'alice@example.com'}})">Reject with data</button>
+  <button id="err-url" onclick="throw new Error('failed to load https://api.example.com/v1?token=URLSECRET-1&amp;page=2')">Throw with a URL</button>
 </body>
 </html>

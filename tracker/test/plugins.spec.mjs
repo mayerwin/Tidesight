@@ -36,6 +36,7 @@ test.describe('fingerprint', () => {
     expect(d.x.cn).toBeUndefined(); // the canvas renders identically twice
     // Playwright drives Chromium with navigator.webdriver set.
     expect(d.bot).toMatchObject({ wd: 1, pl: expect.any(Number), lg: expect.any(Number), oz: 0, hl: expect.any(Number) });
+    expect(d.bot.au || []).not.toContain('callPhantom'); // only an element with that id: no automation
     expect(d.ms).toBeGreaterThanOrEqual(0);
 
     // Same session, same result: not sent again.
@@ -160,6 +161,30 @@ test.describe('clicks', () => {
       const hits = await waitForHits(request, { vid }, (h) => ofType(h, 'errclick').length === 1 && ofType(h, 'error').length === 1);
       expect(ofType(hits, 'errclick')[0].data).toMatchObject({ sel: '#boom', msg: expect.stringContaining('boom from click') });
     });
+  });
+  test.describe(() => {
+    test.use({ allowedPageErrors: [/failed/] });
+    test('error clicks never carry URL secrets', async ({ page, request }) => {
+      const { vid } = await open(page, request, '/plugins.html?site=test', 'clicks', 'errors');
+      await page.click('#boom-url');
+      const hits = await waitForHits(request, { vid }, (h) => ofType(h, 'errclick').length === 1);
+      expect(ofType(hits, 'errclick')[0].data.msg).toContain('https://api.example.com/v1/reset?token=redacted failed');
+      expect(JSON.stringify(hits)).not.toContain('ERRCLICKSECRET');
+    });
+  });
+  test('click text never includes masked, editable or secret text', async ({ page, request }) => {
+    const { vid } = await open(page, request, '/plugins.html?site=test', 'clicks');
+    await page.click('#masked-btn');
+    await page.click('#url-text');
+    await page.click('#editor-label', { position: { x: 5, y: 5 } });
+    const hits = await waitForHits(request, { vid }, (h) => ofType(h, 'click').length >= 3);
+    const txt = ofType(hits, 'click').map((h) => h.data.txt);
+    expect(txt).toContain('Pay with card');
+    expect(txt).toContain('https://example.com/reset?token=redacted');
+    expect(txt).toContain('Comment');
+    expect(JSON.stringify(hits)).not.toMatch(/4111|TEXTSECRET|private draft|555-0100/);
+  });
+  test.describe(() => {
   });
 });
 
@@ -303,7 +328,7 @@ test.describe('performance', () => {
 });
 
 test.describe('errors', () => {
-  test.use({ allowedPageErrors: [/early boom|kaboom|nope/] });
+  test.use({ allowedPageErrors: [/early boom|kaboom|nope|failed to load|object/i] });
   test('JS errors, rejections and failed resources, each once per page with a final count', async ({ page, request }) => {
     const { vid, pid } = await open(page, request, '/errors.html?site=test', 'errors');
     // Raised before the plugin loaded: kept by the core, sent by the plugin with its original time.
@@ -325,6 +350,21 @@ test.describe('errors', () => {
     hits = await waitForHits(request, { vid }, (h) => ofType(h, 'error').some((e) => e.data.upd === 1));
     const upd = ofType(hits, 'error').filter((e) => e.data.upd === 1).map((e) => e.data);
     expect(upd).toEqual([expect.objectContaining({ k: 'error', msg: errs[1].msg, line: errs[1].line, n: 3 })]);
+  });
+
+  test('messages and stacks never carry URL secrets or the data of a rejection', async ({ page, request }) => {
+    const { vid } = await open(page, request, '/errors.html?site=test&token=PAGESECRET-1', 'errors');
+    await waitForHits(request, { vid }, (h) => ofType(h, 'error').length === 1); // early boom
+    await page.click('#err'); // the stack points into this page, whose URL has a token
+    await page.click('#rej-obj');
+    await page.click('#err-url');
+    const hits = await waitForHits(request, { vid }, (h) => ofType(h, 'error').length === 4);
+    const errs = ofType(hits, 'error').map((h) => h.data);
+    const text = JSON.stringify(errs);
+    for (const s of ['PAGESECRET', 'ACCESS-TOKEN-SECRET', 'alice@example.com', 'URLSECRET']) expect(text).not.toContain(s);
+    expect(errs[1].stack).toMatch(/errors\.html\?site=test&token=redacted:\d+:\d+/); // :line:col kept
+    expect(errs[2]).toMatchObject({ k: 'rejection', msg: 'Object' });
+    expect(errs[3].msg).toContain('https://api.example.com/v1?token=redacted&page=2');
   });
 });
 

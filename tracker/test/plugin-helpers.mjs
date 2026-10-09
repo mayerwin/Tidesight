@@ -51,7 +51,11 @@ export async function captureChunks(page) {
     };
     const safeKeep = (url, body, how) => { try { return keep(url, body, how); } catch (e) { return null; } };
     const f = window.fetch;
-    window.fetch = function (url, o) { safeKeep(url, o && o.body, 'fetch'); return f.apply(this, arguments); };
+    window.fetch = function (url, o) {
+      const rec = safeKeep(url, o && o.body, 'fetch');
+      if (rec) { rec.keepalive = !!(o && o.keepalive); rec.referrerPolicy = o && o.referrerPolicy; }
+      return f.apply(this, arguments);
+    };
     const b = navigator.sendBeacon;
     navigator.sendBeacon = function (url, data) {
       const rec = safeKeep(url, data, 'beacon');
@@ -62,7 +66,8 @@ export async function captureChunks(page) {
   });
 }
 
-// The captured chunk requests: {k, seq, rec, pid, how, ok, gzip, text}; failed beacons (retried by fetch) left out.
+// The captured chunk requests: {k, seq, rec, pid, how, keepalive, referrerPolicy, ok, gzip, text}; failed beacons
+// (retried by fetch) left out.
 export async function chunkBodies(page) {
   await page.waitForFunction(() => window.__chunks.every((c) => !c.pending));
   const raw = await page.evaluate(() => window.__chunks);
@@ -71,6 +76,7 @@ export async function chunkBodies(page) {
     let buf = c.b64 != null ? Buffer.from(c.b64, 'base64') : Buffer.from(c.text || '', 'utf8');
     const gzip = buf[0] === 0x1f && buf[1] === 0x8b;
     if (gzip) buf = gunzipSync(buf);
-    return { k: q.get('k'), seq: +q.get('seq'), rec: q.get('rec'), pid: q.get('pid'), ts: +q.get('ts'), how: c.how, gzip, text: buf.toString('utf8') };
+    return { k: q.get('k'), seq: +q.get('seq'), rec: q.get('rec'), pid: q.get('pid'), ts: +q.get('ts'), how: c.how,
+      keepalive: c.keepalive, referrerPolicy: c.referrerPolicy, gzip, text: buf.toString('utf8') };
   });
 }

@@ -30,16 +30,26 @@ export function noTrack(el) {
   return !!closest(el, '.ts-no-track');
 }
 
+// Subtrees whose text is never read: masked, not tracked, typed into (editors), form values, code.
+const HIDDEN = '.ts-mask,.ts-no-track,[contenteditable]:not([contenteditable="false"]),[role="textbox"],input,textarea,' +
+  'select,script,style,noscript,template';
+
 // Visible text of an element, collapsed and truncated. Never what a visitor typed: no value of a text field,
-// textarea or select, nothing from editable or masked (.ts-mask, .ts-no-track) elements. With `own`, only the
-// element's own text nodes (cheap on large containers).
+// textarea or select, nothing from editable or masked (.ts-mask, .ts-no-track) elements or inside them. With
+// `own`, only the element's own text nodes (cheap on large containers).
 export function text(el, max, own) {
-  if (!el || el.nodeType !== 1 || el.isContentEditable || closest(el, '.ts-mask,.ts-no-track')) return;
-  const tag = el.tagName;
+  if (!el || el.nodeType !== 1 || el.isContentEditable || closest(el, '.ts-mask,.ts-no-track,[role="textbox"]')) return;
+  const tag = el.tagName, limit = (max || 100) * 4;
   let t = '';
   if (tag === 'INPUT') { if (/^(submit|button|reset)$/i.test(el.type)) t = el.value; } // author-defined labels only
   else if (tag !== 'TEXTAREA' && tag !== 'SELECT') {
-    t = own ? [].map.call(el.childNodes, (n) => (n.nodeType === 3 ? n.nodeValue : '')).join('') : el.textContent;
+    if (own) t = [].map.call(el.childNodes, (n) => (n.nodeType === 3 ? n.nodeValue : '')).join('');
+    else { // the text of the subtree, without what HIDDEN covers, and only as much as is needed
+      const F = window.NodeFilter, walk = document.createTreeWalker(el, F.SHOW_ELEMENT | F.SHOW_TEXT, {
+        acceptNode: (n) => (n.nodeType === 3 ? F.FILTER_ACCEPT : n.matches(HIDDEN) ? F.FILTER_REJECT : F.FILTER_SKIP)
+      });
+      for (let n = walk.nextNode(); n && t.length < limit; n = walk.nextNode()) t += n.nodeValue;
+    }
   }
   t = /\S/.test(t || '') ? t : el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('title') || '';
   return String(t).replace(/\s+/g, ' ').trim().slice(0, max || 100).replace(/[\ud800-\udbff]$/, '') || undefined; // never half an emoji
@@ -63,8 +73,12 @@ export function pageSize() {
   return [Math.max(e.scrollWidth, b.scrollWidth), Math.max(e.scrollHeight, b.scrollHeight)];
 }
 
-// Register a plugin with the core (works whether the core is already loaded or not).
+// Register a plugin with the core (works whether the core is already loaded or not). Markup can make
+// window.tidesight an element (<a id="tidesight">): only a function is called.
 export function register(name, fn) {
-  const w = window;
-  (w.tidesight = w.tidesight || function () { (w.tidesight.q = w.tidesight.q || []).push(arguments); })('_plugin', name, fn);
+  try {
+    const w = window;
+    if (typeof w.tidesight !== 'function') w.tidesight = function () { (w.tidesight.q = w.tidesight.q || []).push(arguments); };
+    w.tidesight('_plugin', name, fn);
+  } catch (e) { /* never into the page */ }
 }

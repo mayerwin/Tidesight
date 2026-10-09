@@ -32,7 +32,10 @@ register('fp', (api) => {
   let ms = 0;
 
   const bot = () => {
-    const ua = n.userAgent || '', au = AUTOMATION.filter((k) => k in w);
+    // Globals automation tools define on window itself: a page element with that id (<a id="callPhantom">) is
+    // no automation, so only own properties count, and never a DOM node.
+    const own = (k) => { try { return Object.prototype.hasOwnProperty.call(w, k) && !(w[k] instanceof w.Node); } catch (e) { return false; } };
+    const ua = n.userAgent || '', au = AUTOMATION.filter(own);
     Object.keys(d).concat(Object.keys(w)).forEach((k) => { if (/^\$?cdc_|^\$wdc_/.test(k)) au.push(k); });
     ['webdriver', 'selenium', 'driver'].forEach((a) => { if (d.documentElement.getAttribute(a) != null) au.push('@' + a); });
     return {

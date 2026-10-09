@@ -7,8 +7,10 @@
 // rest goes out at once, uncompressed, in pieces of at most 48 KB: the first by sendBeacon, the others by fetch
 // (browsers allow ~64 KB of beacons in flight per page, and the core's own events must fit too).
 // Recording stops after opts.replay.max_minutes, and on an excluded path (restarting, as a new recording, on the
-// next tracked page). Inputs are masked (all by default, passwords always), .ts-mask text is masked, .ts-block
-// elements are blocked.
+// next tracked page). Inputs are masked (all by default, passwords always), and so is the text of rich-text editors
+// (contenteditable, role=textbox) unless mask_all_inputs is off; .ts-mask text is masked, .ts-block elements are
+// blocked. URLs in the recorded page (links, images, form actions…) get the same redaction as every URL the
+// tracker sends.
 //
 // DOM snapshots: once per page (path, plus the hash for #/ routes) per session, ~1.5 s after load or route, a
 // chunk of kind "snapshot" holding [Meta, FullSnapshot] rrweb events. Taken with a short rrweb recording that stops
@@ -16,37 +18,99 @@
 // recordings). Pages already snapshotted are remembered in sessionStorage (ts_snap).
 import { register, idle, listen } from '../lib/dom.js';
 import { chunker, excluded } from '../lib/chunk.js';
+import { scrubText } from '../lib/scrub.js';
 
-const me = document.currentScript;
-const dir = me && me.src ? me.src.split(/[?#]/)[0].replace(/[^/]*$/, '') : '';
+// Attributes holding URLs, redacted in full snapshots and mutations.
+const URL_ATTRS = { href: 1, src: 1, action: 1, formaction: 1, poster: 1, data: 1, cite: 1, background: 1, ping: 1, longdesc: 1, 'xlink:href': 1 };
+// Inside a masked subtree (an editor, .ts-mask), what a visitor put there can also be in attributes: links they
+// pasted, image data, mentions. These are blanked; the elements themselves stay, for the layout.
+const PRIVATE_ATTR = /^(?:href|src|srcset|alt|title|value|placeholder|xlink:href|aria-.*|data-.*)$/;
 
 register('replay', (api) => {
   const w = window, d = document, rp = api.enabled('replay'), sn = api.enabled('dom_snapshots');
-  if ((!rp && !sn) || !dir) return;
+  // rrweb loads from the collector, through the core (api.load: core 0.3+), never from a URL read off the page.
+  if ((!rp && !sn) || !api.load || !api.base) return;
   const o = (k, v) => api.opt('replay', k, v);
+  const maskAll = o('mask_all_inputs', true) !== false, maskClass = String(o('mask_text_class', 'ts-mask'));
+  const EDITORS = '[contenteditable]:not([contenteditable="false"]),[role="textbox"]';
   const config = () => ({
-    emit: api.safe(emit), maskAllInputs: o('mask_all_inputs', true) !== false, maskInputOptions: { password: true },
-    maskTextClass: o('mask_text_class', 'ts-mask'), blockClass: o('block_class', 'ts-block'),
+    emit: api.safe(emit), maskAllInputs: maskAll, maskInputOptions: { password: true },
+    maskTextClass: maskClass, blockClass: o('block_class', 'ts-block'),
+    // What visitors type into rich-text editors is text, not an input value: masked like inputs. mask_all_text
+    // masks every text node (code editors that draw what is typed outside any input).
+    maskTextSelector: o('mask_all_text', false) ? '*' : maskAll ? EDITORS : undefined,
     blockSelector: 'input[type=hidden]', // rrweb's input masking skips hidden fields (tokens): leave them out
     recordCanvas: !!o('record_canvas', false), sampling: { mousemove: 50, scroll: 150, input: 'last' },
     slimDOMOptions: 'all', checkoutEveryNms: 3e5, errorHandler: (e) => { api.log(e); return true; }
   });
 
   // rrweb: a UMD file setting the global rrwebRecord (the build makes it ignore AMD loaders on the page).
-  let R = w.rrwebRecord, waiting = null;
+  const rr = () => { const r = w.rrwebRecord; return r && typeof r.record === 'function' ? r : null; };
+  let R = rr(), waiting = null;
   const load = (cb) => {
     if (R) return cb(R);
     if (waiting) return waiting.push(cb);
     waiting = [cb];
-    const s = d.createElement('script');
-    s.async = true;
-    s.src = dir + 'rrweb-record.js?v=' + api.v;
-    if (me && me.nonce) s.nonce = me.nonce;
-    s.onload = api.safe(() => {
-      R = w.rrwebRecord;
-      if (R && R.record) waiting.splice(0).forEach((f) => api.safe(f)(R));
+    api.load(api.base + '/ts/rrweb-record.js?v=' + api.v, () => {
+      R = rr();
+      if (R) waiting.splice(0).forEach((f) => api.safe(f)(R));
     });
-    (d.head || d.documentElement).appendChild(s);
+  };
+
+  // URLs in the recorded DOM: the redaction of every URL the tracker sends (a reset link on the page, a form
+  // posting to ?session_id=…, a signed image in a style). srcset holds several URLs, each with a descriptor.
+  const css = (v) => v.replace(/url\(\s*(['"]?)([^'")]*)\1\s*\)/gi, (m, q, u) => 'url(' + q + api.scrub(u) + q + ')');
+  const scrubValue = (n, v) => {
+    if (n === 'srcset' || n === 'imagesrcset') return v.split(',').map((p) => p.replace(/^(\s*)(\S+)/, (m, s, u) => s + api.scrub(u))).join(',');
+    if (URL_ATTRS[n] || n.slice(0, 5) === 'data-') return api.scrub(v);
+    if (n === 'style' || n === '_csstext') return css(v);
+    if (n === 'srcdoc') return css(scrubText(api, v));
+    return v;
+  };
+  // Elements whose content the visitor typed (editors, when inputs are masked) or the site masked (.ts-mask):
+  // inside them, private attributes go too.
+  const masking = (a) => !!a && ((maskAll && (('contenteditable' in a && a.contenteditable !== 'false') || a.role === 'textbox')) ||
+    (typeof a.class === 'string' && (' ' + a.class + ' ').indexOf(' ' + maskClass + ' ') >= 0));
+  const scrubAttrs = (a, masked) => {
+    if (!a || typeof a !== 'object') return;
+    Object.keys(a).forEach((k) => {
+      const v = a[k], n = k.toLowerCase();
+      if (masked && PRIVATE_ATTR.test(n)) a[k] = '';
+      else if (typeof v === 'string') a[k] = scrubValue(n, v);
+      else if (n === 'style' && v && typeof v === 'object') { // a style mutation: {property: value | [value, priority]}
+        Object.keys(v).forEach((p) => {
+          if (typeof v[p] === 'string') v[p] = css(v[p]);
+          else if (Array.isArray(v[p]) && typeof v[p][0] === 'string') v[p][0] = css(v[p][0]);
+        });
+      }
+    });
+  };
+  // node id -> 1 for an element whose content is masked, 2 for a node inside one (from snapshots and mutations)
+  let masks = new Map();
+  const scrubTree = (root, inside) => {
+    const stack = [[root, inside]];
+    while (stack.length) {
+      const [n, inMask] = stack.pop();
+      if (!n || typeof n !== 'object') continue;
+      const m = inMask || masking(n.attributes);
+      if (m && n.id != null) masks.set(n.id, inMask ? 2 : 1);
+      scrubAttrs(n.attributes, inMask);
+      if (Array.isArray(n.childNodes)) for (let i = 0; i < n.childNodes.length; i++) stack.push([n.childNodes[i], m]);
+    }
+  };
+  const scrubEvent = (e) => {
+    const x = e.data;
+    if (!x || !api.scrub) return;
+    if (e.type === 4) x.href = api.scrub(x.href); // Meta: the page URL
+    else if (e.type === 2) { masks = new Map(); scrubTree(x.node, false); } // FullSnapshot
+    else if (e.type === 3 && x.source === 0) { // IncrementalSnapshot, Mutation
+      (x.adds || []).forEach((m) => m && scrubTree(m.node, masks.has(m.parentId)));
+      (x.attributes || []).forEach((m) => {
+        if (!m) return;
+        if (m.id != null && !masks.has(m.id) && masking(m.attributes)) masks.set(m.id, 1);
+        scrubAttrs(m.attributes, masks.get(m.id) === 2);
+      });
+    }
   };
 
   const out = chunker(api, 'replay'), snaps = chunker(api, 'snapshot');
@@ -71,6 +135,7 @@ register('replay', (api) => {
   const end = () => { flush(); rec = ''; setTimeout(api.safe(halt), 0); }; // never stop rrweb from inside its emit
 
   function emit(e) {
+    scrubEvent(e);
     if (grab && (e.type === 4 || e.type === 2)) grab.push(e); // Meta, FullSnapshot
     if (!rec) return;
     if (excluded(api)) return end(); // an SPA route into an excluded path: nothing from it is kept
@@ -151,7 +216,9 @@ register('replay', (api) => {
   };
 
   api.on('pageview', () => {
-    try { if (stop) R.record.addCustomEvent('pageview', { pid: api.pid(), url: api.url() }); } catch (e) { /* not recording */ }
+    try {
+      if (stop) R.record.addCustomEvent('pageview', { pid: api.pid(), url: api.scrub ? api.scrub(api.url()) : api.url() });
+    } catch (e) { /* not recording */ }
     start();
     wantSnap();
   });

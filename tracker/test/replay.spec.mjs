@@ -19,14 +19,14 @@ test.describe('mouse movement', () => {
     await sleep(120);
     await page.mouse.move(600, 100, { steps: 10 });
     await sleep(120);
-    await hidePage(page); // sent at once, uncompressed, by sendBeacon
+    await hidePage(page); // sent at once, uncompressed, by a keepalive fetch
     const rows = await waitForChunks(request, vid, (c) => c.some((x) => x.kind === 'mouse'));
     const mouse = rows.filter((c) => c.kind === 'mouse');
     expect(mouse.map((c) => [c.seq, c.page_id])).toEqual([[0, pid]]);
     expect(mouse[0].meta).toMatchObject({ site: 'test', k: 'mouse', sent_encoding: 'identity' });
     const body = (await chunkBodies(page)).filter((b) => b.k === 'mouse');
     expect(body.length).toBe(1);
-    expect(body[0].how).toBe('beacon');
+    expect([body[0].how, body[0].keepalive, body[0].referrerPolicy]).toEqual(['fetch', true, 'origin']);
     const data = JSON.parse(body[0].text);
     expect(data).toMatchObject({ pw: expect.any(Number), ph: expect.any(Number), vw: 1280, vh: 720 });
     expect(data.pts.length).toBeGreaterThanOrEqual(3);
@@ -132,6 +132,29 @@ test.describe('session replay', () => {
     const mark = events.find((e) => e.type === 5 && e.data.tag === 'pageview');
     expect(mark.data.payload).toEqual({ pid: pid2, url: 'http://127.0.0.1:8788/spa/about?site=replay' });
     expect(events.filter((e) => e.type === 2).length).toBe(1); // still one recording, no new full snapshot
+  });
+
+  test('rich-text editors are masked and URLs in the page are redacted', async ({ page, request }) => {
+    await captureChunks(page);
+    const { vid } = await open(page, request, '/replay-secrets.html?site=replay', 'replay');
+    await waitForChunks(request, vid, (c) => c.some((x) => x.kind === 'replay'));
+    await page.click('#editor');
+    await page.keyboard.type('My private note');
+    await page.click('#aria');
+    await page.click('#add-link'); // a new link and a changed href: mutations
+    await sleep(300);
+    await hidePage(page);
+    await waitForChunks(request, vid, (c) => c.filter((x) => x.kind === 'replay').length >= 2);
+    await sleep(300);
+    const all = (await chunkBodies(page)).filter((b) => b.k === 'replay').map((b) => b.text).join('\n');
+    expect(all).toContain('Account settings'); // ordinary text is recorded
+    for (const secret of ['DOMSECRET', 'SESSIONSECRET', 'SIGSECRET', 'MUTSECRET', 'ATTRSECRET', 'My private note',
+      'Draft', 'Private ARIA draft', 'PRIVATE-DOC-ID', 'PRIVATEIMG', 'bank statement', 'jane.doe', 'MASKEDLINKSECRET',
+      'PASTED-SECRET', 'STYLESECRET', 'DATASRCSECRET', 'SRCDOCSECRET']) expect(all).not.toContain(secret);
+    expect(all).toContain('/account/reset?token=redacted&lang=en'); // redacted, not removed
+    expect(all).toContain('/pay?session_id=redacted');
+    expect(all).toContain('/pixel.png?sig=redacted 2x');
+    expect(all).toContain('/invite?ticket=redacted');
   });
 
   test('rrweb loads as a global even on a page with an AMD loader', async ({ page, request }) => {

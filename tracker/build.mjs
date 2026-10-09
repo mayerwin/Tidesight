@@ -13,9 +13,9 @@ import { fileURLToPath } from 'node:url';
 const root = dirname(fileURLToPath(import.meta.url));
 const src = join(root, 'src');
 const out = join(root, 'build');
-// The original target was 4 KB; the core carries context, identity restoration, SPA routing,
-// engagement and offline retry, and lands around 6 KB. This is the hard limit.
-const CORE_BUDGET = 6 * 1024;
+// The owner's budget for the core is 20 KB gzipped: small enough for any page, large enough that
+// functionality and robustness never have to give way to size. Going over it needs the owner's agreement.
+const CORE_BUDGET = 20 * 1024;
 const common = { minify: true, target: 'es2019', legalComments: 'inline', charset: 'utf8' };
 
 mkdirSync(join(out, 'ts'), { recursive: true });
