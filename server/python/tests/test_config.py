@@ -19,7 +19,8 @@ def test_defaults_without_file(tmp_path, monkeypatch):
     monkeypatch.delenv("TIDESIGHT_CONFIG", raising=False)
     monkeypatch.setattr(config_mod, "find_config_path", lambda explicit=None: None)
     cfg = load()
-    assert cfg.server["storage_mode"] == "sqlite" and cfg.data_dir == os.path.join(str(tmp_path), "data")
+    # Never the working directory (under CGI it is the web root): ~/tidesight-data.
+    assert cfg.server["storage_mode"] == "sqlite" and cfg.data_dir == os.path.expanduser(os.path.join("~", "tidesight-data"))
     assert cfg.sites == {}
     site = cfg.site_or_default("anything")
     assert site.features == FEATURE_DEFAULTS and site.timezone == "UTC"

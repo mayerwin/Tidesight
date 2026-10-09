@@ -24,10 +24,18 @@ final class Config
         'busy_timeout_ms' => 10000,
         'max_payload_kb' => 64,
         'max_chunk_kb' => 1024,
-        'max_decompressed_kb' => 4096,
-        'max_events_per_request' => 500,
+        'max_decompressed_kb' => 256,
+        'max_events_per_request' => 200,
         'rate_limit_per_minute' => 600,
+        'rate_limit_kb_per_minute' => 2048,
+        'chunk_rate_limit_per_minute' => 120,
+        'chunk_kb_per_minute' => 8192,
+        'flagged_per_minute' => 30,
+        'flagged_global_per_minute' => 300,
         'rate_limit_key' => 'remote_addr',
+        'rate_limit_proxies' => array(), // CIDRs ("cloudflare" is expanded by Python in the resolved JSON)
+        'rate_limit_ipv6_prefix' => 64,
+        'min_free_disk_mb' => 512,
         'cors' => 'reflect',
         'accept_ch' => true,
         'public_url' => '',
@@ -36,11 +44,13 @@ final class Config
         'dashboard_dir' => '',
         'store_raw_body' => false,
         'spool_fallback' => true,
+        'allow_data_in_web_root' => false,
         'log_file' => '',
     );
 
     const HEADERS_DEFAULTS = array(
-        'secret_patterns' => array('*token*', '*key*', '*secret*', '*password*'),
+        'secret_patterns' => array('*token*', '*key*', '*secret*', '*password*', '*auth*', '*session*', '*jwt*',
+            '*assertion*', '*credential*', '*signature*', '*cookie*'),
         'drop' => array(),
         'cookie_names' => array('ts_*'),
     );
@@ -52,6 +62,9 @@ final class Config
         'honour_gpc' => false,
         'drop_fingerprint' => false,
     );
+
+    /** config.SITE_DEFAULTS["max_hits_per_day"]: no daily quota unless configured. */
+    const MAX_HITS_PER_DAY = 0;
 
     /** @var string */
     public $path;
@@ -71,6 +84,8 @@ final class Config
     private $secret = null;
     /** @var object|null */
     private $doc = null;
+    /** @var array array(redact_params, redact_paths) of the default site (unknown sites) */
+    private $defaultRedact = array(array(), array());
 
     /** The config file to use: TIDESIGHT_CONFIG (constant or environment), else tidesight.json nearby. */
     public static function findPath($entryDir)
@@ -78,7 +93,7 @@ final class Config
         if (defined('TIDESIGHT_CONFIG') && constant('TIDESIGHT_CONFIG')) {
             return (string) constant('TIDESIGHT_CONFIG');
         }
-        $env = getenv('TIDESIGHT_CONFIG');
+        $env = function_exists('getenv') ? getenv('TIDESIGHT_CONFIG') : false; // $_SERVER below otherwise
         if ($env !== false && $env !== '') {
             return $env;
         }
@@ -86,6 +101,9 @@ final class Config
             if (!empty($_SERVER[$key]) && is_string($_SERVER[$key])) {
                 return $_SERVER[$key];
             }
+        }
+        if (!empty($_ENV['TIDESIGHT_CONFIG']) && is_string($_ENV['TIDESIGHT_CONFIG'])) {
+            return $_ENV['TIDESIGHT_CONFIG']; // where getenv() is disabled
         }
         foreach (array($entryDir, dirname(__DIR__)) as $dir) {
             $candidate = rtrim((string) $dir, '/\\') . DIRECTORY_SEPARATOR . 'tidesight.json';
@@ -126,12 +144,17 @@ final class Config
         $this->privacy = self::merge(self::PRIVACY_DEFAULTS, isset($raw['privacy']) ? $raw['privacy'] : array());
         $this->sites = array();
         if (isset($raw['sites']) && is_array($raw['sites'])) {
+            $public = isset($raw['public']) && is_array($raw['public']) ? $raw['public'] : array();
             foreach ($raw['sites'] as $id => $site) {
                 if (is_array($site)) {
-                    $this->sites[(string) $id] = self::siteDoc($site, $this->privacy);
+                    $this->sites[(string) $id] = self::siteDoc((string) $id, $site, $this->privacy,
+                        isset($public[$id]) && is_array($public[$id]) ? $public[$id] : array());
                 }
             }
         }
+        $this->defaultRedact = self::redactPatternsOf(
+            isset($raw['default_site']) && is_array($raw['default_site']) ? $raw['default_site'] : array(),
+            isset($raw['public_default']) && is_array($raw['public_default']) ? $raw['public_default'] : array());
         $dataDir = (string) $this->server['data_dir'];
         if ($dataDir === '') {
             $dataDir = 'data';
@@ -142,7 +165,9 @@ final class Config
         $this->dataDir = $dataDir;
         $this->server['data_dir'] = $dataDir;
         foreach (array('busy_timeout_ms', 'max_payload_kb', 'max_chunk_kb', 'max_decompressed_kb',
-                     'max_events_per_request', 'rate_limit_per_minute') as $key) {
+                     'max_events_per_request', 'rate_limit_per_minute', 'rate_limit_kb_per_minute',
+                     'chunk_rate_limit_per_minute', 'chunk_kb_per_minute', 'flagged_per_minute',
+                     'flagged_global_per_minute', 'rate_limit_ipv6_prefix', 'min_free_disk_mb') as $key) {
             $this->server[$key] = (int) $this->server[$key];
         }
         if ($this->server['log_file']) {
@@ -161,15 +186,48 @@ final class Config
         return $defaults;
     }
 
-    private static function siteDoc(array $site, array $privacy)
+    /**
+     * One site of Config.resolved(). A file written before sites carried `features` takes them
+     * from the site's public configuration, which has always held the same map.
+     */
+    private static function siteDoc($id, array $site, array $privacy, array $public)
     {
+        if (isset($site['features']) && is_array($site['features'])) {
+            $features = $site['features'];
+        } else {
+            $features = isset($public['features']) && is_array($public['features']) ? $public['features'] : array();
+        }
         return array(
+            'id' => $id,
             'name' => isset($site['name']) ? $site['name'] : '',
             'origins' => isset($site['origins']) && is_array($site['origins']) ? array_values($site['origins']) : array(),
             'server_cookie_domain' => isset($site['server_cookie_domain']) ? (string) $site['server_cookie_domain'] : '',
             'cookie_days' => isset($site['cookie_days']) ? $site['cookie_days'] : 400,
             'privacy' => self::merge($privacy, isset($site['privacy']) ? $site['privacy'] : array()),
+            'features' => $features,
+            'max_hits_per_day' => isset($site['max_hits_per_day']) ? (int) $site['max_hits_per_day'] : self::MAX_HITS_PER_DAY,
+            'redact' => self::redactPatternsOf($site, $public),
         );
+    }
+
+    /**
+     * array(redact_params, redact_paths) as redact.patterns() reads them: from the site's document when
+     * it has them, else from its public document (which has always carried the site's settings).
+     */
+    private static function redactPatternsOf(array $site, array $public)
+    {
+        $out = array();
+        foreach (array('redact_params', 'redact_paths') as $key) {
+            $value = array_key_exists($key, $site) ? $site[$key] : (isset($public[$key]) ? $public[$key] : array());
+            $out[] = Redact::patterns($value);
+        }
+        return $out;
+    }
+
+    /** The URL redaction patterns of a site (Config::site()), or of the default site for null. */
+    public function redactPatterns($site)
+    {
+        return $site !== null && isset($site['redact']) ? $site['redact'] : $this->defaultRedact;
     }
 
     private static function isAbsolute($p)
@@ -200,20 +258,35 @@ final class Config
         if ($value !== false && trim($value) !== '') {
             return $this->secret = trim($value);
         }
-        $value = bin2hex(random_bytes(32));
-        @mkdir($this->dataDir, 0777, true);
+        $bytes = function_exists('random_bytes') ? random_bytes(32)
+            : (function_exists('openssl_random_pseudo_bytes') ? (string) openssl_random_pseudo_bytes(32) : '');
+        if (strlen($bytes) !== 32 && function_exists('random_int')) { // the same CSPRNG, where only random_bytes is disabled
+            $bytes = '';
+            for ($i = 0; $i < 32; $i++) {
+                $bytes .= chr(random_int(0, 255));
+            }
+        }
+        if (strlen($bytes) !== 32) {
+            throw new ConfigError('no secure random source to generate the secret: set [server] secret');
+        }
+        $value = bin2hex($bytes);
+        Util::mkdirPrivate($this->dataDir);
+        $old = Util::umask(Util::privateMask()); // created private at once, with no window before a chmod
         $fh = @fopen($path, 'x');
+        Util::umask($old);
         if ($fh === false) { // another process created it first
             $again = @file_get_contents($path);
             if ($again !== false && trim($again) !== '') {
                 return $this->secret = trim($again);
             }
-            Log::warning('could not persist the generated secret in the data directory');
+            ErrorLog::warning($this->dataDir, 'could not persist the generated secret in ' . $this->dataDir);
             return $this->secret = $value;
+        }
+        if ($old === null && function_exists('chmod')) { // no umask(): private afterwards, as the next best thing
+            @chmod($path, 0666 & ~Util::privateMask());
         }
         fwrite($fh, $value);
         fclose($fh);
-        @chmod($path, 0600);
         return $this->secret = $value;
     }
 

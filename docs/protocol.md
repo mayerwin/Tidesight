@@ -33,8 +33,8 @@ All paths are relative to the collector's base URL (e.g. `https://stats.example.
 - **Body:** a JSON envelope (UTF-8), optionally gzip-compressed.
 - **Compression:** detected from the gzip magic bytes (`1f 8b`) or `Content-Encoding: gzip`. Browsers cannot set `Content-Encoding` without a preflight, so the tracker sends gzip bytes with a `text/plain` content type and the collector sniffs them.
 - **Content-Type:** `text/plain` (what browsers send; no preflight), `application/json`, or `application/x-www-form-urlencoded` with the envelope JSON in the `d` field.
-- **Query string:** optional and stored as received. `site=ID` supplies the site id when the envelope has none.
-- **Limits:** the body may not exceed `server.max_payload_kb` on the wire (default 64 KB) or `server.max_decompressed_kb` after decompression (default 4 MB). An envelope may carry at most `server.max_events_per_request` events (default 500).
+- **Query string:** optional and stored as received. `site=ID` supplies the site id when the envelope has none; the tracker (0.3+) always sends it, so a request refused before its body is read is still counted for its site.
+- **Limits:** the body may not exceed `server.max_payload_kb` on the wire (default 64 KB, announced to the tracker as `max_kb` in `/config.js`) or `server.max_decompressed_kb` after decompression (default 256 KB). Numbers too large for a double (`1e999`) make the body unreadable (`400`, `bad_json: number out of range`), as `NaN` and `Infinity` do. At most `server.max_events_per_request` events (default 200) are stored as hits; a longer batch answers `400`, its first events are stored and the raw body keeps the whole batch (`error` `too_many_events:<count>`). Per-client, flagged-traffic and per-site allowances apply (`docs/configuration.md`, "Limits and abuse protection").
 
 ### Envelope
 
@@ -65,7 +65,7 @@ All paths are relative to the collector's base URL (e.g. `https://stats.example.
 | `sent` | int | | Client clock when the request was sent (ms). Compared with the server time, it measures clock skew. |
 | `lib` | string | | Tracker name and version. |
 | `try` | int | | Delivery attempt: 0 for the first send, > 0 for a retry from storage. |
-| `drop` | int | | Batches the client had to discard (storage full) since its last successful send. |
+| `drop` | int | | Batches the client had to discard (retry storage full, too many tries) and events it did not send (over its per-minute cap, or too large to ever be accepted) since the previous batch. |
 | `events` | array | yes | The events, oldest first. |
 
 ¹ Or `?site=` in the query string. A request without a site id is stored with `site_status = "missing_site"`.
@@ -206,8 +206,8 @@ Sent by the plugins (`ts/<name>.js`), each event only when its feature is on and
 | `204` | Stored. | Done. |
 | `400` | Malformed; stored with an error flag. | Drop (retrying cannot help). |
 | `413` | Too large; metadata stored. | Drop. |
-| `429` | Rate limited; counted. | Retry later. |
-| `503` | Storage unavailable. | Retry later. |
+| `429` | An allowance is used up (per client, flagged traffic, or the site's daily quota); counted. Malformed and oversize requests keep their `400`/`413`, except from a client already over its allowance for the minute: its requests are refused before their body is read. | Retry later (`Retry-After`). |
+| `503` | Storage unavailable, or too little disk space (`Retry-After: 300`). | Retry later. |
 
 Responses carry `Cache-Control: no-store`, CORS headers, and `Accept-CH` (when `server.accept_ch`). When a site sets `server_cookie_domain`, a successful response also sets `ts_svid` (see below).
 
@@ -230,13 +230,13 @@ Heavy data goes to `replay.db`. The metadata travels in the query string, so the
 | `url` | Page URL (optional). |
 | `rec` | `replay` only: the recording id, one per page load. SPA route changes continue the same recording. |
 
-The body is JSON, up to `server.max_chunk_kb` (default 1 MB). While the page is open it is gzip-compressed (sniffed); when the page is hidden or left, whatever is pending is sent at once, uncompressed, by `sendBeacon` within the browser's beacon budget (about 64 KB in flight per page, shared with the event batches), else by `fetch`. Payload formats:
+The body is JSON, up to `server.max_chunk_kb` (default 1 MB). While the page is open it is gzip-compressed (sniffed); when the page is hidden or left, whatever is pending is sent at once, uncompressed, by a `keepalive` fetch (`sendBeacon` in browsers without it) within the browser's budget for requests that outlive the page (about 64 KB in flight, shared with the event batches), else by an ordinary `fetch`. Payload formats:
 
-- `replay`: a JSON array of rrweb events (`@rrweb/record` 2.x). A recording starts with a Meta event (type 4) and a FullSnapshot (type 2) and takes a new full snapshot every 5 minutes; an SPA route change adds a custom event (type 5) `{"tag": "pageview", "payload": {"pid", "url"}}`. Inputs are masked (all of them unless `replay.mask_all_inputs` is false, passwords always), text inside `replay.mask_text_class` (`ts-mask`) is masked, elements with `replay.block_class` (`ts-block`) and hidden inputs are left out. Chunks are sent every 10 s, at 200 events or 500 KB, and about 1 s after a full snapshot; when the page is hidden or left, in pieces of at most 48 KB. A recording stops after `replay.max_minutes`, or when an SPA route enters an excluded path (a later tracked page starts a new recording).
+- `replay`: a JSON array of rrweb events (`@rrweb/record` 2.x). A recording starts with a Meta event (type 4) and a FullSnapshot (type 2) and takes a new full snapshot every 5 minutes; an SPA route change adds a custom event (type 5) `{"tag": "pageview", "payload": {"pid", "url"}}`. Inputs are masked (all of them unless `replay.mask_all_inputs` is false, passwords always), and so is the text of rich-text editors (`contenteditable`, `role="textbox"`) unless `mask_all_inputs` is false; text inside `replay.mask_text_class` (`ts-mask`) is masked, elements with `replay.block_class` (`ts-block`) and hidden inputs are left out. URL attributes (`href`, `src`, `srcset`, `action`, `formaction`, `poster`, `data`…) are redacted like every URL the tracker sends. Chunks are sent every 10 s, at 200 events or 500 KB, and about 1 s after a full snapshot; when the page is hidden or left, in pieces of at most 48 KB. A recording stops after `replay.max_minutes`, or when an SPA route enters an excluded path (a later tracked page starts a new recording).
 - `mouse`: `{"pw", "ph", "vw", "vh", "pts": [[x, y, dt], …]}`: page coordinates, at most one point per `mouse_moves.interval_ms` while a mouse or pen moves (the resting position included), `dt` in ms since `ts`; page and viewport size when sent. A chunk every 10 s or 500 points, at most `mouse_moves.max_points` points per page.
 - `snapshot`: a JSON array of two rrweb events, Meta (`href`, `width`, `height`) and FullSnapshot: the page as rendered about 1.5 s after load or an SPA route change, once per page (path, plus the hash of `#/` routes) per session, for heatmap backgrounds. Same masking as `replay`. Taken with a short rrweb recording, or from the running replay recording (which then also holds that full snapshot).
 
-Responses and CORS are as for `/collect`.
+Responses and CORS are as for `/collect`. A chunk of a kind the site does not record (`replay` needs the `replay` feature, `mouse` needs `mouse_moves`, `snapshot` needs `dom_snapshots`) is stored flagged (`site_ok = 0`) within the flagged-traffic allowance; `/chunk` has its own per-client allowances (`chunk_rate_limit_per_minute`, `chunk_kb_per_minute`).
 
 ## `GET /p.gif`
 
@@ -246,7 +246,7 @@ Returns a 1×1 transparent GIF with `Cache-Control: no-store`, and records one h
 |---|---|
 | `site` | Site id (required for attribution). |
 | `t` | Event type (default `pageview`; e.g. `email_open`). |
-| `u` | Page URL (defaults to the `Referer` header). |
+| `u` | Page URL, stored as sent (defaults to the `Referer` header, which is stored with its URL secrets redacted). |
 | `r` | Referrer. |
 | `n` | Event name. |
 | `vid`, `sid`, `uid` | Identity, when known (e.g. personalised email links). |
@@ -263,8 +263,10 @@ Any other parameter is stored as well. No-JS usage:
 Returns JavaScript that hands the site's public configuration to the tracker through its command queue, so load order does not matter:
 
 ```js
-(window.tidesight=window.tidesight||function(){(tidesight.q=tidesight.q||[]).push(arguments)})("_config",{…});
+(typeof window.tidesight=="function"?window.tidesight:window.tidesight=function(){(tidesight.q=tidesight.q||[]).push(arguments)})("_config",{…});
 ```
+
+(An element with `id="tidesight"` in the page's content cannot make it throw.)
 
 `/config.json?site=ID` returns the same object as JSON. The object:
 
@@ -280,7 +282,10 @@ Returns JavaScript that hands the site's public configuration to the tracker thr
 | `hash_mode`, `spa_replace` | Which route changes are pageviews. |
 | `heartbeat_sec`, `flush_sec` | Engagement heartbeat and send interval. |
 | `search_params`, `exclude_paths`, `download_extensions` | Behaviour settings. |
+| `redact_params` | URL parameter patterns whose values the tracker replaces by `redacted` in every URL it sends. |
+| `redact_paths` | Path patterns whose `*` parts the tracker replaces by `redacted` in every URL it sends (since tracker 0.3). |
 | `dnt`, `gpc` | When true, the tracker stays silent for visitors sending that signal. |
+| `max_kb` | The collector's `max_payload_kb`: the tracker keeps each request body under it. |
 
 Cached with `Cache-Control: public, max-age=300` and an `ETag`. The tracker also caches it in localStorage.
 
@@ -313,3 +318,6 @@ Visitor-visible names used by the official tracker. Other trackers should use th
   `perf` transfer size is `tsz` (`ts` is every event's client time); `vital` and `error` updates carry `upd: 1`;
   replay chunks carry `rec`. Collectors fill the `name` column only from a string `n` (several event types use
   `n` as a count). `tidesight('status')` sends a `status` event rather than setting `st` on a later pageview.
+  Limits (2026-10): `/config.js` announces `max_kb`; a batch over `max_events_per_request` answers 400 (its first
+  events stored, the raw body kept); allowances per client (IPv6 by /64), for flagged traffic and per site and day
+  answer 429; low disk space answers 503.

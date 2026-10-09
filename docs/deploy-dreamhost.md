@@ -7,7 +7,8 @@ Layout used below (replace `USER` and the domain names):
 ```
 ~/tidesight/                      code (git clone), never served
 ~/tidesight/tidesight.toml        configuration (outside the web root)
-~/tidesight-data/                 databases, spool, backups, geo databases (outside the web root)
+~/tidesight-data/                 databases, spool, backups, geo databases (outside the web root: the collector
+                                  refuses to run when it finds them inside the web server's document root)
 ~/stats.example.com/              Passenger app root
     passenger_wsgi.py             copied from ~/tidesight/server/python/
     public/                       web root (optional static copies of the tracker)
@@ -36,7 +37,10 @@ It ends with `OVERALL` and a `RECOMMENDATION` line such as `storage_mode = "sqli
 ```sh
 cp ~/tidesight/config/tidesight.example.toml ~/tidesight/tidesight.toml
 chmod 600 ~/tidesight/tidesight.toml
+mkdir -p ~/tidesight-data && chmod 700 ~/tidesight-data   # only your account may read the data
 ```
+
+Tidesight creates its files readable by your account only. Files left by older versions may be more open: `chmod -R go-rwx ~/tidesight-data` once fixes them.
 
 Edit at least:
 
@@ -121,7 +125,7 @@ Optional extras:
 
 ```html
 <!-- Calls made before the script loads are queued -->
-<script>window.tidesight=window.tidesight||function(){(tidesight.q=tidesight.q||[]).push(arguments)};</script>
+<script>window.tidesight=typeof tidesight=="function"?tidesight:function(){(tidesight.q=tidesight.q||[]).push(arguments)};</script>
 <!-- Visitors without JavaScript -->
 <noscript><img src="https://stats.example.com/p.gif?site=example" alt="" width="1" height="1"></noscript>
 <!-- Mark error pages -->

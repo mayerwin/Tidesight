@@ -1,13 +1,28 @@
 /**
- * Gzip through the platform's CompressionStream / DecompressionStream (Node 18+, Workers), runtime-neutral.
+ * Gzip for the collector, runtime-neutral: the platform's CompressionStream / DecompressionStream (Node 18+,
+ * Workers), or a native zlib the platform registers (setNativeZlib: Node).
  *
- * gunzipBounded() mirrors collect.gunzip_bounded(): output is capped, and errors read like Python's.
- * The gzip header is checked here first, in the order zlib checks it, so header problems produce zlib's
- * own messages ("incorrect header check", "unknown compression method", ...). Errors inside the deflate
- * data or the trailer only surface as a generic data error, because the streams do not expose zlib's text.
+ * gunzipBounded() mirrors collect.gunzip_bounded(): output is capped, and errors read like Python's. The gzip
+ * header is checked here first, in the order zlib checks it, so header problems produce zlib's own messages
+ * ("incorrect header check", "unknown compression method", ...). With native zlib (Node), exactly as Python's
+ * zlib.decompressobj: only the first member is decoded (anything after it is ignored), its trailer (CRC-32 and
+ * length) is checked, and zlib's own error texts are kept. With DecompressionStream (the Worker), errors inside
+ * the deflate data only surface as a generic data error, and the platform decides about further members.
  */
 
 export class GzipError extends Error {}
+
+let native = null;
+
+/**
+ * Register a native zlib: {inflateRaw(data, limit, window) → {out, consumed}, crc32(bytes) → number}. inflateRaw
+ * decodes raw deflate data with output windows of `window` bytes (zlib's avail_out per call), throws an error with
+ * code ERR_BUFFER_TOO_LARGE as soon as the output passes `limit` bytes, zlib's own errors otherwise (Node's codes
+ * and texts), and reports in `consumed` the length of the deflate stream in bytes.
+ */
+export function setNativeZlib(impl) {
+  native = impl;
+}
 
 const TRUNCATED = "truncated gzip data";
 const zlibError = (msg) => new GzipError(`Error -3 while decompressing data: ${msg}`);
@@ -28,7 +43,7 @@ function crc32(bytes, start, end) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-/** Validate the gzip member header like zlib's inflate() does; throws GzipError. */
+/** Validate the gzip member header like zlib's inflate() does; throws GzipError. Returns the deflate data's offset. */
 function checkHeader(b) {
   const n = b.length;
   if (n < 2) throw new GzipError(TRUNCATED);
@@ -57,6 +72,55 @@ function checkHeader(b) {
     p += 2;
   }
   if (p >= n) throw new GzipError(TRUNCATED);
+  return p;
+}
+
+const u32 = (b, i) => (b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)) >>> 0;
+
+/**
+ * The member's trailer as zlib's gzip mode checks it once the deflate stream has ended: the CRC-32 as soon as its 4
+ * bytes are there, then the length. `incomplete` is the error when they are not all there (a GzipError), or null.
+ */
+function checkTrailer(body, at, out, incomplete) {
+  if (body.length < at + 4) return incomplete;
+  if (u32(body, at) !== (native.crc32(out) >>> 0)) return zlibError("incorrect data check");
+  if (body.length < at + 8) return incomplete;
+  if (u32(body, at + 4) !== (out.length >>> 0)) return zlibError("incorrect length check");
+  return null;
+}
+
+/**
+ * The first gzip member, decoded with the native zlib exactly as collect.gunzip_bounded does it with Python's
+ * zlib.decompressobj(16 + MAX_WBITS).decompress(body, max_out + 1): one output window of max_out + 1 bytes, in which
+ * zlib also checks the trailer when the stream ends there; whatever follows the member is ignored.
+ */
+function nativeGunzip(body, start, maxOut) {
+  const data = body.subarray(start);
+  const exceeds = new GzipError(`decompressed body exceeds ${maxOut} bytes`);
+  let res;
+  try {
+    // Past maxOut bytes this throws right after the first window: an error further on is never reached, as in Python.
+    res = native.inflateRaw(data, maxOut, maxOut + 1);
+  } catch (exc) {
+    if (exc && exc.code === "ERR_BUFFER_TOO_LARGE") {
+      // The window filled up. Python's call also checked the trailer if the stream ended right there.
+      let whole;
+      try {
+        whole = native.inflateRaw(data, maxOut + 1, maxOut + 1);
+      } catch {
+        throw exceeds; // the stream goes on past the window
+      }
+      throw checkTrailer(body, start + whole.consumed, whole.out, exceeds) || exceeds;
+    }
+    if (exc && exc.code === "Z_BUF_ERROR") throw new GzipError(TRUNCATED); // the input ends inside the stream
+    const errno = exc && typeof exc.errno === "number" ? exc.errno : -3;
+    throw new GzipError(`Error ${errno} while decompressing data: ${(exc && exc.message) || "invalid compressed data"}`);
+  }
+  const out = res.out;
+  if (out.length > maxOut) throw exceeds;
+  const error = checkTrailer(body, start + res.consumed, out, new GzipError(TRUNCATED));
+  if (error) throw error;
+  return out;
 }
 
 function describe(exc) {
@@ -98,7 +162,8 @@ function feed(stream, bytes) {
 
 /** Decompress a gzip body, refusing to produce more than maxOut bytes (GzipError with Python's wording). */
 export async function gunzipBounded(body, maxOut) {
-  checkHeader(body);
+  const start = checkHeader(body);
+  if (native) return nativeGunzip(body, start, maxOut);
   const stream = new DecompressionStream("gzip");
   feed(stream, body);
   try {

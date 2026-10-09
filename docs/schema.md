@@ -23,7 +23,7 @@ Conventions: timestamps are UTC milliseconds (integers); JSON is stored as text;
 | `endpoint` | TEXT | `collect`, `pixel`, or `spool` for corrupt spool lines. |
 | `method` | TEXT | HTTP method. |
 | `ip` | TEXT | `REMOTE_ADDR` as received; truncated or `h:`-hashed when a privacy switch says so. |
-| `headers` | TEXT | JSON object of all request headers, lower-case names; secrets redacted (`[redacted]`), `Cookie` removed (see `cookies`). |
+| `headers` | TEXT | JSON object of all request headers, lower-case names; secrets redacted (`[redacted]`), `Cookie` removed (see `cookies`), `referer` with the secrets in its URL redacted (`redact_params`, `redact_paths`). |
 | `cookies` | TEXT | JSON `{"kept": {ts_* cookies}, "others": count}`. |
 | `query` | TEXT | Raw query string. |
 | `content_type` | TEXT | |
@@ -65,8 +65,8 @@ Indexes: `(site_id, received_at)`, `request_id`.
 
 | Table | Purpose |
 |---|---|
-| `rate_limits(key, minute, hits)` | Per-key request counts for the rate limit (pruned after an hour). |
-| `counters(day, site_id, name, n)` | Operational counters: `rate_limited`, `dropped_dnt`, `dropped_gpc`. |
+| `rate_limits(key, minute, hits)` | Per-minute allowances used (pruned after an hour, in batches; *migration 3* indexes `minute`): `r:<id>` requests, `kb:<id>` kilobytes, `f:<id>` and `*f` flagged requests (`docs/configuration.md`, "Limits and abuse protection"). `<id>` is a keyed hash of the client (`h:` + 16 hex digits), never its address. |
+| `counters(day, site_id, name, n)` | Operational counters per UTC day, under a configured site or `""`: `hits` (stored), `rate_limited`, `chunk_rate_limited`, `flagged_limited`, `over_quota`, `chunk_too_large`, `dropped_dnt`, `dropped_gpc`. |
 | `spool_progress(path, offset, done)` | How far each spool file has been loaded. |
 | `meta(key, value)` | Reserved. |
 
@@ -89,7 +89,7 @@ Indexes: `(site_id, received_at)`, `request_id`.
 | `payload` | BLOB | The chunk body. |
 | `error` | TEXT | `unknown_kind`, `empty_body`. |
 
-Indexes: `(site_id, session_id, page_id, seq)`, `received_at`. Also `rate_limits` and `spool_progress` as in events.db.
+Indexes: `(site_id, session_id, page_id, seq)`, `received_at`. Also `rate_limits` and `spool_progress` as in events.db (*migration 2* indexes `rate_limits(minute)`).
 
 ## derived.db
 
@@ -103,7 +103,7 @@ Rebuilt from the raw data whenever the pipeline version changes (parsers, geo da
 | `requests` | Per raw request: decided client IP and its source header, UA id, cookieless daily hash, clock skew, retry count, internal flag. |
 | `hits` | Per raw hit: session key, page key, effective time (client time corrected for clock skew), duplicate flag, and the fields sessions are built from. |
 | `event_ids`, `px_sessions` | De-duplication of retried events; pixel-hit sessions. |
-| `sessions` | One row per visit: timing, engagement, entry/exit, attribution (source, medium, campaign, GA4 channel, referrer, category), geo, device, screen, language, bot verdict and reasons, internal flag, identity keys, replay/error/rage counts, `day` and `hour` in the site's time zone. |
+| `sessions` | One row per visit: timing, engagement, entry/exit, attribution (source, medium, campaign, GA4 channel, referrer, category), geo, device, screen, language, bot verdict and reasons, internal flag, identity keys, replay/error/rage counts, `day` and `hour` in the site's time zone. A session of more than 20,000 hits is no person's visit: it is built from its first 20,000 hits, marked as a bot (`too_many_hits`) and not rebuilt again, so a flood cannot make enrichment slow. |
 | `pageviews` | One row per pageview: path, title, referrer, navigation type, status, engaged time, scroll depth, time on page, entry/exit. |
 | `events`, `clicks`, `vitals`, `perf`, `errors`, `forms`, `searches`, `misc` | Typed copies of the corresponding hits (non-duplicates), with `day` and `path`. Re-sent vitals keep the last value per page and metric; error count updates merge into the first occurrence. |
 | `id_edges`, `vid_map`, `visitors` | Identity stitching: evidence linking visitor ids, the visitor key and confidence of each id, and per-visitor summaries. |

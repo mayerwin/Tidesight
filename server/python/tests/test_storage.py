@@ -134,6 +134,55 @@ def test_spool_rate_limit_in_memory(make_harness):
     assert [h.post(envelope()).code for _ in range(3)] == [204, 204, 429]
 
 
+def test_spool_budgets_stay_cheap_with_many_clients(tmp_path):
+    import time as _time
+    from tidesight.storage import Budget, Limits, SpoolStore
+    spool = SpoolStore(str(tmp_path))
+    started = _time.perf_counter()
+    for i in range(60000):  # every request from a new client: the old dict rebuild made this quadratic
+        spool._over_budget(Limits(budgets=(Budget("r:c%d" % i, 1, 5, "rate_limited"),)), 1728380000000, "events")
+    assert _time.perf_counter() - started < 5
+    assert len(spool._rate) == 1
+
+
+def test_spool_allowances_of_events_and_chunks_are_separate(tmp_path):
+    """As in SQLite mode, where /collect counts in events.db and /chunk in replay.db."""
+    from tidesight.storage import Budget, Limits, SpoolStore
+    spool = SpoolStore(str(tmp_path))
+    limits = Limits(budgets=(Budget("r:x", 1, 2, "rate_limited"),), site="example")
+    assert [spool.write_request(_request(ms=1728380000000), limits) for _ in range(3)] == ["stored", "stored",
+                                                                                          "rate_limited"]
+    chunk = ChunkRecord(received_at=1728380000000, kind="replay", site_id="example", site_status="ok",
+                        payload=b"x", encoding="identity", meta={})
+    assert [spool.write_chunk(chunk, limits) for _ in range(3)] == ["stored", "stored", "rate_limited"]
+    spool.close()
+
+
+def test_spool_refusals_are_written_summed(tmp_path):
+    from tidesight.storage import Budget, Limits, SpoolStore
+    spool = SpoolStore(str(tmp_path))
+    limits = Limits(budgets=(Budget("r:x", 1, 1, "rate_limited"),), site="example")
+    outcomes = [spool.write_request(_request(ms=1728380000000 + i), limits) for i in range(50)]
+    assert outcomes.count("rate_limited") == 49
+    spool.close()
+    lines = [json.loads(l) for root, _d, files in os.walk(str(tmp_path / "spool" / "events"))
+             for f in files for l in open(os.path.join(root, f), encoding="utf-8")]
+    counters = [l for l in lines if l["k"] == "counter"]
+    assert sum(c["n"] for c in counters) == 49 and len(counters) <= 2
+
+
+def test_spool_loader_counts_stored_hits(tmp_path):
+    from tidesight.storage import SpoolStore
+    spool = SpoolStore(str(tmp_path))
+    rec = _request(ms=1728380000000)
+    rec.site_status, rec.envelope = "ok", {"v": 1}
+    spool.write_request(rec)
+    spool.close()
+    load_spool(str(tmp_path))
+    rows = query_db(str(tmp_path / "events.db"), "SELECT site_id, name, n FROM counters")
+    assert rows == [{"site_id": rec.site_id, "name": "hits", "n": len(rec.hits)}]
+
+
 @pytest.mark.parametrize("journal_mode", ["wal", "delete"])
 def test_concurrent_writers(tmp_path, journal_mode):
     from mp_helpers import collector_worker
@@ -155,3 +204,62 @@ def test_concurrent_writers(tmp_path, journal_mode):
     assert query_db(ev, "SELECT COUNT(*) AS n FROM raw_requests")[0]["n"] == procs * per
     assert query_db(ev, "SELECT COUNT(DISTINCT event_id) AS n FROM raw_hits")[0]["n"] == procs * per * 3
     assert not os.path.exists(os.path.join(data_dir, "spool"))  # no fallback was needed
+
+
+def test_csv_exports_neutralise_formulas():
+    import io as _io
+    from tidesight.maintenance import write_export
+    buf = _io.StringIO()
+    write_export(["a", "b", "c"], [("=HYPERLINK(1)", "@SUM(1)", -3), ("plain", None, b"\x01")], "csv", buf)
+    lines = buf.getvalue().splitlines()
+    assert lines[1] == "'=HYPERLINK(1),'@SUM(1),-3"
+    assert lines[2] == "plain,,01"
+
+
+def test_error_log_budget(caplog):
+    """The first 5 errors of a minute are logged in full, then only counted (a failing database must not fill
+    a small host's disk with log lines)."""
+    import logging
+    from tidesight.errorlog import ErrorLog
+    errors = ErrorLog(per_minute=5)
+    with caplog.at_level(logging.ERROR, logger="tidesight.collect"):
+        for i in range(12):
+            errors.error("failure %d", i)
+        assert [r.getMessage() for r in caplog.records] == ["failure %d" % i for i in range(5)]
+        errors._minute -= 1  # the next minute
+        errors.error("later")
+    assert [r.getMessage() for r in caplog.records][-2:] == ["7 more errors in the previous minute (not logged)",
+                                                            "later"]
+
+
+def test_after_a_database_failure_the_spool_is_used_without_waiting(tmp_path):
+    """A busy database (a long job holding the lock) must not make every request wait busy_timeout again."""
+    import sqlite3 as _sqlite3
+    from tidesight.storage import FallbackStore, SpoolStore, SQLiteStore
+    store = FallbackStore(SQLiteStore(str(tmp_path)), SpoolStore(str(tmp_path)))
+    calls = []
+
+    def busy(*a, **kw):
+        calls.append(1)
+        raise _sqlite3.OperationalError("database is locked")
+
+    store.primary.write_request = busy
+    assert store.write_request(_request()) == "spooled"
+    assert store.write_request(_request()) == "spooled"
+    assert len(calls) == 1  # the second write did not try SQLite
+    store._down_until = 0  # the break is over
+    assert store.write_request(_request()) == "spooled" and len(calls) == 2
+    store.close()
+
+
+def test_maintenance_deletes_in_short_transactions(tmp_path, monkeypatch):
+    from tidesight import maintenance
+    from tidesight.storage import connect, migrate
+    conn = connect(str(tmp_path / "x.db"))
+    migrate(conn, EVENTS_MIGRATIONS)
+    conn.executemany("INSERT INTO raw_hits(request_id, seq, received_at, site_ok, type, data) VALUES (1, ?, 1, 1, ?, '{}')",
+                     [(i, "fp" if i % 2 else "pageview") for i in range(25)])
+    monkeypatch.setattr(maintenance, "BATCH", 4)
+    assert maintenance._delete_in_batches(conn, "raw_hits", "type = 'fp'") == 12
+    assert conn.execute("SELECT COUNT(*) FROM raw_hits").fetchone()[0] == 13
+    conn.close()

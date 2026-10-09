@@ -61,6 +61,21 @@ export function bodyStream(req) {
 }
 
 /**
+ * The request's path and query, for request.url. The URL is never built from what the client sends as Host or as
+ * an absolute-form target: a client-supplied authority with credentials ("u:p@x") would make the Request
+ * constructor throw, and the collector reads the raw target anyway.
+ */
+function pathAndQuery(target) {
+  if (target.startsWith("/")) return target;
+  try {
+    const u = new URL(target);
+    return u.pathname + u.search;
+  } catch {
+    return "/";
+  }
+}
+
+/**
  * Build a Fetch Request from a Node IncomingMessage.
  * @param {object} [options]
  * @param {Array} [options.extraHeaders]  [name, value] pairs that replace any header of the same name
@@ -81,9 +96,9 @@ export function toFetchRequest(req, { extraHeaders = [], scheme = "http" } = {})
   for (const [name, value] of extraHeaders) headers.set(name, value);
   let url;
   try {
-    url = new URL(req.url.startsWith("/") ? `${scheme}://${req.headers.host || "localhost"}${req.url}` : req.url);
+    url = new URL(pathAndQuery(req.url), `${scheme}://localhost`);
   } catch {
-    url = new URL(req.url.startsWith("/") ? `${scheme}://localhost${req.url}` : `${scheme}://localhost/`);
+    url = new URL(`${scheme}://localhost/`);
   }
   const method = req.method;
   const hasBody = method !== "GET" && method !== "HEAD";
@@ -105,9 +120,14 @@ function drain(req, limit) {
   req.resume();
 }
 
+// The bytes of a Response's body attached by the collector (core/collector.mjs RAW_BODY): sent as they are, so a
+// cached tracker file is not copied for every response.
+const RAW_BODY = Symbol.for("tidesight.rawBody");
+
 /**
  * Write a Fetch Response to a Node ServerResponse. A request body the handler did not read is drained (up to
- * drainLimit bytes, then the connection is dropped) so the client still receives the response.
+ * drainLimit bytes, then the connection is dropped) so the client still receives the response, unless the
+ * response closes the connection (Connection: close), which then ends without reading it.
  */
 export async function sendResponse(req, res, response, { drainLimit = 16 * 1024 * 1024 } = {}) {
   const headers = [];
@@ -115,11 +135,19 @@ export async function sendResponse(req, res, response, { drainLimit = 16 * 1024 
     if (name !== "set-cookie") headers.push(name, value);
   });
   for (const cookie of response.headers.getSetCookie()) headers.push("set-cookie", cookie);
-  const body = response.body && req.method !== "HEAD" ? new Uint8Array(await response.arrayBuffer()) : null;
+  let body = null;
+  if (response.body && req.method !== "HEAD") {
+    body = response[RAW_BODY] instanceof Uint8Array ? response[RAW_BODY] : new Uint8Array(await response.arrayBuffer());
+  }
   if (res.destroyed) return;
   res.writeHead(response.status, headers);
   res.end(body);
-  if (!req.complete) drain(req, drainLimit);
+  if (req.complete) return;
+  if (String(response.headers.get("connection")).toLowerCase() === "close") {
+    res.once("finish", () => req.socket && req.socket.destroy());
+  } else {
+    drain(req, drainLimit);
+  }
 }
 
 /** Last-resort error response. */

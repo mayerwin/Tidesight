@@ -20,6 +20,26 @@ export function pyStrip(s) {
   return a === 0 && b === s.length ? s : s.slice(a, b);
 }
 
+/** str.rstrip() */
+export function pyRstrip(s) {
+  let b = s.length;
+  while (b > 0 && PY_SPACE.has(s.charCodeAt(b - 1))) b -= 1;
+  return b === s.length ? s : s.slice(0, b);
+}
+
+/** len(s) — Python counts code points (a surrogate pair is one). */
+export function pyLen(s) {
+  let n = s.length;
+  for (let i = 0; i + 1 < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      n -= 1;
+      i += 1;
+    }
+  }
+  return n;
+}
+
 /** s[:n] — Python slices by code point, never splitting a surrogate pair. */
 export function pySlice(s, n) {
   if (s.length <= n) return s;
@@ -66,12 +86,33 @@ function floatToInt(f) {
 
 const ND_RUN = /^\p{Nd}$/u;
 
-/** Value of a Unicode decimal digit: they come in contiguous runs of ten starting at zero. */
+// The runs of Unicode decimal digits (General_Category Nd, Unicode 16.0): [first code point, length]. Each run is
+// made of whole sets of ten, zero first, so a digit's value is (cp - first) % 10.
+const ND_RUNS = [0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66, 0xde6,
+  0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40,
+  0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0xff10, 0x104a0, 0x10d30, 0x10d40, 0x11066,
+  0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0, 0x11650, 0x116c0, [0x116d0, 20], 0x11730, 0x118e0,
+  0x11950, 0x11bf0, 0x11c50, 0x11d50, 0x11da0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50, 0x16d70, 0x1ccf0,
+  [0x1d7ce, 50], 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0].map((r) => (Array.isArray(r) ? r : [r, 10]));
+
+/** Value of a Unicode decimal digit: a binary search in ND_RUNS (a walk back to the run's zero for a digit the
+ * table does not know, from a newer Unicode than the table's). */
 function decimalValue(cp) {
+  let lo = 0;
+  let hi = ND_RUNS.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (ND_RUNS[mid][0] <= cp) lo = mid;
+    else hi = mid - 1;
+  }
+  const [first, length] = ND_RUNS[lo];
+  if (cp >= first && cp < first + length) return (cp - first) % 10;
   let start = cp;
   while (start > 0 && ND_RUN.test(String.fromCodePoint(start - 1))) start -= 1;
   return (cp - start) % 10;
 }
+
+const MAX_INT_DIGITS = 4300; // int() refuses longer digit strings (ValueError) since Python 3.10.7
 
 /**
  * The collector's _int(value): ints within int64, floats truncated, digit strings parsed; else None.
@@ -87,13 +128,19 @@ export function pyIntOf(value) {
   if (typeof value !== "string") return null; // booleans, None, lists, dicts
   // value.strip().lstrip("-").isdigit() and then int(value.strip()): one optional minus and decimal digits.
   const s = pyStrip(value);
+  // Over 4300 digits int() refuses (→ None): decided on the length first, before any conversion work (a digit
+  // is one or two UTF-16 units).
+  if (s.length > 2 * MAX_INT_DIGITS + 1) return null;
   const m = /^(-?)(\p{Nd}+)$/u.exec(s);
   if (!m) return null;
   let digits = m[2];
   if (!/^[0-9]+$/.test(digits)) {
-    digits = Array.from(digits, (ch) => String(decimalValue(ch.codePointAt(0)))).join("");
+    if (pyLen(digits) > MAX_INT_DIGITS) return null;
+    let ascii = "";
+    for (const ch of digits) ascii += String(decimalValue(ch.codePointAt(0)));
+    digits = ascii;
   }
-  if (digits.length > 4300) return null; // int() refuses (ValueError) → None
+  if (digits.length > MAX_INT_DIGITS) return null;
   return fromBig(BigInt(m[1] + digits));
 }
 
@@ -241,31 +288,36 @@ function escapeClass(s) {
   return s.replace(CLASS_SPECIAL, "\\$&");
 }
 
-/** fnmatch.translate as a JavaScript RegExp (same semantics as fnmatch.fnmatchcase). */
+const STAR = Symbol("*");
+
+/**
+ * fnmatch.translate as a JavaScript RegExp (same semantics as fnmatch.fnmatchcase). As CPython 3.9+ does, each
+ * interior `*` followed by a fixed piece is matched as an atomic group, emulated with a lookahead and a
+ * backreference (`(?=([\s\S]*?FIXED))\1`): the shortest match is never revisited, so a pattern with several
+ * stars cannot backtrack polynomially on a long subject (an attacker's Origin header).
+ */
 export function fnmatchCompile(pattern) {
   const pat = Array.from(pattern); // Python iterates by code point
   const n = pat.length;
-  let res = "";
-  let lastStar = false;
+  const items = []; // regex pieces, and STAR for each run of stars
+  const add = (piece) => items.push(piece);
   let i = 0;
   while (i < n) {
     const c = pat[i];
     i += 1;
     if (c === "*") {
-      if (!lastStar) res += "[\\s\\S]*";
-      lastStar = true;
+      if (!items.length || items[items.length - 1] !== STAR) add(STAR); // compress consecutive stars
       continue;
     }
-    lastStar = false;
     if (c === "?") {
-      res += "[\\s\\S]";
+      add("[\\s\\S]");
     } else if (c === "[") {
       let j = i;
       if (j < n && pat[j] === "!") j += 1;
       if (j < n && pat[j] === "]") j += 1;
       while (j < n && pat[j] !== "]") j += 1;
       if (j >= n) {
-        res += "\\[";
+        add("\\[");
         continue;
       }
       const stuff = pat.slice(i, j);
@@ -299,16 +351,36 @@ export function fnmatchCompile(pattern) {
       i = j + 1;
       const flat = chunks.join("-");
       if (!flat) {
-        res += "(?!)";
+        add("(?!)");
       } else if (flat === "!") {
-        res += "[\\s\\S]";
+        add("[\\s\\S]");
       } else {
         const negate = chunks[0].startsWith("!");
         if (negate) chunks[0] = chunks[0].slice(1);
-        res += "[" + (negate ? "^" : "") + chunks.map(escapeClass).join("-") + "]";
+        add("[" + (negate ? "^" : "") + chunks.map(escapeClass).join("-") + "]");
       }
     } else {
-      res += c.replace(RE_SYNTAX, "\\$&");
+      add(c.replace(RE_SYNTAX, "\\$&"));
+    }
+  }
+  // Deal with the stars as fnmatch.translate does: fixed pieces at the start, then `STAR fixed` pairs.
+  let res = "";
+  let k = 0;
+  while (k < items.length && items[k] !== STAR) res += items[k++];
+  let group = 0;
+  while (k < items.length) {
+    k += 1; // the STAR
+    if (k === items.length) {
+      res += "[\\s\\S]*";
+      break;
+    }
+    let fixed = "";
+    while (k < items.length && items[k] !== STAR) fixed += items[k++];
+    if (k === items.length) {
+      res += "[\\s\\S]*" + fixed;
+    } else {
+      group += 1;
+      res += `(?=([\\s\\S]*?${fixed}))\\${group}`;
     }
   }
   return new RegExp("^(?:" + res + ")$", "u");

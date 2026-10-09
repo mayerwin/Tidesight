@@ -39,9 +39,16 @@ CONFIG = """
 data_dir = "{data}"
 secret = "{secret}"
 rate_limit_per_minute = 5
+rate_limit_kb_per_minute = 16
 rate_limit_key = "x-test-client"
+rate_limit_proxies = ["127.0.0.1/32", "::1/128"]
 max_payload_kb = 8
 max_chunk_kb = 16
+max_events_per_request = 20
+chunk_rate_limit_per_minute = 4
+chunk_kb_per_minute = 24
+flagged_per_minute = 3
+flagged_global_per_minute = 1000
 
 [headers]
 secret_patterns = ["*token*", "*key*", "*secret*", "*password*"]
@@ -49,6 +56,11 @@ secret_patterns = ["*token*", "*key*", "*secret*", "*password*"]
 [sites.conf]
 origins = ["https://conf.example", "https://*.conf.example"]
 server_cookie_domain = ".conf.example"
+features.replay = true
+features.dom_snapshots = true
+
+[sites.quota]
+max_hits_per_day = 3
 
 [sites.priv]
 origins = ["https://priv.example"]
@@ -58,6 +70,14 @@ privacy.honour_dnt = true
 [sites.hashed]
 privacy.hash_ip = true
 """
+
+# URL redaction test vectors (redact.py), shared with the tracker's tests; the "redact" site uses their patterns.
+VECTORS = json.load(open(os.path.join(os.path.dirname(__file__), "redact_vectors.json"), encoding="utf-8"))
+CONFIG += """
+[sites.redact]
+redact_params = %s
+redact_paths = %s
+""" % (json.dumps(VECTORS["redact_params"]), json.dumps(VECTORS["redact_paths"]))
 
 
 def _free_port() -> int:
@@ -122,7 +142,7 @@ class Running:
 
     def request(self, method: str, path: str, body: Optional[bytes] = None, headers: Optional[Dict[str, str]] = None,
                 client: Optional[str] = None) -> Tuple[int, Dict[str, str], bytes]:
-        h = {"X-Test-Client": client or uuid.uuid4().hex}
+        h = {"X-Test-Client": client or _client_ip()}
         h.update(headers or {})
         req = urllib.request.Request(self.base + path, data=body, method=method, headers=h)
         try:
@@ -212,6 +232,12 @@ def connector(request, tmp_path_factory):
     running = _launch(request.param, tmp_path_factory.mktemp("conformance-" + request.param))
     yield running
     _stop(running)
+
+
+def _client_ip() -> str:
+    """A random client address (the collectors believe X-Test-Client only when it is an IP address)."""
+    n = uuid.uuid4().int
+    return "10.%d.%d.%d" % (n % 256, (n >> 8) % 256, (n >> 16) % 254 + 1)
 
 
 def _vid() -> str:
@@ -397,9 +423,228 @@ def test_storage_failure_without_spool_fallback_answers_503(connector, tmp_path)
 def test_rate_limit(connector):
     if time.time() % 60 > 50:  # the limit counts per clock minute: do not straddle two
         time.sleep(61 - time.time() % 60)
-    client = uuid.uuid4().hex
+    client = _client_ip()
     codes = [connector.post(_env(_vid()), client=client)[0] for _ in range(7)]
     assert codes == [204] * 5 + [429] * 2
+
+
+# ---------------------------------------------------------------------------
+# Limits and abuse protection
+# ---------------------------------------------------------------------------
+
+def _same_minute(seconds: int = 50) -> None:
+    """Allowances count per clock minute: wait for a fresh one when a test could straddle two."""
+    if time.time() % 60 > seconds:
+        time.sleep(61 - time.time() % 60)
+
+
+def _counter(connector: Running, site: str, name: str) -> int:
+    rows = connector.rows("events.db", "SELECT n FROM counters WHERE day = ? AND site_id = ? AND name = ?",
+                          (time.strftime("%Y-%m-%d", time.gmtime()), site, name))
+    return rows[0]["n"] if rows else 0
+
+
+def test_too_many_events_keep_the_raw_body(connector):
+    vid = _vid()
+    env = _env(vid, events=[{"t": "event", "n": "e%d" % i} for i in range(25)])
+    raw = json.dumps(env).encode()
+    assert connector.post(None, raw=raw)[0] == 400
+    assert [h["name"] for h in connector.hits_for(vid)] == ["e%d" % i for i in range(20)]
+    req = connector.request_for(vid)
+    assert req["error"] == "too_many_events:25" and req["body"] == raw
+
+
+def test_ipv6_clients_share_their_network_allowance(connector):
+    _same_minute()
+    a, b = uuid.uuid4().int % 65536, uuid.uuid4().int % 65535
+    codes = [connector.post(_env(_vid()), client="2001:db8:%x:%x::%x" % (a, b, i + 1))[0] for i in range(6)]
+    assert codes == [204] * 5 + [429]
+    assert connector.post(_env(_vid()), client="2001:db8:%x:%x::1" % (a, b + 1))[0] == 204  # another /64
+
+
+def test_kilobyte_allowance(connector):
+    _same_minute()
+    client = _client_ip()
+    big = lambda: _env(_vid(), events=[{"t": "event", "n": "x", "p": {"pad": "y" * 6500}}])  # noqa: E731  ~7 KB
+    assert [connector.post(big(), client=client)[0] for _ in range(3)] == [204, 204, 429]
+
+
+def test_flagged_requests_have_their_own_allowance(connector):
+    _same_minute()
+    client = _client_ip()
+    before = _counter(connector, "", "flagged_limited")
+    codes = [connector.post(_env(_vid(), site="nope"), client=client)[0] for _ in range(4)]
+    assert codes == [204, 204, 204, 429]
+    # A malformed body still answers 400 (retrying cannot help), stored or not.
+    assert connector.post(None, raw=b"{oops", client=client)[0] == 400
+    assert _counter(connector, "", "flagged_limited") == before + 2
+
+
+def test_each_hit_and_the_stored_headers_are_charged(connector):
+    _same_minute()
+    client = _client_ip()
+    tiny = lambda: _env(_vid(), events=[{"t": "e"}] * 20)  # noqa: E731  20 hits cost 20 × 256 bytes at least
+    assert [connector.post(tiny(), client=client)[0] for _ in range(3)] == [204, 204, 429]
+    client = _client_ip()
+    pad = {"X-Pad": "p" * 7000}
+    assert [connector.post(_env(_vid()), headers=pad, client=client)[0] for _ in range(3)] == [204, 204, 429]
+
+
+def test_the_key_header_uses_its_last_value_without_port(connector):
+    _same_minute()
+    ip = "198.51.100.%d" % (uuid.uuid4().int % 250 + 1)
+    codes = [connector.post(_env(_vid()), client="10.9.8.%d, %s:%d" % (i, ip, 40000 + i))[0] for i in range(6)]
+    assert codes == [204] * 5 + [429]
+
+
+def test_the_key_header_is_believed_only_when_it_is_an_address(connector):
+    _same_minute()
+    tag = uuid.uuid4().hex[:8]
+    # Not an address: the request counts as coming from the proxy itself (127.0.0.1), whatever the header says.
+    codes = [connector.post(_env(_vid()), client="nobody-%s-%d" % (tag, i))[0] for i in range(6)]
+    assert codes == [204] * 5 + [429]
+
+
+def test_the_key_header_is_believed_only_from_listed_proxies(connector, tmp_path):
+    running = _launch(connector.name, tmp_path, CONFIG.replace('rate_limit_proxies = ["127.0.0.1/32", "::1/128"]',
+                                                               "rate_limit_proxies = []"))
+    try:
+        _same_minute()
+        codes = [running.post(_env(_vid()))[0] for _ in range(6)]  # a different X-Test-Client each time
+        assert codes == [204] * 5 + [429]
+    finally:
+        _stop(running)
+
+
+def test_nesting_deeper_than_64_levels_is_unreadable(connector):
+    marker = uuid.uuid4().hex
+    deep = {"v": 1, "site": "conf", "events": [{"t": "event", "p": {}}]}
+    node = deep["events"][0]["p"]
+    for _ in range(70):
+        node["x"] = {}
+        node = node["x"]
+    raw = json.dumps(deep).encode()
+    assert connector.post(None, raw=raw, headers={"X-Marker": marker})[0] == 400
+    row = connector.rows("events.db", "SELECT error, body FROM raw_requests WHERE headers LIKE ?", ("%" + marker + "%",))[0]
+    assert row["error"] == "bad_json: nested deeper than 64 levels" and row["body"] == raw
+
+
+def test_counter_only_requests_stay_within_the_allowance(connector):
+    _same_minute()
+    client = _client_ip()
+    before = _counter(connector, "priv", "dropped_dnt")
+    headers = {"Origin": "https://priv.example", "DNT": "1"}
+    codes = [connector.post(_env(_vid(), site="priv"), headers=headers, client=client)[0] for _ in range(7)]
+    assert codes == [204] * 5 + [429] * 2  # over the allowance: refused before the body is read
+    assert _counter(connector, "priv", "dropped_dnt") == before + 5
+
+
+def test_a_client_over_its_allowance_is_refused_before_parsing(connector):
+    _same_minute()
+    client = _client_ip()
+    before = _counter(connector, "conf", "rate_limited")
+    assert [connector.post(_env(_vid()), client=client, path="/collect?site=conf")[0] for _ in range(5)] == [204] * 5
+    marker = "early-" + uuid.uuid4().hex
+    status, headers, _ = connector.post(None, raw=('{"broken": "%s"' % marker).encode(), client=client,
+                                        path="/collect?site=conf")
+    assert status == 429 and headers.get("retry-after") == "60"  # 429, not 400: the body is never parsed
+    assert not connector.rows("events.db", "SELECT id FROM raw_requests WHERE body LIKE ?", ("%" + marker + "%",))
+    assert _counter(connector, "conf", "rate_limited") == before + 1
+    sid = "s" + uuid.uuid4().hex[:15]
+    for _ in range(4):  # chunk_rate_limit_per_minute is 4
+        assert connector.request("POST", "/chunk?site=conf&k=replay&seq=0&sid=" + sid, b"[]",
+                                 {"Origin": "https://conf.example"}, client=client)[0] == 204
+    before = _counter(connector, "conf", "chunk_rate_limited")
+    assert connector.request("POST", "/chunk?site=conf&k=nonsense&sid=" + sid, b"x" * 100,
+                             {"Origin": "https://conf.example"}, client=client)[0] == 429
+    assert _counter(connector, "conf", "chunk_rate_limited") == before + 1
+
+
+def test_hits_are_charged_as_stored(connector):
+    # 9e15 is stored as 9000000000000000.0 (Python's float repr): the KB allowance (16 here) counts what is
+    # stored, 26 KB for this 7 KB body.
+    body = ('{"v":1,"site":"conf","vid":"v1","events":[{"t":"event","n":"x","p":{"a":[%s]}}]}'
+            % ",".join(["9e15"] * 1400))
+    assert connector.post(None, raw=body.encode(), client=_client_ip())[0] == 429
+
+
+def test_allowance_keys_never_hold_an_address(connector):
+    client = _client_ip()
+    connector.post(_env(_vid()), client=client)
+    keys = [r["key"] for r in connector.rows("events.db", "SELECT key FROM rate_limits")]
+    assert keys and not any(client in k for k in keys)
+    expected = "r:h:" + hmac.new(SECRET.encode(), client.encode(), hashlib.sha256).hexdigest()[:16]
+    assert expected in keys
+
+
+def test_a_few_invalid_events_do_not_flag_a_batch(connector):
+    _same_minute()
+    client = _client_ip()
+    env = lambda: _env(_vid(), events=[{"t": "event", "n": "ok"}, "junk"])  # noqa: E731
+    assert [connector.post(env(), client=client)[0] for _ in range(4)] == [204] * 4  # flagged_per_minute is 3
+
+
+def test_flagged_global_allowance(connector, tmp_path):
+    running = _launch(connector.name, tmp_path, CONFIG.replace("flagged_global_per_minute = 1000",
+                                                               "flagged_global_per_minute = 3"))
+    try:
+        _same_minute()
+        codes = [running.post(_env(_vid(), site="nope"))[0] for _ in range(4)]  # a new client each time
+        assert codes == [204, 204, 204, 429]
+        assert running.post(_env(_vid()))[0] == 204
+    finally:
+        _stop(running)
+
+
+def test_daily_quota_per_site(connector):
+    vid = _vid()
+    two = _env(vid, site="quota", events=[{"t": "event", "n": "a"}, {"t": "event", "n": "b"}])
+    first = connector.post(two, headers={"Origin": "https://quota.example"})[0]
+    second = connector.post(two, headers={"Origin": "https://quota.example"})[0]
+    assert (first, second) == (204, 429)  # 2 + 2 > 3
+    assert len(connector.hits_for(vid)) == 2
+    assert (_counter(connector, "quota", "hits"), _counter(connector, "quota", "over_quota")) == (2, 1)
+
+
+def test_stored_hits_are_counted_per_site_and_day(connector):
+    before = _counter(connector, "conf", "hits")
+    assert connector.post(_env(_vid()))[0] == 204
+    assert _counter(connector, "conf", "hits") == before + 2
+
+
+def test_chunk_allowances(connector):
+    _same_minute()
+    client = _client_ip()
+    send = lambda body: connector.request("POST", "/chunk?site=conf&k=replay&seq=0", body,  # noqa: E731
+                                          {"Origin": "https://conf.example"}, client=client)[0]
+    assert [send(b"[]") for _ in range(5)] == [204] * 4 + [429]
+    client = _client_ip()
+    assert [send(b"x" * 10000) for _ in range(3)] == [204, 204, 429]  # 10 + 10 + 10 > 24 KB
+    assert _counter(connector, "conf", "chunk_rate_limited") >= 2
+
+
+def test_chunks_of_a_feature_the_site_does_not_record_are_flagged(connector):
+    sid = "s" + uuid.uuid4().hex[:15]
+    assert connector.request("POST", "/chunk?site=conf&k=mouse&seq=0&sid=" + sid, b"[]",
+                             {"Origin": "https://conf.example"})[0] == 204  # mouse_moves is off for "conf"
+    assert [r["site_ok"] for r in connector.rows("replay.db", "SELECT site_ok FROM chunks WHERE session_id = ?",
+                                                 (sid,))] == [0]
+
+
+def test_low_disk_space_refuses_writes(connector, tmp_path):
+    if connector.name == "worker":
+        pytest.skip("D1 manages its own storage")
+    running = _launch(connector.name, tmp_path, CONFIG.replace("[server]\n", "[server]\nmin_free_disk_mb = 1000000000\n"))
+    try:
+        status, headers, _ = running.post(_env(_vid()))
+        assert status == 503 and headers.get("retry-after") == "300"
+        assert running.request("POST", "/chunk?site=conf&k=replay&seq=0", b"[]", {"Origin": "https://conf.example"})[0] == 503
+        status, _, body = running.request("GET", "/p.gif?site=conf")
+        assert status == 200 and body.startswith(b"GIF89a")
+        assert not os.path.exists(os.path.join(running.data_dir, "events.db")) or \
+            running.rows("events.db", "SELECT COUNT(*) AS n FROM raw_requests")[0]["n"] == 0
+    finally:
+        _stop(running)
 
 
 def test_server_cookie(connector):
@@ -413,14 +658,31 @@ def test_server_cookie(connector):
 
 def test_privacy_truncate_and_dnt(connector):
     vid = _vid()
-    assert connector.post(_env(vid, site="priv"), headers={"Origin": "https://priv.example",
-                                                           "X-Forwarded-For": "203.0.113.77, 10.1.2.3"})[0] == 204
+    assert connector.post(_env(vid, site="priv"), headers={
+        "Origin": "https://priv.example", "X-Forwarded-For": "203.0.113.77, 10.1.2.3", "X-Originating-IP": "203.0.113.78",
+        "Fly-Client-IP": "2001:db8:1:2::5", "CloudFront-Viewer-Address": "198.51.100.9:46532",
+        "X-App-Version": "1.2.3.4", "X-Remote-Addr": "198.51.100.23", "Via": "1.1 203.0.113.9 (proxy)",
+        "X-Real-IP": "2002:cb00:7105:1234::1"})[0] == 204
     req = connector.request_for(vid)
     assert req["ip"] == "127.0.0.0"
-    assert json.loads(req["headers"])["x-forwarded-for"] == "203.0.113.0, 10.1.2.0"
+    headers = json.loads(req["headers"])
+    assert headers["x-forwarded-for"] == "203.0.113.0, 10.1.2.0"
+    # Any header whose name contains ip, forwarded, client or addr is treated as IP-bearing, and Via.
+    assert (headers["x-originating-ip"], headers["fly-client-ip"], headers["cloudfront-viewer-address"]) == \
+        ("203.0.113.0", "2001:db8:1::", "198.51.100.0:46532")
+    assert (headers["x-remote-addr"], headers["via"]) == ("198.51.100.0", "1.1 203.0.113.0 (proxy)")
+    assert headers["x-real-ip"] == "2002:cb00:7100::"  # 6to4: the IPv4 address inside is cut to its /24
+    assert headers["x-app-version"] == "1.2.3.4"
     vid2 = _vid()
     assert connector.post(_env(vid2, site="priv"), headers={"Origin": "https://priv.example", "DNT": "1"})[0] == 204
     assert connector.hits_for(vid2) == []
+
+
+def test_merged_cookie_headers_never_leak_into_a_kept_value(connector):
+    vid = _vid()
+    connector.post(_env(vid), headers={"Cookie": "ts_vid=%s.1, sessionid=SECRET-SESSION; ts_ses=s.1" % vid})
+    cookies = json.loads(connector.request_for(vid)["cookies"])
+    assert cookies["kept"] == {"ts_vid": vid + ".1", "ts_ses": "s.1"}
 
 
 def test_privacy_hash_matches_python(connector):
@@ -444,6 +706,41 @@ def test_pixel(connector):
     hit = connector.hits_for(vid)[0]
     assert (hit["type"], hit["name"], hit["url"]) == ("email_open", "news", "https://conf.example/landing")
     assert json.loads(hit["data"]) == {"site": "conf", "t": "email_open", "n": "news", "vid": vid, "x": ["1", "2"]}
+
+
+def test_stored_referer_is_redacted(connector):
+    """The Referer may hold the full page URL (beacons, the pixel): stored with its secrets redacted, by the
+    site's redact_params and redact_paths, exactly as redact.py does (docs/connectors.md, "URL redaction")."""
+    wrong = []
+    for url, expected in VECTORS["cases"]:
+        if not url:
+            continue
+        vid = _vid()
+        status, _, _ = connector.request("GET", "/p.gif?site=redact&vid=%s" % vid, headers={"Referer": url})
+        assert status == 200
+        stored = json.loads(connector.request_for(vid)["headers"]).get("referer")
+        page = connector.hits_for(vid)[0]["url"]
+        if stored != expected or page != expected:
+            wrong.append((url, expected, stored, page))
+    assert not wrong
+
+
+def test_referer_of_collect_and_chunk_is_redacted(connector):
+    vid = _vid()
+    assert connector.post(_env(vid), headers={"Referer": "https://conf.example/a?token=abc&x=1#sid=2"})[0] == 204
+    stored = json.loads(connector.request_for(vid)["headers"])["referer"]
+    assert stored == "https://conf.example/a?token=redacted&x=1#sid=redacted"
+    sid = "s" + uuid.uuid4().hex[:15]
+    assert connector.request("POST", "/chunk?site=conf&k=replay&sid=%s&seq=0" % sid, b"[]",
+                             {"Origin": "https://conf.example",
+                              "Referer": "https://conf.example/a;jsessionid=X?sig=1"})[0] == 204
+    meta = json.loads(connector.rows("replay.db", "SELECT meta FROM chunks WHERE session_id = ?", (sid,))[0]["meta"])
+    assert meta["referer"] == "https://conf.example/a;jsessionid=redacted?sig=redacted"
+    vid = _vid()  # an unknown site: the default patterns
+    connector.request("GET", "/p.gif?site=nosuchsite&vid=%s" % vid,
+                      headers={"Referer": "https://user:pw@elsewhere.example/p?password=1"})
+    stored = json.loads(connector.request_for(vid)["headers"])["referer"]
+    assert stored == "https://redacted@elsewhere.example/p?password=redacted"
 
 
 def test_chunk(connector):
@@ -471,7 +768,8 @@ def test_config_js_matches_python(connector):
     status, headers, body = connector.request("GET", "/config.js?site=conf")
     assert status == 200 and headers["content-type"].startswith("application/javascript")
     text = body.decode()
-    assert text.startswith("(window.tidesight=window.tidesight||function(){(tidesight.q=tidesight.q||[]).push(arguments)})(\"_config\",")
+    assert text.startswith('(typeof window.tidesight=="function"?window.tidesight:window.tidesight=function(){'
+                           '(tidesight.q=tidesight.q||[]).push(arguments)})("_config",')
     assert json.loads(text[text.index('"_config",') + 10:text.rindex(");")]) == expected
     status, headers, body = connector.request("GET", "/config.json?site=conf")
     assert json.loads(body) == expected and headers["etag"] == '"%s"' % expected["cv"]

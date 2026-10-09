@@ -14,9 +14,20 @@ synchronous = "normal"                   # "normal" or "full"
 busy_timeout_ms = 10000                  # how long a writer waits for the lock
 max_payload_kb = 64                      # max /collect body on the wire
 max_chunk_kb = 1024                      # max /chunk body (replay, mouse movement)
-max_decompressed_kb = 4096               # max body after gzip decompression
-max_events_per_request = 500
-rate_limit_per_minute = 600              # requests per IP per minute; 0 disables
+max_decompressed_kb = 1024               # max body after gzip decompression
+max_events_per_request = 200             # events stored as hits per request; a longer batch keeps its raw body
+# Abuse and flood protection: per client (IPv4 address or IPv6 /64) and minute; 0 disables one.
+# See "Limits and abuse protection" in docs/configuration.md.
+rate_limit_per_minute = 600              # /collect and /p.gif requests
+rate_limit_kb_per_minute = 2048          # KB of /collect bodies, after decompression
+chunk_rate_limit_per_minute = 120        # /chunk requests (replay, mouse, snapshots)
+chunk_kb_per_minute = 8192               # KB of /chunk bodies
+flagged_per_minute = 30                  # requests that would only be stored flagged (unknown site, wrong origin...)
+flagged_global_per_minute = 300          # the same, all clients together
+rate_limit_key = "remote_addr"           # behind a proxy or Cloudflare: the header with the visitor's address
+rate_limit_proxies = []                  # and the proxies it is believed from, e.g. ["cloudflare"] or ["10.0.0.0/8"]
+rate_limit_ipv6_prefix = 64              # IPv6 clients are grouped by this prefix
+min_free_disk_mb = 512                   # below this free space in data_dir, writes answer 503
 cors = "reflect"                         # "reflect" any Origin on ingest endpoints, or "allowed" origins only
 accept_ch = true                         # send Accept-CH so browsers supply Client Hints
 public_url = ""                          # e.g. "https://stats.example.com"; used in generated snippets
@@ -69,12 +80,21 @@ heartbeat_sec = 30                       # engagement heartbeat while the page i
 idle_sec = 300                           # engagement time stops after this long without input
 flush_sec = 5                            # how often queued events are sent
 search_params = ["q", "s", "search", "query", "keyword"]
+redact_params = ["*token*", "*password*", "*passwd*", "pwd", "pass", "*secret*", "key", "*_key", "*-key",
+                 "*api_key*", "*api-key*", "*apikey*", "*access_key*", "*private_key*", "auth", "*authorization*",
+                 "jwt", "otp", "*mfa*", "*session*", "*sessid*", "sid", "ticket", "*signature*", "sig",
+                 "*credential*"]
+                                         # URL parameters whose values never leave the browser ("redacted")
+redact_paths = []                        # paths with a secret in them, e.g. ["/reset-password/*"]: each * -> "redacted"
 exclude_paths = []                       # glob patterns the tracker ignores, e.g. ["/admin/*"]
 download_extensions = ["pdf", "zip", "dmg", "exe", "msi", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
                        "csv", "txt", "rtf", "odt", "ods", "odp", "epub", "mp3", "mp4", "mov", "avi",
                        "wav", "gz", "tgz", "rar", "7z", "apk", "iso", "pkg", "deb", "rpm", "xml", "json"]
 public = false                           # publish a public stats page for this site
 public_metrics = ["visitors", "pageviews", "pages", "sources", "countries", "devices"]
+max_hits_per_day = 0                     # stored hits per UTC day and site (429 beyond), 0 = off. A quota
+                                         # bounds storage but a flood can use it up and lock real visitors
+                                         # out until midnight UTC: set one only if storage matters more
 
 [defaults.features]
 pageviews = true

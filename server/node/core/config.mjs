@@ -9,17 +9,30 @@
 
 import { loads, dumps, PyFloat } from "./pyjson.mjs";
 import { fnmatchCompile, normalizeOrigin } from "./pycompat.mjs";
+import { parseNetwork } from "./anonymize.mjs";
+import { patterns } from "./redact.mjs";
 
 export const FORMAT = "tidesight-resolved-config/1";
 
 export const SERVER_DEFAULTS = {
   data_dir: "", storage_mode: "sqlite", journal_mode: "wal", synchronous: "normal", busy_timeout_ms: 10000,
-  max_payload_kb: 64, max_chunk_kb: 1024, max_decompressed_kb: 4096, max_events_per_request: 500,
-  rate_limit_per_minute: 600, rate_limit_key: "remote_addr", cors: "reflect", accept_ch: true, public_url: "",
+  max_payload_kb: 64, max_chunk_kb: 1024, max_decompressed_kb: 256, max_events_per_request: 200,
+  // Abuse and flood protection (docs/configuration.md, "Limits and abuse protection"); 0 disables one.
+  rate_limit_per_minute: 600, rate_limit_kb_per_minute: 2048, chunk_rate_limit_per_minute: 120,
+  chunk_kb_per_minute: 8192, flagged_per_minute: 30, flagged_global_per_minute: 300,
+  rate_limit_key: "remote_addr", rate_limit_proxies: [], rate_limit_ipv6_prefix: 64, min_free_disk_mb: 512,
+  cors: "reflect", accept_ch: true, public_url: "",
   secret: "", static_dir: "", dashboard_dir: "", store_raw_body: false, spool_fallback: true, log_file: "",
 };
 
-const HEADERS_DEFAULTS = { secret_patterns: ["*token*", "*key*", "*secret*", "*password*"], drop: [], cookie_names: ["ts_*"] };
+// config.SITE_DEFAULTS["max_hits_per_day"] (off), for a resolved file written before the key existed.
+const MAX_HITS_PER_DAY = 0;
+
+const HEADERS_DEFAULTS = {
+  secret_patterns: ["*token*", "*key*", "*secret*", "*password*", "*auth*", "*session*", "*jwt*", "*assertion*",
+    "*credential*", "*signature*", "*cookie*"],
+  drop: [], cookie_names: ["ts_*"],
+};
 
 const PRIVACY_DEFAULTS = { hash_ip: false, truncate_ip: false, honour_dnt: false, honour_gpc: false, drop_fingerprint: false };
 
@@ -87,12 +100,22 @@ function section(doc, name, defaults) {
 
 /** Resolved configuration of one site (only what the collector needs). */
 export class SiteConfig {
-  constructor(id, doc, globalPrivacy) {
+  /**
+   * @param {object} [fallbackFeatures]  the features of the site's public document, for a resolved file written
+   *                                     before site documents carried `features` (they are the same object)
+   */
+  constructor(id, doc, globalPrivacy, fallbackFeatures = null) {
     this.id = id;
     this.name = doc.name || id;
     this.origins = (doc.origins || []).map((o) => normalizeOrigin(String(o)));
     this.timezone = doc.timezone ?? "UTC";
-    this.settings = { server_cookie_domain: doc.server_cookie_domain ?? "", cookie_days: doc.cookie_days ?? 400 };
+    const maxHits = Number(doc.max_hits_per_day ?? MAX_HITS_PER_DAY);
+    this.settings = {
+      server_cookie_domain: doc.server_cookie_domain ?? "", cookie_days: doc.cookie_days ?? 400,
+      max_hits_per_day: Number.isFinite(maxHits) ? Math.max(0, Math.trunc(maxHits)) : 0,
+    };
+    const features = doc.features ?? fallbackFeatures;
+    this.features = features && typeof features === "object" ? { ...features } : {};
     this.privacy = { ...PRIVACY_DEFAULTS, ...globalPrivacy, ...(doc.privacy || {}) };
     this._wildcards = this.origins.map((p) => (p.includes("*") ? fnmatchCompile(p) : null));
   }
@@ -136,14 +159,6 @@ export class Config {
     this.privacy = section(doc, "privacy", PRIVACY_DEFAULTS);
     this.secret = this.server.secret;
 
-    const sites = doc.get("sites") ?? new Map();
-    if (!(sites instanceof Map)) throw new ConfigError('"sites" must be an object');
-    this.sites = new Map();
-    for (const [id, siteDoc] of sites) {
-      if (!(siteDoc instanceof Map)) throw new ConfigError(`sites.${id} must be an object`);
-      this.sites.set(id, new SiteConfig(id, plain(siteDoc), this.privacy));
-    }
-
     const publicDocs = doc.get("public");
     const publicDefault = doc.get("public_default");
     if (!(publicDocs instanceof Map) || !(publicDefault instanceof Map)) {
@@ -152,6 +167,18 @@ export class Config {
     this._publicDocs = publicDocs;
     this._publicDefault = publicDefault;
     this._publicCache = new Map();
+    this._publicOverrides = null;
+    this._redactCache = new Map();
+
+    const sites = doc.get("sites") ?? new Map();
+    if (!(sites instanceof Map)) throw new ConfigError('"sites" must be an object');
+    this.sites = new Map();
+    for (const [id, siteDoc] of sites) {
+      if (!(siteDoc instanceof Map)) throw new ConfigError(`sites.${id} must be an object`);
+      const pub = publicDocs.get(id);
+      const pubFeatures = pub instanceof Map && pub.get("features") instanceof Map ? plain(pub.get("features")) : null;
+      this.sites.set(id, new SiteConfig(id, plain(siteDoc), this.privacy, pubFeatures));
+    }
 
     this.headerRules = {
       secret: this.headers.secret_patterns.map((p) => fnmatchCompile(String(p).toLowerCase())),
@@ -170,6 +197,45 @@ export class Config {
   }
 
   /**
+   * A site's URL redaction patterns, {params, paths}: the redact_params and redact_paths of its public document
+   * (public_default for an unknown site), the same lists the tracker receives; strings only (redact.patterns).
+   */
+  redactRules(site) {
+    const id = site ? site.id : "";
+    let rules = this._redactCache.get(id);
+    if (!rules) {
+      let doc = site ? this._publicDocs.get(site.id) : null;
+      if (!(doc instanceof Map)) doc = this._publicDefault;
+      rules = { params: patterns(doc.get("redact_params")), paths: patterns(doc.get("redact_paths")) };
+      this._redactCache.set(id, rules);
+    }
+    return rules;
+  }
+
+  /**
+   * server.rate_limit_proxies as networks (the resolved JSON already expands "cloudflare" to CIDRs): the proxies
+   * whose rate_limit_key header is believed. Invalid entries are skipped, as Python's networks() skips them.
+   */
+  proxyNetworks() {
+    const list = Array.isArray(this.server.rate_limit_proxies) ? this.server.rate_limit_proxies : [];
+    const key = JSON.stringify(list);
+    if (this._proxyKey !== key) {
+      this._proxyKey = key;
+      this._proxyNets = list.map(parseNetwork).filter(Boolean);
+    }
+    return this._proxyNets;
+  }
+
+  /**
+   * Change keys of every public document, for a value the platform cannot honour as configured (the Worker caps
+   * max_payload_kb, announced as max_kb). The version hash is recomputed as Python computes it.
+   */
+  overridePublic(values) {
+    this._publicOverrides = { ...(this._publicOverrides || {}), ...values };
+    this._publicCache.clear();
+  }
+
+  /**
    * Config.public_site_config(site_id), serialised: {cv, body} where body is
    * json.dumps(public, separators=(",", ":"), sort_keys=True).
    */
@@ -177,6 +243,7 @@ export class Config {
     const cached = this._publicCache.get(siteId);
     if (cached) return cached;
     let doc;
+    let rehash = false;
     if (siteId === "") {
       doc = this._publicDefault;
     } else if (this.sites.has(siteId) && this._publicDocs.get(siteId) instanceof Map) {
@@ -186,6 +253,14 @@ export class Config {
       doc = new Map(this._publicDefault);
       doc.set("site", siteId);
       doc.set("known", this.sites.has(siteId));
+      rehash = true;
+    }
+    if (this._publicOverrides) {
+      if (!rehash) doc = new Map(doc);
+      for (const [key, value] of Object.entries(this._publicOverrides)) doc.set(key, value);
+      rehash = true;
+    }
+    if (rehash) {
       doc.delete("cv");
       const digest = await sha256Hex(dumps(doc, { sortKeys: true }));
       doc.set("cv", digest.slice(0, 12));

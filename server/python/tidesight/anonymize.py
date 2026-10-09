@@ -16,8 +16,9 @@ from typing import Dict, Optional
 IP_HEADERS = (
     "x-forwarded-for", "x-real-ip", "forwarded", "cf-connecting-ip", "true-client-ip",
     "x-client-ip", "x-cluster-client-ip", "fastly-client-ip", "x-original-forwarded-for",
-    "x-forwarded", "forwarded-for", "x-appengine-user-ip", "cf-connecting-ipv6",
+    "x-forwarded", "forwarded-for", "x-appengine-user-ip", "cf-connecting-ipv6", "via",
 )
+IP_HEADER_PARTS = ("ip", "forwarded", "client", "addr")
 
 HASH_PREFIX = "h:"
 
@@ -26,14 +27,15 @@ _IP_TOKEN = re.compile(r"\[?([0-9A-Fa-f:.]{2,45}(?:%[0-9A-Za-z]+)?)\]?")
 
 
 def truncate_ip(ip: str) -> str:
-    """Keep the /24 network of an IPv4 address or the /48 of an IPv6 address."""
+    """Keep the /24 network of an IPv4 address or the /48 of an IPv6 address (the /40 of a 6to4 address,
+    2002::/16, whose next 32 bits are an IPv4 address: its /24, as for IPv4)."""
     try:
         addr = ipaddress.ip_address(ip.split("%", 1)[0])
     except ValueError:
         return ip
     if addr.version == 6 and addr.ipv4_mapped:
         addr = addr.ipv4_mapped
-    prefix = 24 if addr.version == 4 else 48
+    prefix = 24 if addr.version == 4 else 40 if addr.sixtofour is not None else 48
     net = ipaddress.ip_network("%s/%d" % (addr, prefix), strict=False)
     return str(net.network_address)
 
@@ -83,12 +85,20 @@ def anonymize_header_value(value: str, do_hash: bool, do_truncate: bool, secret:
     return _IP_TOKEN.sub(repl, value)
 
 
+def ip_bearing(name: str) -> bool:
+    """Whether a header (lower-case name) may carry client addresses: the known ones, and any name containing
+    "ip", "forwarded", "client" or "address" (proxies and CDNs invent their own: x-originating-ip,
+    fly-client-ip, cloudfront-viewer-address, x-vercel-forwarded-for…). Only tokens that parse as IP
+    addresses are changed in them."""
+    return name in IP_HEADERS or any(part in name for part in IP_HEADER_PARTS)
+
+
 def anonymize_headers(headers: Dict[str, str], do_hash: bool, do_truncate: bool, secret: str) -> Dict[str, str]:
     """A copy of the header map with addresses in IP-bearing headers anonymised."""
     if not (do_hash or do_truncate):
         return headers
     out = dict(headers)
-    for name in IP_HEADERS:
-        if name in out and isinstance(out[name], str):
-            out[name] = anonymize_header_value(out[name], do_hash, do_truncate, secret)
+    for name, value in headers.items():
+        if isinstance(value, str) and ip_bearing(name):
+            out[name] = anonymize_header_value(value, do_hash, do_truncate, secret)
     return out

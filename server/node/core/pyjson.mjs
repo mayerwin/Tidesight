@@ -106,10 +106,12 @@ const SIMPLE_ESCAPES = { 0x22: '"', 0x5c: "\\", 0x2f: "/", 0x62: "\b", 0x66: "\f
 /**
  * json.loads(s) for a str. Options:
  *   parseConstant(name)  called for NaN / Infinity / -Infinity (may throw, as Tidesight's collector does)
+ *   parseFloat(text)     called for numbers with a fraction or an exponent (json.loads' parse_float; may throw:
+ *                        the error propagates as is, as Python's does)
  *   maxDepth             nesting depth that raises Python's RecursionError message (981: where Python 3.10,
  *                        with its default recursion limit, fails inside a WSGI request; it varies by version)
  */
-export function loads(s, { parseConstant = defaultConstant, maxDepth = 981 } = {}) {
+export function loads(s, { parseConstant = defaultConstant, parseFloat = null, maxDepth = 981 } = {}) {
   if (s.length && s.charCodeAt(0) === 0xfeff) {
     throw new JSONDecodeError("Unexpected UTF-8 BOM (decode using utf-8-sig)", s, 0);
   }
@@ -214,7 +216,9 @@ export function loads(s, { parseConstant = defaultConstant, maxDepth = 981 } = {
       else idx = eStart;
     }
     const numstr = s.slice(start, idx);
-    const value = isFloat ? new PyFloat(Number(numstr)) : intFromDigits(numstr);
+    let value;
+    if (!isFloat) value = intFromDigits(numstr);
+    else value = parseFloat ? parseFloat(numstr) : new PyFloat(Number(numstr));
     next = idx;
     return value;
   }

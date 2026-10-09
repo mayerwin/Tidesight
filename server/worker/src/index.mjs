@@ -8,11 +8,15 @@
  *
  * REMOTE_ADDR is CF-Connecting-IP: Cloudflare terminates the client's TCP connection and sets this header to
  * that peer's address (a client cannot forge it), so it is the socket address as Cloudflare saw it — what
- * REMOTE_ADDR means for the other connectors. Every other header, X-Forwarded-For included, is stored raw.
+ * REMOTE_ADDR means for the other connectors. Every other header, X-Forwarded-For included, is stored raw. When the
+ * zone's Pseudo IPv4 setting overwrites CF-Connecting-IP with a stand-in from 240.0.0.0/4 for an IPv6 client,
+ * Cloudflare puts the real address in CF-Connecting-IPv6, which is then REMOTE_ADDR.
  */
 
+import { parseIPv4, parseIPv6Scoped } from "../../node/core/anonymize.mjs";
 import { createCollector } from "../../node/core/collector.mjs";
 import { ConfigError, parseConfig } from "../../node/core/config.mjs";
+import { ErrorLog } from "../../node/core/errorlog.mjs";
 import { D1Store } from "./d1-store.mjs";
 
 // D1 stores at most 2,000,000 bytes per value or row: keep every body the collector accepts storable
@@ -38,6 +42,8 @@ function loadConfig(source) {
     if (cfg.server[key] > max) {
       log.warning(`server.${key} = ${cfg.server[key]} exceeds what D1 can store in one row; using ${max}`);
       cfg.server[key] = max;
+      // /config.js announces max_payload_kb as max_kb, so that trackers keep their requests under it.
+      if (key === "max_payload_kb") cfg.overridePublic({ max_kb: max });
     }
   }
   return cfg;
@@ -47,6 +53,20 @@ function basePath(value) {
   if (!value) return "";
   const p = "/" + String(value).replace(/^\/+|\/+$/g, "");
   return p === "/" ? "" : p;
+}
+
+/**
+ * The client's address: CF-Connecting-IP, unless it is one of the Class E stand-ins (240.0.0.0/4) that Pseudo IPv4
+ * ("Overwrite headers") gives IPv6 clients, in which case Cloudflare's CF-Connecting-IPv6 holds the real one.
+ */
+export function clientAddress(headers) {
+  const ip = headers.get("cf-connecting-ip");
+  const v4 = ip ? parseIPv4(ip.trim()) : null;
+  if (v4 !== null && v4 >>> 28 === 0xf) {
+    const v6 = headers.get("cf-connecting-ipv6");
+    if (v6 && parseIPv6Scoped(v6.trim()) !== null) return v6.trim();
+  }
+  return ip;
 }
 
 function cfInfo(cf) {
@@ -80,12 +100,14 @@ export function createWorker({ config: bundled = null } = {}) {
 
   const getState = (env) => {
     if (!state || state.events !== env.EVENTS || state.replay !== env.REPLAY) {
-      const store = new D1Store(env.EVENTS, env.REPLAY);
+      const errors = new ErrorLog(log); // one throttle for the isolate's logged errors, collector and store
+      const store = new D1Store(env.EVENTS, env.REPLAY, log, errors);
       const collector = createCollector({
         connector: "worker",
         getConfig: () => getConfig(env),
         getStore: () => store,
         log,
+        errors,
         readStatic: env.ASSETS ? async (cfg, parts) => {
           const res = await env.ASSETS.fetch(new Request(new URL("/" + parts.join("/"), "https://assets.invalid")));
           return res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
@@ -106,7 +128,7 @@ export function createWorker({ config: bundled = null } = {}) {
       const https = url.protocol === "https:";
       const cf = request.cf || {};
       return getState(env).collector.fetch(request, {
-        remoteAddr: request.headers.get("cf-connecting-ip"),
+        remoteAddr: clientAddress(request.headers),
         scheme: url.protocol.slice(0, -1),
         basePath: basePath(env.TIDESIGHT_BASE_PATH),
         server: {

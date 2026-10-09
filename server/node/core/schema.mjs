@@ -73,6 +73,10 @@ export const EVENTS_MIGRATIONS = [
   [2, [
     "ALTER TABLE raw_requests ADD COLUMN geo TEXT",
   ]],
+  // Old allowance minutes are deleted by minute: without an index, a flood's rows made that a full scan.
+  [3, [
+    "CREATE INDEX IF NOT EXISTS rate_limits_minute ON rate_limits(minute)",
+  ]],
 ];
 
 export const REPLAY_MIGRATIONS = [
@@ -108,6 +112,9 @@ export const REPLAY_MIGRATIONS = [
             offset INTEGER NOT NULL,
             done   INTEGER NOT NULL DEFAULT 0
         )`,
+  ]],
+  [2, [
+    "CREATE INDEX IF NOT EXISTS rate_limits_minute ON rate_limits(minute)",
   ]],
 ];
 

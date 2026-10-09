@@ -190,23 +190,176 @@ def test_typed_columns_are_bounded_and_typed(harness):
     assert json.loads(h["data"])["url"] == "u" * 5000  # the raw event keeps everything
 
 
-def test_too_many_events_are_all_stored(make_harness):
+def test_too_many_events_keep_the_raw_body(make_harness):
+    # One request must not become an unbounded number of rows: the first events become hits, the raw body
+    # keeps the whole batch.
     h = make_harness()
     h.cfg.server["max_events_per_request"] = 3
-    assert h.post(envelope(events=[{"t": "event", "n": str(i)} for i in range(5)])).code == 204
-    assert len(h.events("SELECT id FROM raw_hits")) == 5
-    assert h.events("SELECT error FROM raw_requests")[0]["error"] == "too_many_events"
+    env = envelope(events=[{"t": "event", "n": str(i)} for i in range(5)])
+    assert h.post(env).code == 400
+    assert [r["name"] for r in h.events("SELECT name FROM raw_hits ORDER BY seq")] == ["0", "1", "2"]
+    req = h.events("SELECT error, body FROM raw_requests")[0]
+    assert req["error"] == "too_many_events:5" and json.loads(req["body"]) == env
 
 
 def test_rate_limit(make_harness):
     h = make_harness(rate=3)
-    codes = [h.post(envelope()).code for _ in range(5)]
+    codes = [h.post(envelope(), query="site=example").code for _ in range(5)]
     assert codes == [204, 204, 204, 429, 429]
     assert len(h.events("SELECT id FROM raw_requests")) == 3
-    counter = h.events("SELECT name, n FROM counters")
-    assert counter == [{"name": "rate_limited", "n": 2}]
+    counters = {r["name"]: r["n"] for r in h.events("SELECT name, n FROM counters WHERE site_id = 'example'")}
+    assert counters == {"rate_limited": 2, "hits": 3}
     # Another IP is not affected.
     assert h.post(envelope(), remote_addr="198.51.100.77").code == 204
+
+
+def test_client_key_groups_ipv6_by_network():
+    assert collect.client_key("203.0.113.9") == "203.0.113.9"
+    assert collect.client_key("2001:db8:1:2:aaaa::1") == "2001:db8:1:2::/64"
+    assert collect.client_key("2001:DB8:1:2:ffff:ffff:ffff:ffff") == "2001:db8:1:2::/64"
+    assert collect.client_key("2001:db8:1:2::1", 48) == "2001:db8:1::/48"
+    assert collect.client_key("::ffff:198.51.100.7") == "198.51.100.7"
+    assert collect.client_key("[2001:db8::1]") == "2001:db8::/64"
+    assert collect.client_key("not an address") == "not an address"
+    assert collect.client_key("") is None
+
+
+def test_rate_limit_counts_an_ipv6_network_as_one_client(make_harness):
+    h = make_harness(rate=2)
+    codes = [h.post(envelope(), remote_addr="2001:db8:5:6::%x" % i).code for i in range(1, 4)]
+    assert codes == [204, 204, 429]
+    assert h.post(envelope(), remote_addr="2001:db8:5:7::1").code == 204  # another /64
+
+
+def test_kilobyte_budget_per_client(make_harness):
+    h = make_harness()
+    h.cfg.server["rate_limit_kb_per_minute"] = 3
+    big = envelope(events=[{"t": "event", "n": "x" * 1500}])  # about 1.7 KB: 2 KB of the budget
+    assert [h.post(big, query="site=example").code for _ in range(3)] == [204, 429, 429]
+    assert h.post(big, remote_addr="198.51.100.80").code == 204
+    assert h.events("SELECT n FROM counters WHERE name = 'rate_limited'")[0]["n"] == 2
+
+
+def test_each_hit_and_the_headers_are_charged(make_harness):
+    h = make_harness()
+    h.cfg.server["rate_limit_kb_per_minute"] = 12
+    h.cfg.server["max_events_per_request"] = 20
+    tiny = envelope(events=[{"t": "e"}] * 20)  # 20 hits cost at least 20 × 256 bytes: 5 KB, however small
+    assert [h.post(tiny).code for _ in range(3)] == [204, 204, 429]
+    padded = {"X-Pad": "p" * 5000}  # stored headers are charged too
+    assert [h.post(envelope(), headers=padded, remote_addr="198.51.100.31").code for _ in range(3)] == [204, 204, 429]
+
+
+def test_the_rate_limit_key_header_uses_its_last_value_and_ignores_ports(make_harness):
+    h = make_harness(rate=2)
+    h.cfg.server["rate_limit_key"] = "x-forwarded-for"
+    h.cfg.server["rate_limit_proxies"] = ["203.0.113.0/24"]  # the harness connects from 203.0.113.9
+    hdr = lambda first, last: {"X-Forwarded-For": "%s, %s" % (first, last)}  # noqa: E731
+    codes = [h.post(envelope(), headers=hdr("10.0.0.%d" % i, "198.51.100.40:%d" % (1000 + i))).code for i in range(3)]
+    assert codes == [204, 204, 429]  # the client's own first values do not make it a new client
+    assert h.post(envelope(), headers=hdr("10.0.0.9", "198.51.100.41")).code == 204  # another client
+    assert collect.client_key("[2001:db8::1]:443") == "2001:db8::/64"
+
+
+def test_the_rate_limit_key_header_is_believed_only_from_listed_proxies(make_harness):
+    h = make_harness(rate=2)
+    h.cfg.server["rate_limit_key"] = "x-forwarded-for"
+    codes = [h.post(envelope(), headers={"X-Forwarded-For": "198.51.100.%d" % i}).code for i in range(3)]
+    assert codes == [204, 204, 429]  # not from a listed proxy: the connecting address counts
+    h.cfg.server["rate_limit_proxies"] = ["cloudflare"]
+    assert h.cfg.rate_limit_proxies()[0] == "173.245.48.0/20"
+
+
+def test_counter_only_requests_stay_within_the_allowance(make_harness):
+    h = make_harness(rate=3, extra="\n[privacy]\nhonour_dnt = true\n")
+    assert [h.post(envelope(), headers={"DNT": "1"}).code for _ in range(5)] == [204] * 3 + [429] * 2
+    assert h.events("SELECT n FROM counters WHERE name = 'dropped_dnt'")[0]["n"] == 3
+
+
+def test_a_client_over_its_allowance_is_refused_before_parsing(make_harness, monkeypatch):
+    """Decompressing and parsing are the costly part of a request: once a client is over its allowance for the
+    minute, its next requests are refused without them (charged and counted as any refusal)."""
+    h = make_harness(rate=2)
+    assert [h.post(envelope(), query="site=example").code for _ in range(2)] == [204, 204]
+
+    def parse(*a, **kw):
+        raise AssertionError("parsed a request from a client over its allowance")
+
+    monkeypatch.setattr(collect.Collector, "_parse_envelope", parse)
+    assert h.post(None, raw=b"{not json", query="site=example").code == 429  # not 400: never looked at
+    assert h.call("POST", "/collect", body=b"x" * 70000).code == 413  # an oversize body still gets its 413
+    assert len(h.events("SELECT id FROM raw_requests")) == 2  # (the oversize metadata too was over the allowance)
+    counters = {r["name"]: r["n"] for r in h.events("SELECT name, n FROM counters WHERE site_id = 'example'")}
+    assert counters["rate_limited"] == 1
+    monkeypatch.undo()
+    assert h.post(envelope(), remote_addr="198.51.100.81").code == 204  # another client
+
+
+def test_allowance_keys_never_hold_an_address(make_harness):
+    h = make_harness(rate=5)
+    h.post(envelope(), remote_addr="198.51.100.82")
+    keys = [r["key"] for r in h.events("SELECT key FROM rate_limits")]
+    assert keys and not any("198.51.100.82" in k for k in keys)
+    assert all(k.startswith(("r:h:", "kb:h:")) and len(k.split(":", 1)[1]) == 18 for k in keys)
+
+
+def test_a_few_invalid_events_do_not_make_a_batch_flagged(make_harness):
+    h = make_harness()
+    h.cfg.server["flagged_per_minute"] = 1
+    env = envelope(events=[{"t": "event", "n": "ok"}, "junk"])
+    assert [h.post(env).code for _ in range(3)] == [204, 204, 204]
+
+
+def test_a_huge_declared_length_is_refused_cleanly(make_harness):
+    h = make_harness()
+    r = h.call("POST", "/collect", body=b"{}", headers={"Content-Type": "text/plain", "Content-Length": str(10 ** 30),
+                                                     "Origin": "https://example.com"})
+    assert r.code == 413
+    assert h.events("SELECT body_bytes FROM raw_requests")[0]["body_bytes"] == 2 ** 53 - 1
+
+
+def test_there_is_no_daily_quota_by_default(make_harness):
+    h = make_harness()
+    assert h.cfg.site("example").settings["max_hits_per_day"] == 0
+    assert h.post(envelope()).code == 204
+
+
+def test_flagged_requests_have_their_own_allowance(make_harness):
+    h = make_harness()
+    h.cfg.server["flagged_per_minute"] = 2
+    h.cfg.server["flagged_global_per_minute"] = 3
+    unknown = [h.post(envelope(site="nope-%d" % i)).code for i in range(3)]
+    assert unknown == [204, 204, 429]
+    # Malformed bodies still answer 400 (retrying cannot help), stored or not.
+    assert h.post(None, raw=b"{bad", remote_addr="198.51.100.81").code == 400
+    assert h.post(None, raw=b"{bad", remote_addr="198.51.100.82").code == 400  # over the global allowance
+    assert len(h.events("SELECT id FROM raw_requests")) == 3
+    # Valid traffic is not affected, and counters never use a site id taken from the request.
+    assert h.post(envelope()).code == 204
+    rows = h.events("SELECT site_id, name, n FROM counters WHERE name = 'flagged_limited'")
+    assert rows == [{"site_id": "", "name": "flagged_limited", "n": 2}]
+
+
+def test_daily_quota_per_site(make_harness):
+    h = make_harness(extra="max_hits_per_day = 3\n")
+    two = envelope(events=[{"t": "event", "n": "a"}, {"t": "event", "n": "b"}])
+    assert h.post(two).code == 204
+    assert h.post(two, remote_addr="198.51.100.90").code == 429  # 2 + 2 > 3
+    assert h.post(envelope(events=[{"t": "event", "n": "c"}])).code == 204
+    counters = {r["name"]: r["n"] for r in h.events("SELECT name, n FROM counters WHERE site_id = 'example'")}
+    assert counters == {"hits": 3, "over_quota": 1}
+
+
+def test_low_disk_space_refuses_writes(make_harness, monkeypatch):
+    h = make_harness()
+    h.cfg.server["min_free_disk_mb"] = 10 ** 12  # more than any disk
+    r = h.post(envelope())
+    assert r.code == 503 and r.headers["retry-after"] == "300"
+    assert h.call("GET", "/p.gif", query="site=example").code == 200  # the pixel still answers
+    r = h.call("POST", "/chunk", body=b"[]", query="site=example&k=replay&seq=0",
+               headers={"Origin": "https://example.com"})
+    assert r.code == 503
+    assert not os.path.exists(os.path.join(h.data_dir, "events.db"))
 
 
 def test_rate_limit_disabled(make_harness):
@@ -290,6 +443,27 @@ def test_chunk_stored_compressed(harness):
     assert row["payload"] == gz
 
 
+def test_chunks_of_a_feature_the_site_does_not_record_are_flagged(make_harness):
+    h = make_harness(extra='\n[sites.plain]\norigins = ["https://plain.example"]\n')
+    r = h.call("POST", "/chunk", body=b"[]", query="site=plain&k=replay&seq=0", headers={"Origin": "https://plain.example"})
+    assert r.code == 204
+    assert [r["site_ok"] for r in h.replay("SELECT site_ok FROM chunks")] == [0]
+
+
+def test_chunk_limits(make_harness):
+    h = make_harness()
+    h.cfg.server["chunk_rate_limit_per_minute"] = 2
+    send = lambda addr: h.call("POST", "/chunk", body=b"[]", query="site=example&k=replay&seq=0",  # noqa: E731
+                               headers={"Origin": "https://example.com"}, remote_addr=addr).code
+    assert [send("198.51.100.20") for _ in range(3)] == [204, 204, 429]
+    assert send("198.51.100.21") == 204
+    h.cfg.server["chunk_kb_per_minute"] = 4
+    big = h.call("POST", "/chunk", body=b"x" * 5000, query="site=example&k=mouse&seq=0",
+                 headers={"Origin": "https://example.com"}, remote_addr="198.51.100.22")
+    assert big.code == 429
+    assert h.events("SELECT n FROM counters WHERE site_id = 'example' AND name = 'chunk_rate_limited'")[0]["n"] == 2
+
+
 def test_chunk_unknown_kind_and_too_large(make_harness):
     h = make_harness()
     r = h.call("POST", "/chunk", body=b"[]", query="site=example&k=bogus", headers={"Origin": "https://example.com"})
@@ -304,10 +478,13 @@ def test_config_js_and_json(harness):
     r = harness.call("GET", "/config.js", query="site=example")
     assert r.code == 200 and r.headers["content-type"].startswith("application/javascript")
     text = r.body.decode()
-    assert text.startswith("(window.tidesight=") and '"_config"' in text
+    # Hands the configuration to the tracker, or queues it; an element named "tidesight" cannot make it throw.
+    assert text.startswith('(typeof window.tidesight=="function"?window.tidesight:window.tidesight=function(){')
+    assert '"_config"' in text
     payload = json.loads(text[text.index('"_config",') + len('"_config",'):text.rindex(");")])
     assert payload["site"] == "example" and payload["known"] is True
-    assert payload["features"]["pageviews"] is True and payload["features"]["replay"] is False
+    assert payload["features"]["pageviews"] is True and payload["features"]["replay"] is True
+    assert payload["features"]["copy_paste"] is False and payload["max_kb"] == 64
     assert payload["timezone"] == "Europe/Paris"
     j = harness.call("GET", "/config.json", query="site=example").json()
     assert j == payload
@@ -350,7 +527,7 @@ def test_honour_dnt_and_gpc(make_harness):
     assert h.post(envelope()).code == 204
     assert len(h.events("SELECT id FROM raw_requests")) == 1
     counters = {r["name"]: r["n"] for r in h.events("SELECT name, n FROM counters")}
-    assert counters == {"dropped_dnt": 1, "dropped_gpc": 1}
+    assert counters == {"dropped_dnt": 1, "dropped_gpc": 1, "hits": 1}
     assert h.call("GET", "/config.json", query="site=example").json()["dnt"] is True
 
 
@@ -445,3 +622,53 @@ def test_storage_failure_without_fallback_answers_503(make_harness):
     h.app._store.events_conn = lambda: _Locked()
     r = h.post(envelope())
     assert r.code == 503 and r.headers["retry-after"] == "60"
+
+
+def test_numbers_too_large_for_a_float_make_a_body_unreadable(harness):
+    # Stored, 1e999 would become Infinity: not JSON (SQLite's JSON functions reject the row). Like NaN, refused.
+    r = harness.post(None, raw=b'{"v":1,"site":"example","vid":"v1","events":[{"t":"event","n":"x","val":1e999}]}')
+    assert r.code == 400
+    req = harness.events("SELECT error, site_status FROM raw_requests")[0]
+    assert req["error"] == "bad_json: number out of range"
+    assert harness.events("SELECT COUNT(*) AS n FROM raw_hits")[0]["n"] == 0
+    big = "9" * 400  # a large integer is exact in JSON and in Python: kept
+    assert harness.post(None, raw=('{"v":1,"site":"example","vid":"v1","events":[{"t":"event","n":"x","p":{"a":%s}}]}'
+                                   % big).encode()).code == 204
+
+
+def test_hits_are_charged_as_stored(make_harness):
+    # 9e15 is stored as 9000000000000000.0: almost four times longer. The allowance counts what is stored.
+    h = make_harness()
+    h.cfg.server["rate_limit_kb_per_minute"] = 16
+    body = '{"v":1,"site":"example","vid":"v1","events":[{"t":"event","n":"x","p":{"a":[%s]}}]}' % ",".join(["9e15"] * 1400)
+    assert len(body) < 8000
+    assert h.post(None, raw=body.encode()).code == 429
+
+
+def test_merged_cookie_headers_never_leak_into_a_kept_value(harness):
+    # Two Cookie headers merged by the server ("a, b"): the second one's cookies are not Tidesight's.
+    harness.post(envelope(), headers={"Cookie": "ts_vid=abc.1, sessionid=SECRET-SESSION; ts_ses=s.1"})
+    cookies = json.loads(harness.events("SELECT cookies FROM raw_requests")[0]["cookies"])
+    assert cookies["kept"] == {"ts_vid": "abc.1", "ts_ses": "s.1"}
+
+
+def test_auth_like_headers_are_redacted_by_default(harness):
+    harness.post(envelope(), headers={"X-Authorization": "Bearer abc", "Authentication": "Bearer def",
+                                      "Cf-Access-Jwt-Assertion": "eyJ", "X-Session-Id": "s1", "Cookie2": "x=1",
+                                      "X-Signature": "sig", "Accept-Language": "en"})
+    headers = json.loads(harness.events("SELECT headers FROM raw_requests")[0]["headers"])
+    for name in ("x-authorization", "authentication", "cf-access-jwt-assertion", "x-session-id", "cookie2",
+                 "x-signature"):
+        assert headers[name] == "[redacted]", name
+    assert headers["accept-language"] == "en"
+
+
+def test_refuses_to_run_with_its_data_inside_the_web_root(make_harness):
+    h = make_harness()
+    root = os.path.dirname(h.data_dir)
+    r = h.call("POST", "/collect", body=json.dumps(envelope()).encode(),
+               headers={"Content-Type": "text/plain", "Origin": "https://example.com", "DOCUMENT_ROOT": root})
+    assert r.code == 503
+    assert h.call("GET", "/health", headers={"DOCUMENT_ROOT": os.path.join(root, "elsewhere")}).code == 200
+    h.cfg.server["allow_data_in_web_root"] = True
+    assert h.call("GET", "/health", headers={"DOCUMENT_ROOT": root}).code == 200

@@ -60,7 +60,9 @@ final class Json
     public static function init()
     {
         if (self::$shortest === null) {
-            @ini_set('serialize_precision', '-1');
+            if (function_exists('ini_set')) { // else the shortest repr is searched with sprintf
+                @ini_set('serialize_precision', '-1');
+            }
             self::$shortest = json_encode(0.1) === '0.1' && json_encode(1 / 3) === '0.3333333333333333';
         }
     }
@@ -76,14 +78,46 @@ final class Json
      */
     public static function loads($text)
     {
-        if (strlen($text) >= 19 && preg_match('/[0-9]{19}/', $text) === 1 && preg_match(self::BIG_INT, $text) === 1) {
+        $value = json_decode($text, false, 512);
+        if (json_last_error() !== JSON_ERROR_NONE) {
             return JsonParser::parse($text);
         }
-        $value = json_decode($text, false, 512);
-        if (json_last_error() === JSON_ERROR_NONE) {
-            return array($value, null, false);
+        // Integers beyond 64 bits need the exact parser. The scan runs only on text that decoded, where every
+        // string is terminated, so it is linear (on arbitrary text an unterminated string made it quadratic);
+        // if PCRE still gives up (false), the exact parser decides.
+        if (strlen($text) >= 19 && preg_match('/[0-9]{19}/', $text) === 1 && preg_match(self::BIG_INT, $text) !== 0) {
+            $value = null; // free json_decode's tree before the exact parser builds its own
+            return JsonParser::parse($text);
         }
-        return JsonParser::parse($text);
+        // collect._finite_float (the collector's parse_float): a number too large for a float makes the body
+        // unreadable. Without 19-digit runs only an exponent of three digits or more can overflow.
+        if (preg_match('/[eE][+-]?[0-9]{3}/', $text) === 1 && self::hasInfinite($value)) {
+            return array(null, 'number out of range', false);
+        }
+        return array($value, null, false);
+    }
+
+    /** Whether a decoded value holds an infinite float (from a literal like 1e999). Iterative. */
+    private static function hasInfinite($value)
+    {
+        $stack = array($value);
+        while ($stack) {
+            $v = array_pop($stack);
+            if (is_float($v)) {
+                if (is_infinite($v)) {
+                    return true;
+                }
+            } elseif (is_array($v)) {
+                foreach ($v as $x) {
+                    $stack[] = $x;
+                }
+            } elseif ($v instanceof \stdClass) {
+                foreach (get_object_vars($v) as $x) {
+                    $stack[] = $x;
+                }
+            }
+        }
+        return false;
     }
 
     public static function isObject($v)
@@ -101,6 +135,83 @@ final class Json
             return array_key_exists($key, $obj->m) ? $obj->m[$key] : null;
         }
         return null;
+    }
+
+    /**
+     * collect._deeper_than: true when objects and arrays nest more than $limit levels (the top level
+     * is 1). Iterative. $text, the JSON it came from, lets a document with too few brackets skip the walk.
+     */
+    public static function deeperThan($value, $limit, $text = null)
+    {
+        if ($text !== null && self::nesting($text, $limit) <= $limit) {
+            return false; // the text never nests that deep: no walk
+        }
+        return self::deeper($value, 1, $limit);
+    }
+
+    /**
+     * Whether a container at $depth holds one deeper than $limit. Recursion stops past $limit, so it is at
+     * most $limit + 1 frames deep, and nothing is copied (the walk runs only when the text nests that deep;
+     * the decoded value can still be shallower, as a repeated key keeps only its last value).
+     */
+    private static function deeper($v, $depth, $limit)
+    {
+        if ($depth > $limit) {
+            return true;
+        }
+        foreach (($v instanceof JsonObject ? $v->m : $v) as $x) {
+            if ((is_array($x) || $x instanceof \stdClass || $x instanceof JsonObject) && self::deeper($x, $depth + 1, $limit)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The deepest nesting of objects and arrays in JSON text, strings skipped, counted up to $stop + 1.
+     * Linear: strcspn jumps to the next bracket or quote.
+     */
+    public static function nesting($text, $stop)
+    {
+        $n = strlen($text);
+        $i = 0;
+        $depth = 0;
+        $max = 0;
+        while ($i < $n) {
+            $i += strcspn($text, '"[]{}', $i);
+            if ($i >= $n) {
+                break;
+            }
+            $c = $text[$i];
+            if ($c === '"') {
+                $i++;
+                while (true) {
+                    $i += strcspn($text, "\"\\", $i);
+                    if ($i >= $n) {
+                        return $max; // an unterminated string: nothing more nests
+                    }
+                    if ($text[$i] === '\\') {
+                        $i += 2;
+                        continue;
+                    }
+                    $i++;
+                    break;
+                }
+            } elseif ($c === '[' || $c === '{') {
+                $depth++;
+                if ($depth > $max) {
+                    $max = $depth;
+                    if ($max > $stop) {
+                        return $max;
+                    }
+                }
+                $i++;
+            } else {
+                $depth--;
+                $i++;
+            }
+        }
+        return $max;
     }
 
     /** A copy of a decoded JSON object without one key. */

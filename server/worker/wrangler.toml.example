@@ -39,3 +39,10 @@ migrations_dir = "migrations/replay"
 
 [observability]
 enabled = true
+
+# CPU time one request may use (Workers Paid plan only: on the Free plan the limit is a fixed 10 ms and cannot be
+# set). Ordinary batches need well under 10 ms; the largest batch the default max_decompressed_kb (256 KB) admits
+# needs about 20 ms when it is dense JSON. A cap stops crafted bodies from running up billed CPU time (the default
+# is 30 s); a request over it fails, and the tracker retries it later.
+# [limits]
+# cpu_ms = 100

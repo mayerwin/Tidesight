@@ -38,10 +38,19 @@ SERVER_DEFAULTS: Dict[str, Any] = {
     "busy_timeout_ms": 10000,
     "max_payload_kb": 64,
     "max_chunk_kb": 1024,
-    "max_decompressed_kb": 4096,
-    "max_events_per_request": 500,
-    "rate_limit_per_minute": 600,
+    "max_decompressed_kb": 256,        # the tracker's batches stay under 60 KB uncompressed
+    "max_events_per_request": 200,     # events beyond are kept in the raw body, not stored as hits
+    # Abuse and flood protection (docs/configuration.md). Per client and minute unless stated; 0 disables one.
+    "rate_limit_per_minute": 600,      # /collect and /p.gif requests
+    "rate_limit_kb_per_minute": 2048,  # decompressed /collect bodies
+    "chunk_rate_limit_per_minute": 120,
+    "chunk_kb_per_minute": 8192,
+    "flagged_per_minute": 30,          # requests stored only flagged (unknown site, wrong origin, malformed…)
+    "flagged_global_per_minute": 300,  # the same, all clients together
     "rate_limit_key": "remote_addr",   # or a request header name, e.g. "cf-connecting-ip"
+    "rate_limit_proxies": [],          # CIDRs (or "cloudflare") whose rate_limit_key header is believed
+    "rate_limit_ipv6_prefix": 64,      # an IPv6 client is its /64: one host can use a whole /64
+    "min_free_disk_mb": 512,           # below this much free space, writes answer 503
     "cors": "reflect",                 # reflect | allowed
     "accept_ch": True,
     "public_url": "",
@@ -50,11 +59,15 @@ SERVER_DEFAULTS: Dict[str, Any] = {
     "dashboard_dir": "",
     "store_raw_body": False,
     "spool_fallback": True,            # write to the spool when SQLite is unavailable
+    # The data directory, configuration and log must not be inside the web server's document root (the databases
+    # and the secret could be downloaded): the collector refuses to run there unless this is true.
+    "allow_data_in_web_root": False,
     "log_file": "",
 }
 
 HEADERS_DEFAULTS: Dict[str, Any] = {
-    "secret_patterns": ["*token*", "*key*", "*secret*", "*password*"],
+    "secret_patterns": ["*token*", "*key*", "*secret*", "*password*", "*auth*", "*session*", "*jwt*",
+                        "*assertion*", "*credential*", "*signature*", "*cookie*"],
     "drop": [],
     "cookie_names": ["ts_*"],
 }
@@ -87,6 +100,9 @@ ENRICH_DEFAULTS: Dict[str, Any] = {
 DASHBOARD_DEFAULTS: Dict[str, Any] = {
     "users": {},
     "realtime_minutes": 30,
+    # Origins (besides the sites' own) that replays and heatmap backgrounds may load images, styles and fonts
+    # from, e.g. a CDN: ["https://cdn.example.net"]. Anything else stays blocked by the dashboard's CSP.
+    "asset_origins": [],
 }
 
 # Site-level settings (everything except features and per-feature options).
@@ -105,6 +121,15 @@ SITE_DEFAULTS: Dict[str, Any] = {
     "idle_sec": 300,                   # engagement stops after this long without input
     "flush_sec": 5,
     "search_params": ["q", "s", "search", "query", "keyword"],
+    # URL parameters whose values never leave the browser (glob, case-insensitive): login links, reset tokens,
+    # session ids, signed URLs… (redact.py; the collector also applies them to the Referer header it stores).
+    "redact_params": ["*token*", "*password*", "*passwd*", "pwd", "pass", "*secret*", "key", "*_key", "*-key",
+                      "*api_key*", "*api-key*", "*apikey*", "*access_key*", "*private_key*", "auth",
+                      "*authorization*", "jwt", "otp", "*mfa*", "*session*", "*sessid*", "sid", "ticket",
+                      "*signature*", "sig", "*credential*"],
+    # Paths with a secret in them (glob, case-insensitive): what each * matches becomes "redacted", e.g.
+    # "/reset-password/*" or "/invite/*/accept".
+    "redact_paths": [],
     "exclude_paths": [],
     "download_extensions": [
         "pdf", "zip", "dmg", "exe", "msi", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt",
@@ -114,6 +139,9 @@ SITE_DEFAULTS: Dict[str, Any] = {
     "public": False,
     "public_metrics": ["visitors", "pageviews", "pages", "sources", "countries", "devices"],
     "share_token": "",
+    # Stored hits per UTC day; beyond, the site's requests answer 429 until midnight UTC. Off by default: anyone
+    # can send hits, so a flood could use the quota up and lock real visitors out (availability over storage).
+    "max_hits_per_day": 0,
 }
 
 FEATURE_DEFAULTS: Dict[str, bool] = {
@@ -158,6 +186,7 @@ FEATURE_OPTION_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "replay": {
         "sample_rate": 0.1,
         "mask_all_inputs": True,
+        "mask_all_text": False,      # every text node too (pages that draw what visitors type outside inputs)
         "mask_text_class": "ts-mask",
         "block_class": "ts-block",
         "record_canvas": False,
@@ -192,6 +221,11 @@ _CHOICES = {
 }
 
 
+# List settings whose items must be strings.
+_STRING_LISTS = frozenset({"origins", "search_params", "redact_params", "redact_paths", "exclude_paths",
+                           "download_extensions", "public_metrics", "asset_origins", "rate_limit_proxies"})
+
+
 class ConfigError(ValueError):
     """Raised when the configuration file is invalid."""
 
@@ -222,6 +256,8 @@ def _merge_checked(defaults: Dict[str, Any], values: Dict[str, Any], where: str,
             continue
         if not _type_ok(defaults[key], value):
             raise ConfigError("%s.%s: expected %s, got %r" % (where, key, type(defaults[key]).__name__, value))
+        if key in _STRING_LISTS and not all(isinstance(v, str) for v in value):
+            raise ConfigError("%s.%s: expected a list of strings, got %r" % (where, key, value))
         choices = _CHOICES.get((kind, key))
         if choices and value not in choices:
             raise ConfigError("%s.%s: must be one of %s, got %r" % (where, key, ", ".join(choices), value))
@@ -306,7 +342,9 @@ class Config:
             path = os.path.expanduser(path)
             return os.path.abspath(path if os.path.isabs(path) else os.path.join(base_dir, path))
 
-        self.data_dir = resolve(self.server["data_dir"] or "data")
+        # Without a config file, data goes to ~/tidesight-data: never the working directory, which under CGI
+        # is the web root (the databases and the secret would be downloadable).
+        self.data_dir = resolve(self.server["data_dir"] or ("data" if path else "~/tidesight-data"))
         self.server["data_dir"] = self.data_dir
         for section, key in (("server", "static_dir"), ("server", "dashboard_dir"), ("server", "log_file"),
                              ("enrich", "geo_dir"), ("enrich", "bot_list")):
@@ -368,6 +406,8 @@ class Config:
                 if not _type_ok(SITE_DEFAULTS[key], value):
                     raise ConfigError("%s.%s: expected %s, got %r"
                                       % (where, key, type(SITE_DEFAULTS[key]).__name__, value))
+                if key in _STRING_LISTS and not all(isinstance(v, str) for v in value):
+                    raise ConfigError("%s.%s: expected a list of strings, got %r" % (where, key, value))
                 choices = _CHOICES.get(("site", key))
                 if choices and value not in choices:
                     raise ConfigError("%s.%s: must be one of %s" % (where, key, ", ".join(choices)))
@@ -421,6 +461,14 @@ class Config:
 
     # -- public site configuration (config.js) ---------------------------
 
+    def rate_limit_proxies(self) -> List[str]:
+        """[server] rate_limit_proxies as CIDRs ("cloudflare" stands for Cloudflare's published ranges)."""
+        from .enrich.ip import CLOUDFLARE
+        out: List[str] = []
+        for item in self.server["rate_limit_proxies"]:
+            out.extend(CLOUDFLARE if str(item).strip().lower() == "cloudflare" else [str(item).strip()])
+        return out
+
     def public_site_config(self, site_id: str) -> Dict[str, Any]:
         """The configuration the tracker receives. Contains nothing secret."""
         site = self.site(site_id)
@@ -446,10 +494,13 @@ class Config:
             "idle_sec": s["idle_sec"],
             "flush_sec": s["flush_sec"],
             "search_params": s["search_params"],
+            "redact_params": s["redact_params"],
+            "redact_paths": s["redact_paths"],
             "exclude_paths": s["exclude_paths"],
             "download_extensions": s["download_extensions"],
             "dnt": bool(site.privacy.get("honour_dnt")),
             "gpc": bool(site.privacy.get("honour_gpc")),
+            "max_kb": self.server["max_payload_kb"],  # the tracker keeps each request under this size
         }
         digest = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode("utf-8")).hexdigest()[:12]
         cfg["cv"] = digest
@@ -467,10 +518,11 @@ class Config:
         def site_doc(site: SiteConfig) -> Dict[str, Any]:
             return {"name": site.name, "origins": site.origins, "timezone": site.timezone,
                     "server_cookie_domain": site.settings["server_cookie_domain"],
-                    "cookie_days": site.settings["cookie_days"], "privacy": site.privacy}
+                    "cookie_days": site.settings["cookie_days"], "privacy": site.privacy,
+                    "features": site.features, "max_hits_per_day": site.settings["max_hits_per_day"]}
         return {
             "format": "tidesight-resolved-config/1",
-            "server": dict(self.server, secret=self.secret),
+            "server": dict(self.server, secret=self.secret, rate_limit_proxies=self.rate_limit_proxies()),
             "headers": self.headers,
             "privacy": self.privacy,
             "sites": {sid: site_doc(s) for sid, s in self.sites.items()},

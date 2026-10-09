@@ -2,9 +2,24 @@
 #
 # Routes the collector endpoints to index.php. Tracker files (ts.js, ts/*.js) copied into
 # this directory are served by Apache directly; when they are missing, index.php serves
-# them from [server] static_dir. Only mod_rewrite directives are used (AllowOverride FileInfo).
-# Without mod_rewrite, point the tracker at .../index.php instead (data-api), which routes
-# by path info: .../index.php/collect, .../index.php/p.gif, ...
+# them from [server] static_dir. Without mod_rewrite, point the tracker at .../index.php
+# instead (data-api), which routes by path info: .../index.php/collect, .../index.php/p.gif, ...
+
+# No directory listings. (If the host forbids Options here, every request answers 500: remove the line.)
+Options -Indexes
+
+# Never serve configuration, databases, spool data, logs, notes or editor backups, even without
+# mod_rewrite. (/config.json is the collector's endpoint: it is excluded by name, as these rules
+# apply before the rewrite below.)
+<FilesMatch "(?i)(^\.(secret|error-log|sqlite-down)$|^error_log$|\.(db|sqlite3?|jsonl|log|toml|ini|md|bak|old|orig|swp|tmp)$|-(wal|shm|journal)$|~$|^(?!config\.json$).*\.json$)">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
 
 <IfModule mod_rewrite.c>
     RewriteEngine On
@@ -15,8 +30,8 @@
     RewriteCond %{HTTP:Authorization} .
     RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
-    # Never serve the library, a configuration file, notes or spool data.
-    RewriteRule ^(src(/|$)|tidesight\.json$|tidesight\.php$|README\.md$|\.user\.ini$|.*\.jsonl$) - [F,L]
+    # Never serve the library, a configuration file, notes or spool data (any letter case).
+    RewriteRule ^(src(/|$)|tidesight\.json$|tidesight\.php$|README\.md$|\.user\.ini$|.*\.jsonl$) - [F,L,NC]
 
     # Collector endpoints.
     RewriteRule ^(collect|chunk|p\.gif|config\.js|config\.json|health)$ index.php [L,QSA]
@@ -24,6 +39,17 @@
     # Tracker files and robots.txt through PHP only when they do not exist as files here.
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteRule ^(ts\.js|ts/[A-Za-z0-9][A-Za-z0-9._-]*|robots\.txt)$ index.php [L,QSA]
+</IfModule>
+
+# With mod_php (no .user.ini there): never print diagnostics into a response, and keep request
+# bodies unparsed (the collector reads php://input itself).
+<IfModule mod_php.c>
+    php_flag display_errors Off
+    php_flag enable_post_data_reading Off
+</IfModule>
+<IfModule mod_php7.c>
+    php_flag display_errors Off
+    php_flag enable_post_data_reading Off
 </IfModule>
 
 # Optional: give PHP the configuration path here instead of editing index.php

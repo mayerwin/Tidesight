@@ -27,7 +27,9 @@ import sqlite3
 import threading
 import time
 import zlib
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
+
+from .errorlog import ERRORS
 
 log = logging.getLogger("tidesight.storage")
 
@@ -103,6 +105,10 @@ EVENTS_MIGRATIONS: List[Tuple[int, List[str]]] = [
     (2, [
         "ALTER TABLE raw_requests ADD COLUMN geo TEXT",
     ]),
+    # Old allowance minutes are deleted by minute: without an index, a flood's rows made that a full scan.
+    (3, [
+        "CREATE INDEX IF NOT EXISTS rate_limits_minute ON rate_limits(minute)",
+    ]),
 ]
 
 REPLAY_MIGRATIONS: List[Tuple[int, List[str]]] = [
@@ -138,6 +144,9 @@ REPLAY_MIGRATIONS: List[Tuple[int, List[str]]] = [
             offset INTEGER NOT NULL,
             done   INTEGER NOT NULL DEFAULT 0
         )""",
+    ]),
+    (2, [
+        "CREATE INDEX IF NOT EXISTS rate_limits_minute ON rate_limits(minute)",
     ]),
 ]
 
@@ -342,6 +351,39 @@ class StorageError(RuntimeError):
     """The record could not be stored anywhere."""
 
 
+class Budget(NamedTuple):
+    """A per-minute allowance, counted in the rate_limits table in the same transaction as the write."""
+
+    key: str        # "<client>" (requests), "kb:<client>" (kilobytes), "f:<client>" and "f:*" (flagged requests)
+    amount: int     # what this request consumes: 1, or its size in KB
+    limit: int      # per clock minute; 0 = unlimited
+    counter: str    # the counters name recorded when the allowance is exceeded
+
+
+class Limits(NamedTuple):
+    """Everything a write must fit in. The first budget exceeded refuses the record (RATE_LIMITED)."""
+
+    budgets: Tuple[Budget, ...] = ()
+    site: str = ""          # counters site_id: a configured site, or "" (never an id taken from the request)
+    quota: int = 0          # the site's stored hits per UTC day; 0 = unlimited
+    hits: int = 0           # hits this request adds (counted per site and day as the counter "hits")
+
+
+NO_LIMITS = Limits()
+
+
+def is_flagged(rec: "RequestRecord") -> bool:
+    """A request stored only as a flagged record: wrong or unknown site or origin, unreadable, no events or too
+    many. A batch with a few invalid events or a bad version still holds good hits and is not flagged."""
+    if rec.site_status != "ok":
+        return True
+    if rec.endpoint == "pixel":
+        return False
+    if rec.envelope is None:
+        return True
+    return any(e == "no_events" or e.startswith("too_many_events") for e in (rec.error or "").split(",") if e)
+
+
 # ---------------------------------------------------------------------------
 # SQLite backend
 # ---------------------------------------------------------------------------
@@ -404,20 +446,42 @@ class SQLiteStore:
             except sqlite3.Error:
                 pass
 
-    def _rate_limited(self, conn: sqlite3.Connection, key: Optional[str], limit: int, now_ms: int) -> bool:
-        """Count this request; True when the key exceeded `limit` requests this minute."""
-        if not key or limit <= 0:
-            return False
+    def _over_budget(self, conn: sqlite3.Connection, limits: Limits, now_ms: int) -> Optional[str]:
+        """Count this request against its budgets; the counter name of the first one exceeded, else None."""
         minute = now_ms // 60000
-        conn.execute("INSERT OR IGNORE INTO rate_limits(key, minute, hits) VALUES (?, ?, 0)", (key, minute))
-        conn.execute("UPDATE rate_limits SET hits = hits + 1 WHERE key = ? AND minute = ?", (key, minute))
-        hits = conn.execute("SELECT hits FROM rate_limits WHERE key = ? AND minute = ?",
-                            (key, minute)).fetchone()[0]
+        refused = None
+        for b in limits.budgets:
+            if not b.key or b.limit <= 0:
+                continue
+            conn.execute("INSERT OR IGNORE INTO rate_limits(key, minute, hits) VALUES (?, ?, 0)", (b.key, minute))
+            conn.execute("UPDATE rate_limits SET hits = hits + ? WHERE key = ? AND minute = ?",
+                         (b.amount, b.key, minute))
+            used = conn.execute("SELECT hits FROM rate_limits WHERE key = ? AND minute = ?",
+                                (b.key, minute)).fetchone()[0]
+            if used > b.limit:
+                refused = b.counter
+                break
         now = time.monotonic()
-        if now - self._last_prune > 600:  # prune old minutes at most every 10 minutes per process
+        if now - self._last_prune > 60:  # old minutes, at most once a minute per process, a bounded batch at a time
             self._last_prune = now
-            conn.execute("DELETE FROM rate_limits WHERE minute < ?", (minute - 60,))
-        return hits > limit
+            conn.execute("SAVEPOINT prune")
+            try:
+                conn.execute("DELETE FROM rate_limits WHERE (key, minute) IN (SELECT key, minute FROM rate_limits "
+                             "WHERE minute < ? LIMIT 20000)", (minute - 60,))
+            except sqlite3.OperationalError:  # SQLite before 3.15 has no row values: the oldest minute instead
+                conn.execute("ROLLBACK TO prune")
+                conn.execute("DELETE FROM rate_limits WHERE minute = (SELECT MIN(minute) FROM rate_limits "
+                             "WHERE minute < ?)", (minute - 60,))
+            conn.execute("RELEASE prune")
+        return refused
+
+    @staticmethod
+    def _over_quota(conn: sqlite3.Connection, limits: Limits, day: str) -> bool:
+        if limits.quota <= 0 or limits.hits <= 0:
+            return False
+        row = conn.execute("SELECT n FROM counters WHERE day = ? AND site_id = ? AND name = 'hits'",
+                           (day, limits.site)).fetchone()
+        return (row[0] if row else 0) + limits.hits > limits.quota
 
     @staticmethod
     def count(conn: sqlite3.Connection, day: str, site_id: Optional[str], name: str, n: int = 1) -> None:
@@ -426,17 +490,23 @@ class SQLiteStore:
         conn.execute("UPDATE counters SET n = n + ? WHERE day = ? AND site_id = ? AND name = ?",
                      (n, day, site_id or "", name))
 
-    def write_request(self, rec: RequestRecord, rate_key: Optional[str] = None, rate_limit: int = 0) -> str:
+    def write_request(self, rec: RequestRecord, limits: Limits = NO_LIMITS) -> str:
         conn = self.events_conn()
+        day = _day(rec.received_at)
         try:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                if self._rate_limited(conn, rate_key, rate_limit, rec.received_at):
-                    self.count(conn, _day(rec.received_at), rec.site_id, "rate_limited")
+                refused = self._over_budget(conn, limits, rec.received_at)
+                if refused is None and self._over_quota(conn, limits, day):
+                    refused = "over_quota"
+                if refused is not None:
+                    self.count(conn, day, limits.site, refused)
                     conn.execute("COMMIT")
                     return RATE_LIMITED
                 request_id = self._insert_request(conn, rec)
                 self._insert_hits(conn, request_id, rec)
+                if limits.site and limits.hits > 0:
+                    self.count(conn, day, limits.site, "hits", limits.hits)
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
@@ -472,15 +542,14 @@ class SQLiteStore:
               h.event_id, h.visitor_id, h.session_id, h.page_id, h.user_id, h.url, h.data)
              for h in rec.hits])
 
-    def write_chunk(self, rec: ChunkRecord, rate_key: Optional[str] = None, rate_limit: int = 0) -> str:
+    def write_chunk(self, rec: ChunkRecord, limits: Limits = NO_LIMITS) -> str:
         conn = self.replay_conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                if self._rate_limited(conn, rate_key, rate_limit, rec.received_at):
-                    conn.execute("COMMIT")
-                    return RATE_LIMITED
-                self._insert_chunk(conn, rec)
+                refused = self._over_budget(conn, limits, rec.received_at)
+                if refused is None:
+                    self._insert_chunk(conn, rec)
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
@@ -488,6 +557,12 @@ class SQLiteStore:
         except sqlite3.Error:
             self._discard("replay")
             raise
+        if refused is not None:  # counters live in events.db: a separate, best-effort write
+            try:
+                self.record_counter(_day(rec.received_at), limits.site, refused)
+            except sqlite3.Error:
+                ERRORS.error("could not count a refused chunk", logger=log)
+            return RATE_LIMITED
         return STORED
 
     @staticmethod
@@ -500,14 +575,60 @@ class SQLiteStore:
              rec.page_id, rec.seq, rec.client_ts, rec.url, rec.ip, _json(rec.meta) or "{}", rec.encoding,
              sqlite3.Binary(rec.payload), rec.error))
 
-    def record_counter(self, day: str, site_id: Optional[str], name: str, n: int = 1) -> None:
-        conn = self.events_conn()
-        conn.execute("BEGIN IMMEDIATE")
+    def usage(self, stream: str, keys: Sequence[str], now_ms: int) -> Dict[str, int]:
+        """What the current minute has used of these allowance keys, in the stream's database (events or
+        chunks). Read only: no lock is taken."""
+        which = "events" if stream == "events" else "replay"
+        if not keys:
+            return {}
         try:
-            self.count(conn, day, site_id, name, n)
-            conn.execute("COMMIT")
-        except BaseException:
-            conn.execute("ROLLBACK")
+            return {k: n for k, n in self._conn(which).execute(
+                "SELECT key, hits FROM rate_limits WHERE minute = ? AND key IN (%s)" % ",".join("?" * len(keys)),
+                [now_ms // 60000] + list(keys))}
+        except sqlite3.Error:
+            self._discard(which)
+            raise
+
+    def refuse(self, stream: str, limits: Limits, now_ms: int) -> Optional[str]:
+        """Charge a request refused before its body was parsed (its client was already over an allowance) and
+        count the refusal. The counter name, or None if the allowance had just been renewed (a new minute)."""
+        which = "events" if stream == "events" else "replay"
+        conn = self._conn(which)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                refused = self._over_budget(conn, limits, now_ms)
+                if refused is not None and which == "events":
+                    self.count(conn, _day(now_ms), limits.site, refused)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        except sqlite3.Error:
+            self._discard(which)
+            raise
+        if refused is not None and which == "replay":  # counters live in events.db
+            try:
+                self.record_counter(_day(now_ms), limits.site, refused)
+            except sqlite3.Error:
+                ERRORS.error("could not count a refused chunk", logger=log)
+        return refused
+
+    def record_counter(self, day: str, site_id: Optional[str], name: str, n: int = 1,
+                       limits: Limits = NO_LIMITS) -> None:
+        """Count something; with budgets, only while they hold (the budgets are consumed either way)."""
+        conn = self.events_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if self._over_budget(conn, limits, int(time.time() * 1000)) is None:
+                    self.count(conn, day, site_id, name, n)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        except sqlite3.Error:
+            self._discard("events")
             raise
 
     def healthy(self) -> bool:
@@ -539,7 +660,10 @@ class SpoolStore:
         self._host = socket.gethostname().split(".")[0] or "host"
         self._lock = threading.Lock()
         self._fds: Dict[Tuple[str, str, int], int] = {}
-        self._rate: Dict[Tuple[str, int], int] = {}
+        self._rate: Dict[int, Dict[Tuple[str, str], int]] = {}  # minute -> (stream, budget key) -> amount used
+        self._quota: Dict[Tuple[str, str], int] = {}
+        self._refusals: Dict[Tuple[str, str, str], int] = {}  # (day, site, counter) -> refusals not yet written
+        self._refusals_at = 0.0
 
     def _fd(self, stream: str, ms: int) -> int:
         day = _day(ms)
@@ -567,32 +691,82 @@ class SpoolStore:
                 written = os.write(fd, view)
                 view = view[written:]
 
-    def _rate_limited(self, key: Optional[str], limit: int, now_ms: int) -> bool:
-        if not key or limit <= 0:
-            return False
+    def _over_budget(self, limits: Limits, now_ms: int, stream: str,
+                     quota_day: Optional[str] = None) -> Optional[str]:
+        """As SQLiteStore._over_budget, in memory: per process, so only approximate with several processes. The
+        allowances of each stream are separate, as those of events.db and replay.db are."""
         minute = now_ms // 60000
         with self._lock:
-            if len(self._rate) > 50000:
-                self._rate = {k: v for k, v in self._rate.items() if k[1] >= minute - 1}
-            n = self._rate.get((key, minute), 0) + 1
-            self._rate[(key, minute)] = n
-        return n > limit
+            if len(self._rate) > 1 or minute not in self._rate:  # only the current minute is ever needed
+                self._rate = {m: v for m, v in self._rate.items() if m >= minute}
+            used = self._rate.setdefault(minute, {})
+            for b in limits.budgets:
+                if not b.key or b.limit <= 0:
+                    continue
+                k = (stream, b.key)
+                n = used.get(k, 0) + b.amount
+                used[k] = n
+                if n > b.limit:
+                    return b.counter
+            if quota_day and limits.quota > 0 and limits.hits > 0:
+                key = (limits.site, quota_day)
+                if self._quota.get(key, 0) + limits.hits > limits.quota:
+                    return "over_quota"
+                if len(self._quota) > 10000:
+                    self._quota = {k: v for k, v in self._quota.items() if k[1] == quota_day}
+                self._quota[key] = self._quota.get(key, 0) + limits.hits
+        return None
 
-    def write_request(self, rec: RequestRecord, rate_key: Optional[str] = None, rate_limit: int = 0) -> str:
-        if self._rate_limited(rate_key, rate_limit, rec.received_at):
-            self._append("events", rec.received_at, {"k": "counter", "day": _day(rec.received_at),
-                                                     "site_id": rec.site_id, "name": "rate_limited", "n": 1})
+    def _refused(self, day: str, site: str, name: str) -> None:
+        """Count a refusal. Counts are written at most once a minute per process (summed), so a refused flood
+        does not grow the spool line by line."""
+        with self._lock:
+            key = (day, site, name)
+            self._refusals[key] = self._refusals.get(key, 0) + 1
+            due = time.monotonic() - self._refusals_at >= 60 or len(self._refusals) > 1000
+        if due:
+            self._flush_refusals()
+
+    def _flush_refusals(self) -> None:
+        with self._lock:
+            pending, self._refusals = self._refusals, {}
+            self._refusals_at = time.monotonic()
+        for (day, site, name), n in pending.items():
+            self._append("events", int(time.time() * 1000),
+                         {"k": "counter", "day": day, "site_id": site, "name": name, "n": n})
+
+    def write_request(self, rec: RequestRecord, limits: Limits = NO_LIMITS) -> str:
+        day = _day(rec.received_at)
+        refused = self._over_budget(limits, rec.received_at, "events", day)
+        if refused is not None:
+            self._refused(day, limits.site, refused)
             return RATE_LIMITED
         self._append("events", rec.received_at, {"k": "request", "rec": rec.to_dict()})
         return STORED
 
-    def write_chunk(self, rec: ChunkRecord, rate_key: Optional[str] = None, rate_limit: int = 0) -> str:
-        if self._rate_limited(rate_key, rate_limit, rec.received_at):
+    def write_chunk(self, rec: ChunkRecord, limits: Limits = NO_LIMITS) -> str:
+        refused = self._over_budget(limits, rec.received_at, "chunks")
+        if refused is not None:
+            self._refused(_day(rec.received_at), limits.site, refused)
             return RATE_LIMITED
         self._append("chunks", rec.received_at, {"k": "chunk", "rec": rec.to_dict()})
         return STORED
 
-    def record_counter(self, day: str, site_id: Optional[str], name: str, n: int = 1) -> None:
+    def usage(self, stream: str, keys: Sequence[str], now_ms: int) -> Dict[str, int]:
+        with self._lock:
+            used = self._rate.get(now_ms // 60000, {})
+            return {k: used[(stream, k)] for k in keys if (stream, k) in used}
+
+    def refuse(self, stream: str, limits: Limits, now_ms: int) -> Optional[str]:
+        refused = self._over_budget(limits, now_ms, stream)
+        if refused is not None:
+            self._refused(_day(now_ms), limits.site, refused)
+        return refused
+
+    def record_counter(self, day: str, site_id: Optional[str], name: str, n: int = 1,
+                       limits: Limits = NO_LIMITS) -> None:
+        if self._over_budget(limits, int(time.time() * 1000), "events") is not None:
+            return
         self._append("events", int(time.time() * 1000),
                      {"k": "counter", "day": day, "site_id": site_id, "name": name, "n": n})
 
@@ -604,6 +778,10 @@ class SpoolStore:
             return False
 
     def close(self) -> None:
+        try:
+            self._flush_refusals()
+        except OSError:
+            pass
         with self._lock:
             for fd in self._fds.values():
                 try:
@@ -616,33 +794,54 @@ class SpoolStore:
 class FallbackStore:
     """SQLite first; on a database error, append to the spool instead (never lose a hit)."""
 
+    BREAK_SECONDS = 30  # after SQLite failed, the spool alone for this long: no request waits for a lock again
+
     def __init__(self, primary: SQLiteStore, spool: SpoolStore) -> None:
         self.primary = primary
         self.spool = spool
         self.name = primary.name
+        self._down_until = 0.0
 
-    def _call(self, method: str, *args: Any, **kwargs: Any) -> str:
+    def _try(self, method: str, *args: Any) -> Tuple[bool, Any, Optional[BaseException]]:
+        """(True, result) from SQLite, or (False, None, error) when it failed or recently failed (then the
+        caller uses the spool, without waiting for a busy database on every request)."""
+        if time.monotonic() < self._down_until:
+            return False, None, None
         try:
-            return getattr(self.primary, method)(*args, **kwargs)
-        except sqlite3.Error as exc:
-            log.error("SQLite write failed (%s); writing to the spool instead", exc)
-            try:
-                outcome = getattr(self.spool, method)(*args, **kwargs)
-                return SPOOLED if outcome == STORED else outcome  # RATE_LIMITED: only a counter was written
-            except OSError as exc2:
-                raise StorageError("could not store the record: %s / %s" % (exc, exc2))
+            return True, getattr(self.primary, method)(*args), None
+        except (sqlite3.Error, OSError) as exc:
+            self._down_until = time.monotonic() + self.BREAK_SECONDS
+            ERRORS.error("SQLite failed (%s); using the spool for %d s", exc, self.BREAK_SECONDS, logger=log)
+            return False, None, exc
 
-    def write_request(self, rec: RequestRecord, rate_key: Optional[str] = None, rate_limit: int = 0) -> str:
-        return self._call("write_request", rec, rate_key, rate_limit)
-
-    def write_chunk(self, rec: ChunkRecord, rate_key: Optional[str] = None, rate_limit: int = 0) -> str:
-        return self._call("write_chunk", rec, rate_key, rate_limit)
-
-    def record_counter(self, day: str, site_id: Optional[str], name: str, n: int = 1) -> None:
+    def _write(self, method: str, *args: Any) -> str:
+        ok, outcome, exc = self._try(method, *args)
+        if ok:
+            return outcome
         try:
-            self.primary.record_counter(day, site_id, name, n)
-        except sqlite3.Error:
-            self.spool.record_counter(day, site_id, name, n)
+            outcome = getattr(self.spool, method)(*args)
+            return SPOOLED if outcome == STORED else outcome  # RATE_LIMITED: only a counter was written
+        except OSError as exc2:
+            raise StorageError("could not store the record: %s / %s" % (exc or "SQLite unavailable", exc2))
+
+    def write_request(self, rec: RequestRecord, limits: Limits = NO_LIMITS) -> str:
+        return self._write("write_request", rec, limits)
+
+    def write_chunk(self, rec: ChunkRecord, limits: Limits = NO_LIMITS) -> str:
+        return self._write("write_chunk", rec, limits)
+
+    def record_counter(self, day: str, site_id: Optional[str], name: str, n: int = 1,
+                       limits: Limits = NO_LIMITS) -> None:
+        if not self._try("record_counter", day, site_id, name, n, limits)[0]:
+            self.spool.record_counter(day, site_id, name, n, limits)
+
+    def usage(self, stream: str, keys: Sequence[str], now_ms: int) -> Dict[str, int]:
+        ok, used, _exc = self._try("usage", stream, keys, now_ms)
+        return used if ok else self.spool.usage(stream, keys, now_ms)
+
+    def refuse(self, stream: str, limits: Limits, now_ms: int) -> Optional[str]:
+        ok, refused, _exc = self._try("refuse", stream, limits, now_ms)
+        return refused if ok else self.spool.refuse(stream, limits, now_ms)
 
     def healthy(self) -> bool:
         return self.primary.healthy() or self.spool.healthy()
@@ -762,6 +961,8 @@ def _load_line(conn: sqlite3.Connection, store: SQLiteStore, stream: str, raw: b
             rec = RequestRecord.from_dict(obj["rec"])
             rid = store._insert_request(conn, rec)
             store._insert_hits(conn, rid, rec)
+            if rec.hits and rec.site_id and not is_flagged(rec):  # as the collector counts in SQLite mode
+                store.count(conn, _day(rec.received_at), rec.site_id, "hits", len(rec.hits))
             stats["requests"] += 1
             return
         if stream == "events" and kind == "counter":

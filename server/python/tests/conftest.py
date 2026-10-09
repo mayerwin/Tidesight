@@ -25,6 +25,9 @@ journal_mode = "{journal_mode}"
 name = "Example"
 origins = ["https://example.com", "https://*.example.org"]
 timezone = "Europe/Paris"
+features.replay = true
+features.mouse_moves = true
+features.dom_snapshots = true
 """
 
 
@@ -50,7 +53,7 @@ def call(app: Any, method: str = "GET", path: str = "/", body: bytes = b"", head
     environ.pop("CONTENT_TYPE", None)
     for k, v in (headers or {}).items():
         key = k.upper().replace("-", "_")
-        if key in ("CONTENT_TYPE", "CONTENT_LENGTH"):
+        if key in ("CONTENT_TYPE", "CONTENT_LENGTH", "DOCUMENT_ROOT"):  # CGI variables, not headers
             environ[key] = v
         else:
             environ["HTTP_" + key] = v

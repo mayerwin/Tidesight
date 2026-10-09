@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import fnmatch
 import gzip
+import ipaddress
 import json
 import logging
-import mimetypes
+import math
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -30,9 +32,13 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
-from .anonymize import anonymize_headers, anonymize_ip
+from .anonymize import anonymize_headers, anonymize_ip, hash_ip
 from .config import Config, ConfigHolder, SiteConfig
-from .storage import (RATE_LIMITED, ChunkRecord, HitRecord, RequestRecord, StorageError, open_store)
+from .enrich.ip import in_networks, networks
+from .errorlog import ERRORS, ErrorLog  # noqa: F401 (ErrorLog re-exported)
+from .redact import patterns, redact_url
+from .storage import (RATE_LIMITED, Budget, ChunkRecord, HitRecord, Limits, RequestRecord, StorageError,
+                      is_flagged, open_store)
 
 log = logging.getLogger("tidesight.collect")
 
@@ -47,7 +53,10 @@ ACCEPT_CH = ("Sec-CH-UA, Sec-CH-UA-Mobile, Sec-CH-UA-Platform, Sec-CH-UA-Platfor
              "Sec-CH-Prefers-Reduced-Motion")
 
 CHUNK_KINDS = ("replay", "mouse", "snapshot")
+CHUNK_FEATURES = {"replay": "replay", "mouse": "mouse_moves", "snapshot": "dom_snapshots"}
+DISK_CHECK_SECONDS = 10
 MAX_HEADER_VALUE = 8192
+MAX_KEPT_COOKIES = 20
 REDACTED = "[redacted]"
 ALWAYS_SECRET = ("authorization", "proxy-authorization")
 SERVER_ENV_KEYS = ("SERVER_PROTOCOL", "REQUEST_SCHEME", "HTTPS", "SSL_PROTOCOL", "SSL_CIPHER", "HTTP2",
@@ -60,11 +69,18 @@ _STATIC_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _DOMAIN_RE = re.compile(r"^\.?[A-Za-z0-9.-]+\Z")
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 _SURROGATE_ESCAPE_RE = re.compile(r"\\u[dD][89a-fA-F]")
+_V4_PORT_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}\Z")
+_V6_PORT_RE = re.compile(r"^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?\Z")
+HIT_COST = 256              # bytes charged per stored hit (a row costs about that much, however small its JSON)
+MAX_JSON_DEPTH = 64         # objects and arrays nested deeper than this: an unreadable body (bad_json)
+MAX_DECLARED_LENGTH = 2 ** 53 - 1  # larger Content-Length values are recorded as this
 _STATIC_TYPES = {".js": "application/javascript; charset=utf-8", ".map": "application/json; charset=utf-8",
                  ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
                  ".txt": "text/plain; charset=utf-8"}
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
+
 
 
 def now_ms() -> int:
@@ -98,8 +114,42 @@ def _int(value: Any) -> Optional[int]:
     return None
 
 
+_EXPOSURE: Dict[Tuple[str, str, str, str], Optional[str]] = {}
+
+
+def web_root_exposure(cfg: Config, document_root: Optional[str]) -> Optional[str]:
+    """Which of the data directory, the configuration file and the log file lies inside the web server's
+    document root (where anyone could download the databases or the secret), or None."""
+    if not document_root or cfg.server.get("allow_data_in_web_root"):
+        return None
+    key = (document_root, cfg.data_dir, cfg.path or "", cfg.server.get("log_file") or "")
+    if key not in _EXPOSURE:
+        root = os.path.normcase(os.path.realpath(document_root))
+        found = None
+        for what, path in (("the data directory", cfg.data_dir), ("the configuration file", cfg.path),
+                           ("the log file", cfg.server.get("log_file"))):
+            if path:
+                real = os.path.normcase(os.path.realpath(path))
+                if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+                    found = "%s (%s)" % (what, path)
+                    break
+        if len(_EXPOSURE) > 100:
+            _EXPOSURE.clear()
+        _EXPOSURE[key] = found
+    return _EXPOSURE[key]
+
+
 def _reject_constant(name: str) -> Any:
     raise ValueError("invalid JSON constant %s" % name)
+
+
+def _finite_float(text: str) -> float:
+    """A JSON number as a float; one too large for a float (1e999) makes the body unreadable, as NaN does: it
+    would be stored as Infinity, which is not JSON (SQLite's JSON functions reject the whole row)."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("number out of range")
+    return value
 
 
 def _dumps(obj: Any) -> str:
@@ -113,12 +163,64 @@ def _replace_surrogates(value: Any) -> Any:
     SQLite, cannot: without this the whole request would fail to store.
     """
     if isinstance(value, str):
-        return _SURROGATE_RE.sub("�", value)
+        return _SURROGATE_RE.sub("\N{REPLACEMENT CHARACTER}", value)
     if isinstance(value, dict):
         return {_replace_surrogates(k): _replace_surrogates(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_replace_surrogates(v) for v in value]
     return value
+
+
+def _deeper_than(obj: Any, limit: int) -> bool:
+    """True when objects and arrays nest more than `limit` levels (the top level is 1). Iterative."""
+    stack = [(obj, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, (dict, list)):
+            if depth > limit:
+                return True
+            stack.extend((v, depth + 1) for v in (value.values() if isinstance(value, dict) else value))
+    return False
+
+
+def _address(value: str) -> Optional[Any]:
+    """The IP address in a value, ignoring a port (`1.2.3.4:5678`, `[2001:db8::1]:443`); None if it is not one."""
+    v = value.strip()
+    m = _V6_PORT_RE.match(v) or _V4_PORT_RE.match(v)
+    try:
+        return ipaddress.ip_address(m.group(1) if m else v)
+    except ValueError:
+        return None
+
+
+def client_key(value: Optional[str], ipv6_prefix: int = 64) -> Optional[str]:
+    """The rate-limit identity of a client: its IPv4 address, or its IPv6 network (one host can use a whole
+    /64, so per-address limits would not hold); a port (`1.2.3.4:5678`, `[2001:db8::1]:443`) is ignored.
+    Anything else (a custom key header) is used as it is."""
+    if not value:
+        return None
+    addr = _address(value)
+    if addr is None:
+        return value[:64]
+    if addr.version == 6:
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        prefix = max(16, min(128, int(ipv6_prefix)))
+        return str(ipaddress.IPv6Network((int(addr), prefix), strict=False))
+    return str(addr)
+
+
+def _kb(n: int) -> int:
+    """Kilobytes, rounded up (a request of 1 byte uses 1 KB of a budget)."""
+    return max(1, -(-int(n) // 1024))
+
+
+def header_bytes(headers: Dict[str, str], cookies: Optional[Dict[str, Any]]) -> int:
+    """What a request's stored headers and kept cookies weigh (names and values), charged to its client."""
+    n = sum(len(k) + len(v) for k, v in headers.items())
+    if cookies:
+        n += sum(len(k) + len(v) for k, v in (cookies.get("kept") or {}).items())
+    return n
 
 
 def origin_of(url: Optional[str]) -> Optional[str]:
@@ -168,8 +270,9 @@ def extract_headers(environ: Dict[str, Any], cfg: Config) -> Tuple[Dict[str, str
             kept: Dict[str, str] = {}
             others = 0
             for cname, cval in parse_cookie_header(value):
-                if any(fnmatch.fnmatchcase(cname, p) for p in cookie_patterns):
-                    kept[cname] = cval[:512]
+                if len(kept) < MAX_KEPT_COOKIES and any(fnmatch.fnmatchcase(cname, p) for p in cookie_patterns):
+                    # A comma is not a cookie character: past it is another Cookie header the server merged in.
+                    kept[cname] = cval.split(",", 1)[0].rstrip()[:512]
                 else:
                     others += 1
             cookies = {"kept": kept, "others": others}
@@ -195,7 +298,7 @@ def server_info(environ: Dict[str, Any]) -> Dict[str, Any]:
 def read_body(environ: Dict[str, Any], limit: int) -> Tuple[Optional[bytes], int]:
     """Read at most `limit` bytes. Returns (body or None when too large, declared/observed size)."""
     try:
-        length = int(environ.get("CONTENT_LENGTH") or 0)
+        length = max(0, min(MAX_DECLARED_LENGTH, int(environ.get("CONTENT_LENGTH") or 0)))
     except ValueError:
         length = 0
     stream = environ.get("wsgi.input")
@@ -237,6 +340,9 @@ class Collector:
         self._store = store
         self._store_key: Optional[Tuple] = None
         self._logging_configured = False
+        self._disk_checked = 0.0
+        self._disk_free: Optional[int] = None
+        self._disk_warned = 0.0
 
     # -- infrastructure --------------------------------------------------
 
@@ -276,11 +382,17 @@ class Collector:
             cfg = self.holder.get()
             self._configure_logging(cfg)
         except Exception:
-            log.exception("configuration unavailable")
+            ERRORS.exception("configuration unavailable")
             return _respond(start_response, "503 Service Unavailable", [("Content-Type", "text/plain")],
                             b"configuration error\n")
         path = environ.get("PATH_INFO") or "/"
         method = environ.get("REQUEST_METHOD", "GET").upper()
+        exposed = web_root_exposure(cfg, environ.get("DOCUMENT_ROOT"))
+        if exposed:
+            ERRORS.error("refusing to run: %s is inside the web root %s, where its files could be downloaded "
+                         "(move it, or set [server] allow_data_in_web_root)", exposed, environ.get("DOCUMENT_ROOT"))
+            return _respond(start_response, "503 Service Unavailable", [("Content-Type", "text/plain")],
+                            b"configuration error\n")
         try:
             if path == "/collect":
                 if method == "POST":
@@ -306,7 +418,7 @@ class Collector:
             if method in ("GET", "HEAD") and (path.startswith("/ts") or path == "/robots.txt"):
                 return self.handle_static(cfg, environ, start_response, path)
         except Exception:
-            log.exception("unhandled error on %s %s", method, path)
+            ERRORS.exception("unhandled error on %s %s", method, path)
             if path == "/p.gif":
                 return _respond(start_response, "200 OK", _gif_headers(), GIF)
             return _respond(start_response, "500 Internal Server Error", [("Content-Type", "text/plain")],
@@ -354,39 +466,133 @@ class Collector:
 
     def _identity(self, cfg: Config, site: Optional[SiteConfig], environ: Dict[str, Any],
                   headers: Dict[str, str]) -> Tuple[Optional[str], Dict[str, str]]:
+        """What is kept about the requester: the address (anonymized in privacy mode) and the headers. A Referer
+        can hold the full page URL (beacons, the pixel): its secrets are redacted with the site's redact_params
+        and redact_paths (redact.py), as the tracker does for the URLs it sends."""
         privacy = site.privacy if site else cfg.privacy
         ip = environ.get("REMOTE_ADDR") or None
         if privacy.get("hash_ip") or privacy.get("truncate_ip"):
             secret = cfg.secret
             ip = anonymize_ip(ip, privacy["hash_ip"], privacy["truncate_ip"], secret)
             headers = anonymize_headers(headers, privacy["hash_ip"], privacy["truncate_ip"], secret)
+        if "referer" in headers:
+            settings = (site or cfg.site_or_default(None)).settings
+            headers["referer"] = redact_url(headers["referer"], patterns(settings["redact_params"]),
+                                            patterns(settings["redact_paths"]))
         return ip, headers
 
     def _rate_key(self, cfg: Config, environ: Dict[str, Any]) -> Optional[str]:
+        """The client's identity for the allowances: the connecting address, or the address the configured
+        header gives, believed only when the connection comes from a listed proxy (rate_limit_proxies) and the
+        value is an IP address: anyone else could invent a new identity per request, or borrow a victim's."""
+        remote = environ.get("REMOTE_ADDR") or None
         key_name = cfg.server["rate_limit_key"]
-        if key_name == "remote_addr":
-            return environ.get("REMOTE_ADDR") or None
-        value = environ.get("HTTP_" + key_name.upper().replace("-", "_"))
-        if value:
-            return value.split(",")[0].strip()[:64]
-        return environ.get("REMOTE_ADDR") or None
+        value = None
+        if key_name != "remote_addr" and remote and in_networks(remote, networks(tuple(cfg.rate_limit_proxies()))):
+            header = environ.get("HTTP_" + key_name.upper().replace("-", "_"))
+            if header:  # the last value: the one the nearest proxy appended (earlier ones are the client's say)
+                candidate = header.split(",")[-1].strip()[:64]
+                if _address(candidate) is not None:
+                    value = candidate
+        return client_key(value or remote, cfg.server["rate_limit_ipv6_prefix"])
 
-    def _write(self, cfg: Config, kind: str, rec: Any, environ: Dict[str, Any]) -> str:
+    def _client_id(self, cfg: Config, environ: Dict[str, Any]) -> str:
+        """The client in allowance keys: its key (_rate_key), hashed with the secret as hash_ip does, so the
+        rate_limits table (and its backups) never holds an address, whatever the privacy settings."""
+        return hash_ip(self._rate_key(cfg, environ) or "-", cfg.secret)
+
+    def _refused_early(self, cfg: Config, environ: Dict[str, Any], site: Optional[SiteConfig], chunk: bool,
+                       size: int) -> bool:
+        """A client already over its request or kilobyte allowance this minute is refused before its body is
+        decompressed, parsed or compressed (the costly part of a request): charged (r: 1, then kb: the body
+        received) and counted as any refusal, under the site the query string names if it is configured."""
+        s = cfg.server
+        client = self._client_id(cfg, environ)
+        caps = {"r:" + client: s["chunk_rate_limit_per_minute"] if chunk else s["rate_limit_per_minute"],
+                "kb:" + client: s["chunk_kb_per_minute"] if chunk else s["rate_limit_kb_per_minute"]}
+        caps = {k: v for k, v in caps.items() if v > 0}
+        if not caps or self._disk_low(cfg):  # low disk: the normal path answers 503 without touching the database
+            return False
+        stream, now = ("chunks" if chunk else "events"), now_ms()
         store = self.store(cfg)
-        limit = cfg.server["rate_limit_per_minute"]
-        key = self._rate_key(cfg, environ)
+        try:
+            used = store.usage(stream, list(caps), now)
+            if not any(used.get(k, 0) >= cap for k, cap in caps.items()):
+                return False
+            limits = self._limits(cfg, environ, site, chunk=chunk, size=size, flagged=False)
+            store.refuse(stream, Limits(budgets=limits.budgets, site=limits.site), now)
+        except Exception:  # never refuse because the check itself failed
+            ERRORS.exception("could not check allowances")
+            return False
+        return True
+
+    def _limits(self, cfg: Config, environ: Dict[str, Any], site: Optional[SiteConfig], chunk: bool,
+                size: int, flagged: bool, hits: int = 0) -> Limits:
+        """What this request may consume (docs/configuration.md, "Limits and abuse protection").
+
+        Per client and minute: requests and kilobytes (separate allowances for /chunk); requests that would
+        only be stored flagged have their own, smaller allowance, per client and for all clients together;
+        a configured site has a daily quota of stored hits."""
+        s = cfg.server
+        client = self._client_id(cfg, environ)
+        # Every key carries a prefix, so no client value (a header can say anything) can alias another row.
+        budgets = [
+            Budget("r:" + client, 1, s["chunk_rate_limit_per_minute"] if chunk else s["rate_limit_per_minute"],
+                   "chunk_rate_limited" if chunk else "rate_limited"),
+            Budget("kb:" + client, _kb(size), s["chunk_kb_per_minute"] if chunk else s["rate_limit_kb_per_minute"],
+                   "chunk_rate_limited" if chunk else "rate_limited"),
+        ]
+        if flagged:
+            budgets.append(Budget("f:" + client, 1, s["flagged_per_minute"], "flagged_limited"))
+            budgets.append(Budget("*f", 1, s["flagged_global_per_minute"], "flagged_limited"))
+        quota = 0
+        if site is not None and not flagged and not chunk:
+            quota = max(0, int(site.settings.get("max_hits_per_day") or 0))
+        return Limits(budgets=tuple(budgets), site=site.id if site is not None else "", quota=quota,
+                      hits=hits if site is not None and not flagged and not chunk else 0)
+
+    def _disk_low(self, cfg: Config) -> bool:
+        """True when the data directory's file system has less free space than min_free_disk_mb."""
+        need = int(cfg.server["min_free_disk_mb"] or 0)
+        if need <= 0:
+            return False
+        now = time.monotonic()
+        if now - self._disk_checked >= DISK_CHECK_SECONDS or self._disk_checked == 0.0:
+            self._disk_checked = now
+            path = os.path.abspath(cfg.data_dir or ".")
+            while not os.path.exists(path) and os.path.dirname(path) != path:
+                path = os.path.dirname(path)
+            try:
+                self._disk_free = shutil.disk_usage(path).free
+            except OSError:
+                self._disk_free = None
+        low = self._disk_free is not None and self._disk_free < need * 1024 * 1024
+        if low and now - self._disk_warned > 60:
+            self._disk_warned = now
+            log.warning("less than %d MB free in %s: refusing writes (503)", need, cfg.data_dir)
+        return low
+
+    def _write(self, cfg: Config, kind: str, rec: Any, limits: Limits) -> str:
+        store = self.store(cfg)
         try:
             if kind == "chunk":
-                return store.write_chunk(rec, key, limit)
-            return store.write_request(rec, key, limit)
+                return store.write_chunk(rec, limits)
+            return store.write_request(rec, limits)
         except (sqlite3.Error, OSError) as exc:  # no spool fallback configured, or the spool failed too
             raise StorageError("could not store the record: %s" % exc) from exc
 
-    def _count(self, cfg: Config, site_id: Optional[str], name: str) -> None:
+    def _count(self, cfg: Config, site: Optional[SiteConfig], name: str, environ: Dict[str, Any]) -> None:
+        """Count a request that stores nothing else (a DNT/GPC drop, an oversize chunk), under a configured site
+        only (never an id from the request), and only within the client's request allowance: a flood of them
+        must not become a flood of writes."""
+        limits = Limits(budgets=(Budget("r:" + self._client_id(cfg, environ), 1,
+                                        cfg.server["rate_limit_per_minute"], ""),),
+                        site=site.id if site is not None else "")
         try:
-            self.store(cfg).record_counter(time.strftime("%Y-%m-%d", time.gmtime()), site_id, name)
+            self.store(cfg).record_counter(time.strftime("%Y-%m-%d", time.gmtime()),
+                                           site.id if site is not None else "", name, 1, limits)
         except Exception:
-            log.exception("could not record counter %s", name)
+            ERRORS.exception("could not record counter %s", name)
 
     # -- /collect --------------------------------------------------------
 
@@ -407,6 +613,11 @@ class Collector:
         content_type = environ.get("CONTENT_TYPE") or None
         headers, cookies = extract_headers(environ, cfg)
         body, size = read_body(environ, s["max_payload_kb"] * 1024)
+        if body is not None:
+            q_site = cfg.site(_str(qs.get("site", [None])[0], 100))
+            if self._refused_early(cfg, environ, q_site, chunk=False, size=size + len(query)):
+                return _respond(start_response, "429 Too Many Requests", self._base_headers(cfg) +
+                                self._cors(cfg, environ, q_site) + [("Retry-After", "60")])
 
         rec = RequestRecord(received_at=received, endpoint="collect", method="POST", site_id=None,
                             site_status="invalid", ip=None, headers=headers, cookies=cookies,
@@ -414,15 +625,18 @@ class Collector:
                             server=server_info(environ))
         status = "204 No Content"
         envelope: Optional[Dict[str, Any]] = None
+        stored_size = size  # what this request would store, for the per-minute KB budget
 
         if body is None:
             rec.error = "too_large"
             rec.site_status = "too_large"
             rec.site_id = _str(qs.get("site", [None])[0], 100)
             status = "413 Payload Too Large"
+            stored_size = s["max_payload_kb"] * 1024 + 1  # what was read, not what the request claims
         else:
             envelope, error, encoding, data = self._parse_envelope(body, environ, s, content_type)
             rec.body_encoding = encoding
+            stored_size = max(size, len(data))
             if error:
                 rec.error = error
                 rec.body = body
@@ -437,10 +651,14 @@ class Collector:
         else:
             rec.site_id = rec.site_id or _str(qs.get("site", [None])[0], 100)
             site = cfg.site(rec.site_id)
+        cors = self._cors(cfg, environ, site)
         dropped = self._privacy_drop(cfg, site, environ)
         if dropped:
-            self._count(cfg, rec.site_id, dropped)
-            return _respond(start_response, "204 No Content", self._base_headers(cfg) + self._cors(cfg, environ, site))
+            self._count(cfg, site, dropped, environ)
+            return _respond(start_response, "204 No Content", self._base_headers(cfg) + cors)
+        if self._disk_low(cfg):
+            return _respond(start_response, "503 Service Unavailable",
+                            self._base_headers(cfg) + cors + [("Retry-After", "300")])
         rec.ip, rec.headers = self._identity(cfg, site, environ, rec.headers)
 
         if envelope is not None:
@@ -450,18 +668,29 @@ class Collector:
             rec.envelope = {k: v for k, v in envelope.items() if k != "events"}
             if errors:
                 rec.error = ",".join(errors)
-                if "no_events" in errors or "not_an_object" in errors:
+                if any(e in ("no_events", "not_an_object") or e.startswith("too_many_events") for e in errors):
                     status = "400 Bad Request"
+                if any(e.startswith("too_many_events") for e in errors):
+                    rec.body = body  # the events not stored as hits stay in the raw body
 
+        flagged = is_flagged(rec)  # a batch with a few invalid events still has good hits: normal allowances
+        # What the request stores: its body, its hits as serialized (re-serialized numbers can be longer than
+        # sent: 9e15 becomes 9000000000000000.0), at least HIT_COST a hit, and the headers.
+        stored_hits = sum(len(h.data) for h in rec.hits if h.data)
+        charged = (max(stored_size, HIT_COST * len(rec.hits), stored_hits) + len(query)
+                   + header_bytes(rec.headers, rec.cookies))
+        limits = self._limits(cfg, environ, site, chunk=False, size=charged, flagged=flagged, hits=len(rec.hits))
         try:
-            outcome = self._write(cfg, "request", rec, environ)
+            outcome = self._write(cfg, "request", rec, limits)
         except StorageError:
-            log.exception("storage unavailable")
+            ERRORS.exception("storage unavailable")
             return _respond(start_response, "503 Service Unavailable",
-                            self._base_headers(cfg) + self._cors(cfg, environ, site) + [("Retry-After", "60")])
-        headers_out = self._base_headers(cfg) + self._cors(cfg, environ, site)
-        if outcome == RATE_LIMITED:
+                            self._base_headers(cfg) + cors + [("Retry-After", "60")])
+        headers_out = self._base_headers(cfg) + cors
+        if outcome == RATE_LIMITED and status.startswith("204"):  # 400 and 413 stand: retrying cannot help
             return _respond(start_response, "429 Too Many Requests", headers_out + [("Retry-After", "60")])
+        if outcome == RATE_LIMITED:
+            return _respond(start_response, status, headers_out)
         if status.startswith("204") and site is not None and rec.site_status == "ok" and envelope is not None:
             cookie = self._server_cookie(site, envelope, environ)
             if cookie:
@@ -494,11 +723,13 @@ class Collector:
             form = parse_qs(text, keep_blank_values=True)
             text = (form.get("d") or form.get("data") or [""])[0]
         try:
-            obj = json.loads(text, parse_constant=_reject_constant)
+            obj = json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
         except (ValueError, RecursionError) as exc:
             return None, "bad_json: %s" % str(exc)[:120], encoding, data
         if not isinstance(obj, dict):
             return None, "not_an_object", encoding, data
+        if _deeper_than(obj, MAX_JSON_DEPTH):  # nothing the tracker sends nests deeper than a few levels
+            return None, "bad_json: nested deeper than %d levels" % MAX_JSON_DEPTH, encoding, data
         if _SURROGATE_ESCAPE_RE.search(text):  # only \uD800-\uDFFF escapes can produce lone surrogates
             obj = _replace_surrogates(obj)
         return obj, None, encoding, data
@@ -531,16 +762,25 @@ class Collector:
         dropped = self._privacy_drop(cfg, site, environ)
         cors = self._cors(cfg, environ, site)
         if dropped:
-            self._count(cfg, site_id, dropped)
+            self._count(cfg, site, dropped, environ)
             return _respond(start_response, "204 No Content", self._base_headers(cfg) + cors)
         body, size = read_body(environ, s["max_chunk_kb"] * 1024)
         if body is None:
-            self._count(cfg, site_id, "chunk_too_large")
+            self._count(cfg, site, "chunk_too_large", environ)
             return _respond(start_response, "413 Payload Too Large", self._base_headers(cfg) + cors)
+        if self._disk_low(cfg):
+            return _respond(start_response, "503 Service Unavailable",
+                            self._base_headers(cfg) + cors + [("Retry-After", "300")])
+        if self._refused_early(cfg, environ, site, chunk=True, size=size + len(query)):
+            return _respond(start_response, "429 Too Many Requests", self._base_headers(cfg) + cors +
+                            [("Retry-After", "60")])
         kind = qs.get("k") if qs.get("k") in CHUNK_KINDS else "_invalid"
         error = None if kind != "_invalid" else "unknown_kind"
         if not body:
             error = "empty_body"
+        if site is not None and site_status == "ok" and kind in CHUNK_FEATURES \
+                and not site.features.get(CHUNK_FEATURES[kind]):
+            site_status = "feature_off"  # the site does not record this kind: stored flagged, within its allowance
         if body[:2] == b"\x1f\x8b":
             payload, encoding = body, "gzip"
         else:
@@ -558,13 +798,17 @@ class Collector:
                           session_id=_str(qs.get("sid"), 64), page_id=_str(qs.get("pid"), 64),
                           seq=_int(qs.get("seq")), client_ts=_int(qs.get("ts")), url=_str(qs.get("url"), 2048),
                           ip=ip, error=error)
+        charged = size + len(query) + header_bytes({h: meta[h] for h in ("user-agent", "origin", "referer") if h in meta},
+                                                   None)
+        limits = self._limits(cfg, environ, site, chunk=True, size=charged,
+                              flagged=site_status != "ok" or error is not None)
         try:
-            outcome = self._write(cfg, "chunk", rec, environ)
+            outcome = self._write(cfg, "chunk", rec, limits)
         except StorageError:
-            log.exception("storage unavailable")
+            ERRORS.exception("storage unavailable")
             return _respond(start_response, "503 Service Unavailable",
                             self._base_headers(cfg) + cors + [("Retry-After", "60")])
-        if outcome == RATE_LIMITED:
+        if outcome == RATE_LIMITED and not error:
             return _respond(start_response, "429 Too Many Requests", self._base_headers(cfg) + cors +
                             [("Retry-After", "60")])
         return _respond(start_response, "400 Bad Request" if error else "204 No Content",
@@ -585,7 +829,7 @@ class Collector:
             return _respond(start_response, "200 OK", _gif_headers(), GIF, head=method == "HEAD")
         headers, cookies = extract_headers(environ, cfg)
         ip, headers = self._identity(cfg, site, environ, headers)
-        url = first.get("u") or first.get("url") or environ.get("HTTP_REFERER")
+        url = first.get("u") or first.get("url") or headers.get("referer")
         hit = HitRecord(seq=0, data=_dumps(data), type=_str(first.get("t"), 32) or "pageview",
                         name=_str(first.get("n"), 200), event_id=_str(first.get("id"), 64),
                         visitor_id=_str(first.get("vid"), 64), session_id=_str(first.get("sid"), 64),
@@ -594,10 +838,13 @@ class Collector:
         rec = RequestRecord(received_at=received, endpoint="pixel", method=method, site_id=site_id,
                             site_status=site_status, ip=ip, headers=headers, cookies=cookies,
                             query=query or None, server=server_info(environ), hits=[hit])
-        try:
-            self._write(cfg, "request", rec, environ)
-        except StorageError:
-            log.exception("storage unavailable (pixel)")
+        if not self._disk_low(cfg):
+            limits = self._limits(cfg, environ, site, chunk=False, flagged=is_flagged(rec), hits=1,
+                                  size=max(len(query), HIT_COST) + header_bytes(headers, cookies))
+            try:
+                self._write(cfg, "request", rec, limits)
+            except StorageError:
+                ERRORS.exception("storage unavailable (pixel)")
         return _respond(start_response, "200 OK", _gif_headers(), GIF, head=method == "HEAD")
 
     # -- /config.js ------------------------------------------------------
@@ -621,8 +868,10 @@ class Collector:
             payload = body
         else:
             headers.append(("Content-Type", "application/javascript; charset=utf-8"))
-            payload = ('(window.tidesight=window.tidesight||function(){(tidesight.q=tidesight.q||[])'
-                       '.push(arguments)})("_config",%s);\n' % body)
+            # Queues the configuration for the tracker, or hands it over if the tracker runs already. Never throws,
+            # even if markup on the page made window.tidesight an element (<a id="tidesight">).
+            payload = ('(typeof window.tidesight=="function"?window.tidesight:window.tidesight=function(){'
+                       '(tidesight.q=tidesight.q||[]).push(arguments)})("_config",%s);\n' % body)
         return _respond(start_response, "200 OK", headers, payload.encode("utf-8"), head=method == "HEAD")
 
     # -- /health ---------------------------------------------------------
@@ -669,7 +918,10 @@ class Collector:
 
 def build_hits(envelope: Dict[str, Any], max_events: int,
                site: Optional[SiteConfig] = None) -> Tuple[List[HitRecord], List[str]]:
-    """Split an envelope into hit records with typed columns. Never drops an event."""
+    """Split an envelope into hit records with typed columns.
+
+    At most `max_events` become hits: one request must not turn into an unbounded number of rows. The
+    caller keeps the raw body of a longer batch, flagged "too_many_events:<count>", so nothing is lost."""
     errors: List[str] = []
     if not isinstance(envelope.get("v"), int) or isinstance(envelope.get("v"), bool):
         errors.append("bad_version")
@@ -678,7 +930,8 @@ def build_hits(envelope: Dict[str, Any], max_events: int,
         errors.append("no_events")
         return [], errors
     if len(events) > max_events:
-        errors.append("too_many_events")
+        errors.append("too_many_events:%d" % len(events))
+        events = events[:max_events]
     drop_fp = bool(site and site.privacy.get("drop_fingerprint"))
     vid = _str(envelope.get("vid"), 64)
     sid = _str(envelope.get("sid"), 64)

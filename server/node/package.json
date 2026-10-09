@@ -10,7 +10,8 @@
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.mjs",
-    "check": "node --check server.mjs && node --check core/collector.mjs"
+    "check": "node --check server.mjs && node --check core/collector.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.mjs\" \"../worker/test/*.test.mjs\""
   },
   "license": "MIT"
 }

@@ -5,13 +5,23 @@
  *
  * Storage interface (implemented by the Node SQLite/spool stores and by the Worker's D1 store):
  *
- *   label                                   what /health reports as "storage"
- *   async writeRequest(rec, rateKey, limit)  → STORED | RATE_LIMITED | SPOOLED; throws StorageError when the
- *   async writeChunk(rec, rateKey, limit)      record could not be stored anywhere. The per-key rate limit
- *                                             (requests per minute, 0 = off) is applied atomically with the
- *                                             write, and a refused /collect request counts "rate_limited".
- *   async recordCounter(day, siteId, name, n)
- *   async healthy()                          → boolean
+ *   label                                 what /health reports as "storage"
+ *   async writeRequest(rec, limits)       → STORED | RATE_LIMITED | SPOOLED; throws StorageError when the record
+ *   async writeChunk(rec, limits)           could not be stored anywhere. `limits` (storage.Limits) is checked
+ *                                           atomically with the write: each budget in order adds its amount to
+ *                                           rate_limits(key, minute) and the first one over its limit refuses the
+ *                                           record; then a request's hits must fit the site's daily quota (the
+ *                                           counters row "hits"). A refusal is counted under limits.site
+ *                                           (RATE_LIMITED); a stored request adds its hits to "hits".
+ *   async recordCounter(day, siteId, name, n, limits)  count something; with budgets, only while they hold (the
+ *                                           budgets are consumed either way), in one events.db transaction
+ *   async usage(stream, keys, nowMs)      → {key: used}: what this minute has used of these allowance keys in the
+ *                                           stream ("events" | "chunks"), read only
+ *   async refuse(stream, limits, nowMs)   → counter name | null: charge a request refused before its body was
+ *                                           parsed and count the refusal (null: the allowance was just renewed)
+ *   async healthy()                       → boolean
+ * A store may also answer TOO_LARGE: a row its database cannot hold (D1's 2 MB); only the request's metadata was
+ * stored, as for an oversize body.
  */
 
 import { dumpsCompact } from "./pyjson.mjs";
@@ -19,6 +29,45 @@ import { dumpsCompact } from "./pyjson.mjs";
 export const STORED = "stored";
 export const RATE_LIMITED = "rate_limited";
 export const SPOOLED = "spooled";
+export const TOO_LARGE = "too_large";
+
+/**
+ * storage.Budget: a per-minute allowance, counted in the rate_limits table in the same transaction as the write.
+ * key: "r:<client>" (requests), "kb:<client>" (kilobytes), "f:<client>" and "*f" (flagged requests) — every key
+ * carries a prefix, so no client value can alias another row; amount: what this request consumes (1, or its size
+ * in KB); limit: per clock minute, 0 = unlimited; counter: the counters name recorded when it is exceeded.
+ */
+export function budget(key, amount, limit, counter) {
+  return { key, amount, limit, counter };
+}
+
+/**
+ * storage.Limits: everything a write must fit in. site is the counters site_id (a configured site, or "", never
+ * an id taken from the request); quota the site's stored hits per UTC day (0 = unlimited); hits what this request
+ * adds to the counters row "hits".
+ */
+export function makeLimits({ budgets = [], site = "", quota = 0, hits = 0 } = {}) {
+  return { budgets, site, quota, hits };
+}
+
+export const NO_LIMITS = Object.freeze(makeLimits());
+
+/** True for a budget that applies (storage: `if not b.key or b.limit <= 0: continue`). */
+export function activeBudget(b) {
+  return Boolean(b.key) && b.limit > 0;
+}
+
+/**
+ * storage.is_flagged: a request stored only as a flagged record — wrong or unknown site or origin, unreadable,
+ * no events or too many. A batch with a few invalid events or a bad version still holds good hits and is not
+ * flagged; a pixel is flagged only by its site status.
+ */
+export function isFlagged(rec) {
+  if (rec.site_status !== "ok") return true;
+  if (rec.endpoint === "pixel") return false;
+  if (rec.envelope === null) return true;
+  return String(rec.error || "").split(",").some((e) => e === "no_events" || e.startsWith("too_many_events"));
+}
 
 /** The record could not be stored anywhere (the collector answers 503 so trackers retry). */
 export class StorageError extends Error {

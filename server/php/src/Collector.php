@@ -36,7 +36,7 @@ final class Request
         $s = $_SERVER;
         $r->server = $s;
         $method = isset($s['REQUEST_METHOD']) ? (string) $s['REQUEST_METHOD'] : 'GET';
-        $r->method = strtr($method, 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ');
+        $r->method = Util::upperLatin1(Util::latin1($method)); // environ["REQUEST_METHOD"].upper(), stored as text
         $uri = isset($s['REQUEST_URI']) ? (string) $s['REQUEST_URI'] : '/';
         $q = strpos($uri, '?');
         $rawPath = $q === false ? $uri : substr($uri, 0, $q);
@@ -89,14 +89,18 @@ final class Request
         return 'http';
     }
 
+    /** collect.MAX_DECLARED_LENGTH: larger Content-Length values are recorded as this (2^53 - 1). */
+    const MAX_DECLARED_LENGTH = 9007199254740991;
+
     /**
      * collect.read_body: at most $limit bytes. Returns array(body or null when too large,
-     * declared/observed size).
+     * declared/observed size), the declared length clamped to 0..2^53-1.
      */
     public function body($limit)
     {
         $declared = trim((string) $this->raw('CONTENT_LENGTH'));
-        $length = preg_match('/\A[+-]?[0-9]+\z/', $declared) === 1 ? (int) $declared : 0;
+        $length = preg_match('/\A[+-]?[0-9]+\z/', $declared) === 1 ? (int) $declared : 0; // saturates at PHP_INT_MAX
+        $length = max(0, min(self::MAX_DECLARED_LENGTH, $length));
         if ($length > $limit) {
             return array(null, $length);
         }
@@ -124,7 +128,9 @@ final class Response
         self::$sent = true;
         $empty = $code === 204 || $code === 304;
         if (!headers_sent()) {
-            header_remove('X-Powered-By');
+            if (function_exists('header_remove')) {
+                @header_remove('X-Powered-By');
+            }
             http_response_code($code);
             foreach ($headers as $h) {
                 header($h[0] . ': ' . $h[1], false);
@@ -146,6 +152,13 @@ final class Collector
     const ACCEPT_CH = 'Sec-CH-UA, Sec-CH-UA-Mobile, Sec-CH-UA-Platform, Sec-CH-UA-Platform-Version, Sec-CH-UA-Model, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Arch, Sec-CH-UA-Bitness, Sec-CH-UA-Form-Factors, Sec-CH-UA-WoW64, Viewport-Width, DPR, Device-Memory, RTT, Downlink, ECT, Sec-CH-Prefers-Color-Scheme, Sec-CH-Prefers-Reduced-Motion';
 
     const CHUNK_KINDS = array('replay', 'mouse', 'snapshot');
+    /** The site feature each chunk kind needs (collect.CHUNK_FEATURES). */
+    const CHUNK_FEATURES = array('replay' => 'replay', 'mouse' => 'mouse_moves', 'snapshot' => 'dom_snapshots');
+    /** Bytes charged per stored hit: a row costs about that much, however small its JSON. */
+    const HIT_COST = 256;
+    /** Objects and arrays nested deeper than this make a body unreadable (bad_json). */
+    const MAX_JSON_DEPTH = 64;
+    const MAX_KEPT_COOKIES = 20;
     const MAX_HEADER_VALUE = 8192;
     const REDACTED = '[redacted]';
     const ALWAYS_SECRET = array('authorization', 'proxy-authorization');
@@ -168,6 +181,8 @@ final class Collector
     private $entryDir;
     /** @var SqliteStore|SpoolStore|FallbackStore|null */
     private $store = null;
+    /** @var float|int|false|null free bytes in the data directory's file system (null: not read yet) */
+    private $diskFree = null;
 
     public function __construct($entryDir)
     {
@@ -189,7 +204,20 @@ final class Collector
         try {
             $cfg = Config::load($this->entryDir);
         } catch (\Throwable $e) {
-            Log::exception('configuration unavailable', $e);
+            // No data directory is known: the error budget's state goes next to the configuration file, if any.
+            try {
+                $stateDir = dirname(Config::findPath($this->entryDir));
+            } catch (\Throwable $e2) {
+                $stateDir = null;
+            }
+            ErrorLog::exception($stateDir, 'configuration unavailable', $e);
+            Response::send(503, array(array('Content-Type', 'text/plain')), "configuration error\n");
+            return;
+        }
+        $exposed = self::webRootExposure($cfg, $req->raw('DOCUMENT_ROOT'));
+        if ($exposed !== null) {
+            ErrorLog::error($cfg->dataDir, sprintf('refusing to run: %s is inside the web root %s, where its files could '
+                . 'be downloaded (move it, or set [server] allow_data_in_web_root)', $exposed, $req->raw('DOCUMENT_ROOT')));
             Response::send(503, array(array('Content-Type', 'text/plain')), "configuration error\n");
             return;
         }
@@ -200,7 +228,7 @@ final class Collector
                 return;
             }
         } catch (\Throwable $e) {
-            Log::exception('unhandled error on ' . $method . ' ' . $path, $e);
+            ErrorLog::exception($cfg->dataDir, 'unhandled error on ' . $method . ' ' . $path, $e);
             if ($path === '/p.gif') {
                 Response::send(200, self::gifHeaders(), self::GIF);
                 return;
@@ -214,6 +242,57 @@ final class Collector
             }
         }
         Response::send(404, array(array('Content-Type', 'text/plain')), "not found\n");
+    }
+
+    /**
+     * collect.web_root_exposure: which of the data directory, the configuration file and the log file lies
+     * inside the web server's document root (where anyone could download the databases or the secret), or null.
+     */
+    private static function webRootExposure(Config $cfg, $documentRoot)
+    {
+        if ($documentRoot === null || $documentRoot === '' || !empty($cfg->server['allow_data_in_web_root'])) {
+            return null;
+        }
+        $root = self::realPath($documentRoot);
+        $prefix = rtrim($root, '/\\') . DIRECTORY_SEPARATOR;
+        foreach (array('the data directory' => $cfg->dataDir, 'the configuration file' => $cfg->path,
+                     'the log file' => (string) $cfg->server['log_file']) as $what => $path) {
+            if ($path === null || $path === '') {
+                continue;
+            }
+            $real = self::realPath($path);
+            if ($real === $root || strncmp($real, $prefix, strlen($prefix)) === 0) {
+                return $what . ' (' . $path . ')';
+            }
+        }
+        return null;
+    }
+
+    /**
+     * os.path.normcase(os.path.realpath(path)): symbolic links resolved as far as the path exists, the rest
+     * appended (PHP's realpath() fails for a path that does not exist yet); case-folded on Windows.
+     */
+    private static function realPath($path)
+    {
+        $tail = array();
+        $p = (string) $path;
+        while (($real = Util::realpath($p)) === false) {
+            $parent = dirname($p);
+            if ($parent === $p || $parent === '.' || $parent === '') {
+                $real = $p;
+                break;
+            }
+            array_unshift($tail, basename($p));
+            $p = $parent;
+        }
+        foreach ($tail as $part) {
+            if ($part === '..') {
+                $real = dirname($real);
+            } elseif ($part !== '.' && $part !== '') {
+                $real = rtrim($real, '/\\') . DIRECTORY_SEPARATOR . $part;
+            }
+        }
+        return DIRECTORY_SEPARATOR === '\\' ? strtolower(str_replace('/', '\\', $real)) : $real;
     }
 
     /** Dispatch; false when nothing matched (404). */
@@ -316,6 +395,11 @@ final class Collector
         return null;
     }
 
+    /**
+     * collect.Collector._identity: what is kept about the requester: the address (anonymised in privacy
+     * mode) and the headers. A Referer can hold the full page URL (beacons, the pixel): its secrets are
+     * redacted with the site's redact_params and redact_paths (Redact), as the tracker does for its URLs.
+     */
     private function identity(Config $cfg, $site, Request $req, array $headers)
     {
         $privacy = $site !== null ? $site['privacy'] : $cfg->privacy;
@@ -330,46 +414,198 @@ final class Collector
             $ip = Ip::anonymize($ip, $hash, $truncate, $secret);
             $headers = Ip::anonymizeHeaders($headers, $hash, $truncate, $secret);
         }
+        if (isset($headers['referer'])) {
+            list($names, $paths) = $cfg->redactPatterns($site);
+            $headers['referer'] = Redact::url($headers['referer'], $names, $paths);
+        }
         return array($ip, $headers);
     }
 
-    private function rateKey(Config $cfg, Request $req)
+    /**
+     * collect.Collector._rate_key: the client's identity for the allowances (Ip::clientKey), else "-".
+     * The connecting address, or the address the rate_limit_key header gives (its last value: the one
+     * the nearest proxy appended), believed only when the connection comes from one of
+     * rate_limit_proxies and the value is an IP address: anyone else could invent a new identity per
+     * request, or borrow a victim's.
+     */
+    private function clientKey(Config $cfg, Request $req)
     {
-        $keyName = (string) $cfg->server['rate_limit_key'];
         $remote = $req->text('REMOTE_ADDR');
-        $remote = $remote === '' ? null : $remote;
-        if ($keyName === 'remote_addr') {
-            return $remote;
+        if ($remote === '') {
+            $remote = null;
         }
-        $var = 'HTTP_' . strtr(str_replace('-', '_', $keyName), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ');
-        $value = $req->text($var);
-        if ($value !== null && $value !== '') {
-            $first = explode(',', $value);
-            return Util::cut(Util::pyStrip($first[0]), 64);
+        $keyName = (string) $cfg->server['rate_limit_key'];
+        $value = null;
+        if ($keyName !== 'remote_addr' && $remote !== null && Ip::inNetworks($remote, $cfg->server['rate_limit_proxies'])) {
+            $var = 'HTTP_' . strtr(str_replace('-', '_', $keyName), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ');
+            $header = $req->text($var);
+            if ($header !== null && $header !== '') {
+                $values = explode(',', $header);
+                $candidate = Util::cut(Util::pyStrip($values[count($values) - 1]), 64);
+                if (Ip::address($candidate) !== null) {
+                    $value = $candidate;
+                }
+            }
         }
-        return $remote;
+        $key = Ip::clientKey($value !== null ? $value : $remote, $cfg->server['rate_limit_ipv6_prefix']);
+        return $key === null ? '-' : $key;
     }
 
-    private function write(Config $cfg, $kind, $rec, Request $req)
+    /**
+     * collect.header_bytes: what a request's stored headers (as stored: redacted, anonymised) and kept
+     * cookies weigh, names and values, in characters.
+     */
+    private static function headerBytes(array $headers, $cookies)
     {
-        $store = $this->store($cfg);
-        $limit = (int) $cfg->server['rate_limit_per_minute'];
-        $key = $this->rateKey($cfg, $req);
+        $n = 0;
+        foreach ($headers as $k => $v) {
+            $n += Util::length((string) $k) + Util::length((string) $v);
+        }
+        if ($cookies !== null) {
+            foreach ($cookies['kept'] as $k => $v) {
+                $n += Util::length((string) $k) + Util::length((string) $v);
+            }
+        }
+        return $n;
+    }
+
+    /**
+     * collect.Collector._limits: what this request may consume (docs/configuration.md, "Limits and
+     * abuse protection"). Per client and minute: requests and kilobytes (separate allowances for
+     * /chunk); requests that would only be stored flagged have their own, smaller allowance, per
+     * client and for all clients together; a configured site has a daily quota of stored hits.
+     */
+    private function limits(Config $cfg, Request $req, $site, $chunk, $size, $flagged, $hits = 0)
+    {
+        $s = $cfg->server;
+        $client = $this->clientId($cfg, $req);
+        $counter = $chunk ? 'chunk_rate_limited' : 'rate_limited';
+        // Every key carries a prefix, so no client value (a header can say anything) can alias another row.
+        $limits = new Limits();
+        $limits->budgets[] = new Budget('r:' . $client, 1,
+            $chunk ? $s['chunk_rate_limit_per_minute'] : $s['rate_limit_per_minute'], $counter);
+        $limits->budgets[] = new Budget('kb:' . $client, Util::kb($size),
+            $chunk ? $s['chunk_kb_per_minute'] : $s['rate_limit_kb_per_minute'], $counter);
+        if ($flagged) {
+            $limits->budgets[] = new Budget('f:' . $client, 1, $s['flagged_per_minute'], 'flagged_limited');
+            $limits->budgets[] = new Budget('*f', 1, $s['flagged_global_per_minute'], 'flagged_limited');
+        }
+        $counted = $site !== null && !$flagged && !$chunk;
+        $limits->site = $site !== null ? (string) $site['id'] : '';
+        $limits->quota = $counted ? max(0, (int) $site['max_hits_per_day']) : 0;
+        $limits->hits = $counted ? (int) $hits : 0;
+        return $limits;
+    }
+
+    /**
+     * collect.Collector._disk_low: true when the file system of the data directory (or of its
+     * nearest existing parent) has less than min_free_disk_mb free. Read once per request (Python
+     * caches it for 10 s per process; statvfs is cheap). Unknown free space never refuses a write.
+     */
+    private function diskLow(Config $cfg)
+    {
+        $need = (int) $cfg->server['min_free_disk_mb'];
+        if ($need <= 0) {
+            return false;
+        }
+        if ($this->diskFree === null) {
+            $path = $cfg->dataDir !== '' ? $cfg->dataDir : '.';
+            while (!@file_exists($path) && dirname($path) !== $path) {
+                $path = dirname($path);
+            }
+            $free = function_exists('disk_free_space') ? @disk_free_space($path) : false;
+            $this->diskFree = is_float($free) || is_int($free) ? $free : false;
+        }
+        $low = $this->diskFree !== false && $this->diskFree < $need * 1048576;
+        if ($low && mt_rand(0, 99) === 0) { // Python logs this at most once a minute per process
+            ErrorLog::warning($cfg->dataDir, sprintf('less than %d MB free in %s: refusing writes (503)', $need, $cfg->dataDir));
+        }
+        return $low;
+    }
+
+    private function write(Config $cfg, $kind, $rec, Limits $limits)
+    {
         try {
-            return $kind === 'chunk' ? $store->writeChunk($rec, $key, $limit) : $store->writeRequest($rec, $key, $limit);
+            $store = $this->store($cfg);
+            return $kind === 'chunk' ? $store->writeChunk($rec, $limits) : $store->writeRequest($rec, $limits);
         } catch (StorageError $e) {
             throw $e;
-        } catch (\Exception $e) { // no spool fallback configured: a database error is still a 503
+        } catch (\Throwable $e) { // no spool fallback configured (or a function the host disabled): still a 503
             throw new StorageError('could not store the record: ' . $e->getMessage(), 0, $e);
         }
     }
 
-    private function count(Config $cfg, $siteId, $name)
+    /**
+     * collect.Collector._client_id: the client in allowance keys, its key hashed with the secret as
+     * privacy mode hashes addresses ("h:" + 16 hex digits of HMAC-SHA256), so the rate_limits table (and
+     * its backups) never holds an address, whatever the privacy settings.
+     */
+    private function clientId(Config $cfg, Request $req)
     {
+        return Ip::hash($this->clientKey($cfg, $req), $cfg->secret());
+    }
+
+    /**
+     * collect.Collector._refused_early: a client already over its request or kilobyte allowance this
+     * minute is refused before its body is decompressed, parsed or compressed (the costly part of a
+     * request): charged (r: 1, then kb: $size) and counted as any refusal, under $site (the configured
+     * site the query string names). Never refuses because the check itself failed.
+     */
+    private function refusedEarly(Config $cfg, Request $req, $site, $chunk, $size)
+    {
+        $s = $cfg->server;
+        $client = $this->clientId($cfg, $req);
+        $caps = array();
+        $r = (int) ($chunk ? $s['chunk_rate_limit_per_minute'] : $s['rate_limit_per_minute']);
+        $kb = (int) ($chunk ? $s['chunk_kb_per_minute'] : $s['rate_limit_kb_per_minute']);
+        if ($r > 0) {
+            $caps['r:' . $client] = $r;
+        }
+        if ($kb > 0) {
+            $caps['kb:' . $client] = $kb;
+        }
+        if (!$caps || $this->diskLow($cfg)) { // low disk: the normal path answers 503 without touching the database
+            return false;
+        }
+        $stream = $chunk ? 'chunks' : 'events';
+        $now = Util::nowMs();
         try {
-            $this->store($cfg)->recordCounter(gmdate('Y-m-d'), $siteId, $name);
+            $store = $this->store($cfg);
+            $used = $store->usage($stream, array_keys($caps), $now);
+            $over = false;
+            foreach ($caps as $key => $cap) {
+                $over = $over || (isset($used[$key]) && $used[$key] >= $cap);
+            }
+            if (!$over) {
+                return false;
+            }
+            $all = $this->limits($cfg, $req, $site, $chunk, $size, false);
+            $limits = new Limits();
+            $limits->budgets = $all->budgets;
+            $limits->site = $all->site;
+            $store->refuse($stream, $limits, $now);
         } catch (\Throwable $e) {
-            Log::exception('could not record counter ' . $name, $e);
+            ErrorLog::exception($cfg->dataDir, 'could not check allowances', $e);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * collect.Collector._count: count a request that stores nothing else (a DNT/GPC drop, an oversize
+     * chunk), under a configured site only (never an id from the request), and only within the client's
+     * request allowance (r:<client>, rate_limit_per_minute, in events.db): a flood of them must not
+     * become a flood of writes.
+     */
+    private function count(Config $cfg, $site, $name, Request $req)
+    {
+        $limits = new Limits();
+        $limits->budgets[] = new Budget('r:' . $this->clientId($cfg, $req), 1, $cfg->server['rate_limit_per_minute'], '');
+        $limits->site = $site !== null ? (string) $site['id'] : '';
+        try {
+            $this->store($cfg)->recordCounter(gmdate('Y-m-d'), $limits->site, $name, 1, $limits);
+        } catch (\Throwable $e) {
+            ErrorLog::exception($cfg->dataDir, 'could not record counter ' . $name, $e);
         }
     }
 
@@ -409,14 +645,22 @@ final class Collector
                 foreach (self::parseCookieHeader($value) as $pair) {
                     $cname = Util::latin1($pair[0]);
                     $match = false;
-                    foreach ($cookiePatterns as $p) {
-                        if (Util::fnmatch($cname, (string) $p)) {
-                            $match = true;
-                            break;
+                    if (count($kept) < self::MAX_KEPT_COOKIES) { // further matching cookies count as others
+                        foreach ($cookiePatterns as $p) {
+                            if (Util::fnmatch($cname, (string) $p)) {
+                                $match = true;
+                                break;
+                            }
                         }
                     }
                     if ($match) {
-                        $kept[$cname] = Util::latin1(substr($pair[1], 0, 512));
+                        // A comma is not a cookie character: past it is another Cookie header the server merged in.
+                        $v = $pair[1];
+                        $comma = strpos($v, ',');
+                        if ($comma !== false) {
+                            $v = rtrim(substr($v, 0, $comma), "\x09\x0A\x0B\x0C\x0D\x1C\x1D\x1E\x1F\x20\x85\xA0");
+                        }
+                        $kept[$cname] = Util::latin1(substr($v, 0, 512));
                     } else {
                         $others++;
                     }
@@ -523,6 +767,15 @@ final class Collector
         }
         list($headers, $cookies) = $this->extractHeaders($cfg, $req);
         list($body, $size) = $req->body((int) $s['max_payload_kb'] * 1024);
+        $queryBytes = strlen((string) $req->raw('QUERY_STRING')); // Python's len() of the ISO-8859-1 text
+        if ($body !== null) {
+            $qSite = $cfg->site(Util::str($qsSite, 100));
+            if ($this->refusedEarly($cfg, $req, $qSite, false, $size + $queryBytes)) {
+                Response::send(429, array_merge($this->baseHeaders($cfg), $this->cors($cfg, $req, $qSite),
+                    array(array('Retry-After', '60'))));
+                return;
+            }
+        }
 
         $rec = new RequestRecord();
         $rec->received_at = $received;
@@ -537,15 +790,18 @@ final class Collector
         $code = 204;
         $envelope = null;
         $exact = false;
+        $storedSize = $size; // what this request would store, for the per-minute KB budget
 
         if ($body === null) {
             $rec->error = 'too_large';
             $rec->site_status = 'too_large';
             $rec->site_id = Util::str($qsSite, 100);
             $code = 413;
+            $storedSize = (int) $s['max_payload_kb'] * 1024 + 1; // what was read, not what the request claims
         } else {
-            list($envelope, $error, $encoding, $exact) = $this->parseEnvelope($body, $req, $s, $contentType);
+            list($envelope, $error, $encoding, $exact, $dataBytes) = $this->parseEnvelope($body, $req, $s, $contentType);
             $rec->body_encoding = $encoding;
+            $storedSize = max($size, $dataBytes);
             if ($error !== null) {
                 $rec->error = $error;
                 $rec->body = $body;
@@ -568,10 +824,15 @@ final class Collector
             }
             $site = $cfg->site($rec->site_id);
         }
+        $cors = $this->cors($cfg, $req, $site);
         $dropped = $this->privacyDrop($cfg, $site, $req);
         if ($dropped !== null) {
-            $this->count($cfg, $rec->site_id, $dropped);
-            Response::send(204, array_merge($this->baseHeaders($cfg), $this->cors($cfg, $req, $site)));
+            $this->count($cfg, $site, $dropped, $req);
+            Response::send(204, array_merge($this->baseHeaders($cfg), $cors));
+            return;
+        }
+        if ($this->diskLow($cfg)) {
+            Response::send(503, array_merge($this->baseHeaders($cfg), $cors, array(array('Retry-After', '300'))));
             return;
         }
         list($rec->ip, $headers) = $this->identity($cfg, $site, $req, $headers);
@@ -584,24 +845,43 @@ final class Collector
             $rec->envelope = Json::dumps(Json::without($envelope, 'events'), $exact);
             if ($errors) {
                 $rec->error = implode(',', $errors);
-                if (in_array('no_events', $errors, true) || in_array('not_an_object', $errors, true)) {
+                $tooMany = false;
+                foreach ($errors as $e) {
+                    $tooMany = $tooMany || strncmp($e, 'too_many_events', 15) === 0;
+                }
+                if ($tooMany || in_array('no_events', $errors, true) || in_array('not_an_object', $errors, true)) {
                     $code = 400;
+                }
+                if ($tooMany) {
+                    $rec->body = $body; // the events not stored as hits stay in the raw body
                 }
             }
         }
 
+        $flagged = Storage::isFlagged($rec); // a batch with a few invalid events still has good hits: normal allowances
+        // What the request stores: its body, its hits as serialized (re-serialized numbers can be longer than
+        // sent: 9e15 becomes 9000000000000000.0), at least HIT_COST a hit, its query string and its headers.
+        $storedHits = 0;
+        foreach ($rec->hits as $h) {
+            $storedHits += Util::length($h->data);
+        }
+        $charged = max($storedSize, self::HIT_COST * count($rec->hits), $storedHits) + $queryBytes
+            + self::headerBytes($headers, $cookies);
+        $limits = $this->limits($cfg, $req, $site, false, $charged, $flagged, count($rec->hits));
         try {
-            $outcome = $this->write($cfg, 'request', $rec, $req);
+            $outcome = $this->write($cfg, 'request', $rec, $limits);
         } catch (StorageError $e) {
-            Log::exception('storage unavailable', $e);
-            Response::send(503, array_merge($this->baseHeaders($cfg), $this->cors($cfg, $req, $site),
-                array(array('Retry-After', '60'))));
+            ErrorLog::exception($cfg->dataDir, 'storage unavailable', $e);
+            Response::send(503, array_merge($this->baseHeaders($cfg), $cors, array(array('Retry-After', '60'))));
             return;
         }
-        $out = array_merge($this->baseHeaders($cfg), $this->cors($cfg, $req, $site));
+        $out = array_merge($this->baseHeaders($cfg), $cors);
         if ($outcome === Storage::RATE_LIMITED) {
-            $out[] = array('Retry-After', '60');
-            Response::send(429, $out);
+            if ($code === 204) { // 400 and 413 stand: retrying cannot help
+                $code = 429;
+                $out[] = array('Retry-After', '60');
+            }
+            Response::send($code, $out);
             return;
         }
         if ($code === 204 && $site !== null && $rec->site_status === 'ok' && $envelope !== null) {
@@ -613,7 +893,11 @@ final class Collector
         Response::send($code, $out);
     }
 
-    /** Decompress, decode and parse. Returns array(envelope or null, error or null, encoding, exact). */
+    /**
+     * Decompress, decode and parse. Returns array(envelope or null, error or null, encoding, exact,
+     * size of the decoded bytes: the decompressed body, or the body as received when it is not gzip
+     * or does not decompress).
+     */
     private function parseEnvelope($body, Request $req, array $s, $contentType)
     {
         $encoding = 'identity';
@@ -623,47 +907,50 @@ final class Collector
             $encoding = 'gzip';
             list($data, $err) = Util::gunzipBounded($body, (int) $s['max_decompressed_kb'] * 1024);
             if ($err !== null) {
-                return array(null, 'bad_gzip: ' . $err, $encoding, false);
+                return array(null, 'bad_gzip: ' . $err, $encoding, false, strlen($body));
             }
         } elseif ($contentEncoding !== '' && $contentEncoding !== 'identity') {
             $enc = Util::cut($contentEncoding, 40);
-            return array(null, 'unsupported_encoding: ' . $enc, $enc, false);
+            return array(null, 'unsupported_encoding: ' . $enc, $enc, false, strlen($body));
         }
+        $bytes = strlen($data);
         if ($data === '') {
-            return array(null, 'empty_body', $encoding, false);
+            return array(null, 'empty_body', $encoding, false, 0);
         }
         if (!Util::isUtf8($data)) {
-            return array(null, 'bad_utf8', $encoding, false);
+            return array(null, 'bad_utf8', $encoding, false, $bytes);
         }
         $text = strncmp($data, "\xEF\xBB\xBF", 3) === 0 ? (string) substr($data, 3) : $data;
         if ($contentType !== null && strpos(Util::lowerLatin($contentType), 'application/x-www-form-urlencoded') !== false) {
-            $form = Util::parseQs($text, true);
-            if (isset($form['d'])) {
-                $text = $form['d'][0];
-            } elseif (isset($form['data'])) {
-                $text = $form['data'][0];
-            } else {
-                $text = '';
-            }
+            $text = Util::firstFormValue($text, array('d', 'data')); // (form.get("d") or form.get("data") or [""])[0]
         }
-        if (strlen($data) > 1048576) { // a large body decodes into many PHP values: make room
-            self::ensureMemory(64 * strlen($data) + 64 * 1048576);
+        if (strlen($data) > 1048576) {
+            // A large body decodes into many PHP values: make room, sized by the configuration (the largest
+            // body it admits), never by what a request claims or sends.
+            $cap = max((int) $s['max_payload_kb'], (int) $s['max_decompressed_kb']) * 1024;
+            self::ensureMemory(64 * $cap + 64 * 1048576);
         }
         list($obj, $error, $exact) = Json::loads($text);
         if ($error !== null) {
-            return array(null, 'bad_json: ' . Util::cut($error, 120), $encoding, false);
+            return array(null, 'bad_json: ' . Util::cut($error, 120), $encoding, false, $bytes);
         }
         if (!Json::isObject($obj)) {
-            return array(null, 'not_an_object', $encoding, false);
+            return array(null, 'not_an_object', $encoding, false, $bytes);
+        }
+        if (Json::deeperThan($obj, self::MAX_JSON_DEPTH, $text)) { // nothing the tracker sends nests deeper than a few levels
+            return array(null, 'bad_json: nested deeper than ' . self::MAX_JSON_DEPTH . ' levels', $encoding, false, $bytes);
         }
         if (Util::$loneSurrogates) {
             $obj = Json::replaceSurrogates($obj);
         }
-        return array($obj, null, $encoding, $exact);
+        return array($obj, null, $encoding, $exact, $bytes);
     }
 
     private static function ensureMemory($bytes)
     {
+        if (!function_exists('ini_get') || !function_exists('ini_set')) {
+            return;
+        }
         $limit = trim((string) ini_get('memory_limit'));
         if ($limit === '' || $limit === '-1') {
             return;
@@ -704,7 +991,11 @@ final class Collector
         return implode('; ', $parts);
     }
 
-    /** collect.build_hits: split an envelope into hit records with typed columns. Never drops an event. */
+    /**
+     * collect.build_hits: split an envelope into hit records with typed columns. At most $maxEvents
+     * become hits: one request must not turn into an unbounded number of rows. The caller keeps the
+     * raw body of a longer batch, flagged "too_many_events:<count>", so nothing is lost.
+     */
     public static function buildHits($envelope, $maxEvents, $site, $exact)
     {
         $errors = array();
@@ -718,7 +1009,8 @@ final class Collector
             return array(array(), $errors);
         }
         if (count($events) > $maxEvents) {
-            $errors[] = 'too_many_events';
+            $errors[] = 'too_many_events:' . count($events);
+            $events = array_slice($events, 0, $maxEvents); // events[:max_events], a negative limit included
         }
         $dropFp = $site !== null && !empty($site['privacy']['drop_fingerprint']);
         $vid = Util::str(Json::get($envelope, 'vid'), 64);
@@ -779,14 +1071,22 @@ final class Collector
         $dropped = $this->privacyDrop($cfg, $site, $req);
         $cors = $this->cors($cfg, $req, $site);
         if ($dropped !== null) {
-            $this->count($cfg, $siteId, $dropped);
+            $this->count($cfg, $site, $dropped, $req);
             Response::send(204, array_merge($this->baseHeaders($cfg), $cors));
             return;
         }
         list($body, $size) = $req->body((int) $s['max_chunk_kb'] * 1024);
         if ($body === null) {
-            $this->count($cfg, $siteId, 'chunk_too_large');
+            $this->count($cfg, $site, 'chunk_too_large', $req);
             Response::send(413, array_merge($this->baseHeaders($cfg), $cors));
+            return;
+        }
+        if ($this->diskLow($cfg)) {
+            Response::send(503, array_merge($this->baseHeaders($cfg), $cors, array(array('Retry-After', '300'))));
+            return;
+        }
+        if ($this->refusedEarly($cfg, $req, $site, true, $size + strlen((string) $req->raw('QUERY_STRING')))) {
+            Response::send(429, array_merge($this->baseHeaders($cfg), $cors, array(array('Retry-After', '60'))));
             return;
         }
         $k = isset($qs['k']) ? $qs['k'] : null;
@@ -794,6 +1094,10 @@ final class Collector
         $error = $kind !== '_invalid' ? null : 'unknown_kind';
         if ($body === '') {
             $error = 'empty_body';
+        }
+        $needs = self::CHUNK_FEATURES;
+        if ($site !== null && $siteStatus === 'ok' && isset($needs[$kind]) && empty($site['features'][$needs[$kind]])) {
+            $siteStatus = 'feature_off'; // the site does not record this kind: stored flagged, within its allowance
         }
         $sentGzip = strncmp($body, "\x1f\x8b", 2) === 0;
         $payload = $body;
@@ -831,14 +1135,22 @@ final class Collector
         $rec->url = Util::str(isset($qs['url']) ? $qs['url'] : null, 2048);
         $rec->ip = $ip;
         $rec->error = $error;
+        // Charged: the body received, the query string (its raw length) and the headers kept in meta.
+        $charged = $size + strlen((string) $req->raw('QUERY_STRING'));
+        foreach (array('user-agent', 'origin', 'referer') as $h) {
+            if (isset($meta[$h])) {
+                $charged += strlen($h) + Util::length((string) $meta[$h]);
+            }
+        }
+        $limits = $this->limits($cfg, $req, $site, true, $charged, $siteStatus !== 'ok' || $error !== null);
         try {
-            $outcome = $this->write($cfg, 'chunk', $rec, $req);
+            $outcome = $this->write($cfg, 'chunk', $rec, $limits);
         } catch (StorageError $e) {
-            Log::exception('storage unavailable', $e);
+            ErrorLog::exception($cfg->dataDir, 'storage unavailable', $e);
             Response::send(503, array_merge($this->baseHeaders($cfg), $cors, array(array('Retry-After', '60'))));
             return;
         }
-        if ($outcome === Storage::RATE_LIMITED) {
+        if ($outcome === Storage::RATE_LIMITED && $error === null) { // a 400 stands: retrying cannot help
             Response::send(429, array_merge($this->baseHeaders($cfg), $cors, array(array('Retry-After', '60'))));
             return;
         }
@@ -866,9 +1178,9 @@ final class Collector
         }
         list($headers, $cookies) = $this->extractHeaders($cfg, $req);
         list($ip, $headers) = $this->identity($cfg, $site, $req, $headers);
-        $url = null;
+        $url = null; // u, url, else the stored (redacted) Referer
         foreach (array(isset($first['u']) ? $first['u'] : null, isset($first['url']) ? $first['url'] : null,
-                     $req->text('HTTP_REFERER')) as $candidate) {
+                     isset($headers['referer']) ? $headers['referer'] : null) as $candidate) {
             if ($candidate !== null && $candidate !== '') {
                 $url = $candidate;
                 break;
@@ -896,10 +1208,17 @@ final class Collector
         $rec->query = $query === '' ? null : $query;
         $rec->server = $this->serverInfo($req);
         $rec->hits = array($hit);
-        try {
-            $this->write($cfg, 'request', $rec, $req);
-        } catch (StorageError $e) {
-            Log::exception('storage unavailable (pixel)', $e);
+        if (!$this->diskLow($cfg)) { // the pixel always answers its GIF, stored or not
+            // Charged: the query string as received (Python's len() of the ISO-8859-1 text), at least a hit's
+            // cost, plus the stored headers and kept cookies.
+            $charged = max(strlen((string) $req->raw('QUERY_STRING')), self::HIT_COST)
+                + self::headerBytes($headers, $cookies);
+            $limits = $this->limits($cfg, $req, $site, false, $charged, Storage::isFlagged($rec), 1);
+            try {
+                $this->write($cfg, 'request', $rec, $limits);
+            } catch (StorageError $e) {
+                ErrorLog::exception($cfg->dataDir, 'storage unavailable (pixel)', $e);
+            }
         }
         Response::send(200, self::gifHeaders(), self::GIF, $method === 'HEAD');
     }
@@ -930,8 +1249,10 @@ final class Collector
             $payload = $body;
         } else {
             $headers[] = array('Content-Type', 'application/javascript; charset=utf-8');
-            $payload = '(window.tidesight=window.tidesight||function(){(tidesight.q=tidesight.q||[])'
-                . '.push(arguments)})("_config",' . $body . ");\n";
+            // Queues the configuration for the tracker, or hands it over if the tracker runs already. Never
+            // throws, even if markup on the page made window.tidesight an element (<a id="tidesight">).
+            $payload = '(typeof window.tidesight=="function"?window.tidesight:window.tidesight=function(){'
+                . '(tidesight.q=tidesight.q||[]).push(arguments)})("_config",' . $body . ");\n";
         }
         Response::send(200, $headers, $payload, $method === 'HEAD');
     }
@@ -956,9 +1277,12 @@ final class Collector
             Response::send(200, array(array('Content-Type', 'text/plain')), "User-agent: *\nDisallow: /\n");
             return;
         }
+        // Only from [server] static_dir: a default relative to this code would point outside the deployment
+        // (on shared hosting, possibly into another account's directory). The web server serves them otherwise.
         $root = (string) $cfg->server['static_dir'];
         if ($root === '') {
-            $root = dirname(__DIR__, 3) . DIRECTORY_SEPARATOR . 'tracker' . DIRECTORY_SEPARATOR . 'build';
+            Response::send(404, $notFound, "not found\n");
+            return;
         }
         $parts = array();
         foreach (explode('/', $path) as $p) {
@@ -979,7 +1303,11 @@ final class Collector
         $ext = $dot === false ? '' : Util::lowerAscii(substr($last, $dot));
         $file = $root . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $parts);
         $types = self::STATIC_TYPES;
-        if (!isset($types[$ext]) || !is_file($file)) {
+        $realRoot = Util::realpath($root);
+        $realFile = isset($types[$ext]) && is_file($file) ? Util::realpath($file) : false;
+        $inside = $realRoot !== false && $realFile !== false
+            && strncmp($realFile, rtrim($realRoot, '/\\') . DIRECTORY_SEPARATOR, strlen(rtrim($realRoot, '/\\')) + 1) === 0;
+        if (!$inside) { // also a symbolic link out of the root
             Response::send(404, $notFound, "not found\n");
             return;
         }

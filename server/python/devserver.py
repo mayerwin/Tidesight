@@ -124,7 +124,7 @@ def static_app(root: str) -> Callable[..., Iterable[bytes]]:
         if path.endswith("/"):
             path += "index.html"
         full = os.path.abspath(os.path.join(root, path.lstrip("/")))
-        if not full.startswith(root) or not os.path.isfile(full):
+        if not full.startswith(root + os.sep) or not os.path.isfile(full):  # never a sibling such as root-private
             if path.startswith("/spa/"):
                 full = os.path.join(root, "spa", "index.html")
             else:

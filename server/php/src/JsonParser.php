@@ -300,7 +300,11 @@ final class JsonParser
         $literal = $m[0];
         $next = $start + strlen($literal);
         if ((isset($m[1]) && $m[1] !== '') || (isset($m[2]) && $m[2] !== '')) {
-            return array((float) $literal, $next);
+            $f = (float) $literal;
+            if (is_infinite($f)) { // collect._finite_float, the collector's parse_float: 1e999 makes the body unreadable
+                throw new JsonDecodeError('number out of range');
+            }
+            return array($f, $next);
         }
         $negative = $literal[0] === '-';
         $digits = $negative ? substr($literal, 1) : $literal;
