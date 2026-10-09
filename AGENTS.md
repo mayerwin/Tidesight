@@ -37,7 +37,7 @@ tracker/
   src/core.js                     # pageviews, events, identity, sessions, engagement, delivery, plugin API
   src/plugins/*.js                # fp, clicks, scroll, forms, perf, errors, ux, mouse, replay, adblock
   src/lib/*.js                    # helpers bundled into plugins (selectors, chunk upload)
-  build.mjs                       # esbuild → build/ (core budget 6 KB gzip, enforced)
+  build.mjs                       # esbuild → build/ (core budget 20 KB gzip, enforced)
   build/                          # committed bundles, deployed as-is (incl. vendored rrweb recorder)
   test/                           # Playwright specs, fixture site, test config
 server/python/
@@ -97,7 +97,9 @@ These are non-negotiable. The reasoning is in `docs/design.md`.
 **JavaScript tracker**
 - Plain ES2019 in `src/`, no runtime dependencies in core. Each plugin is a separate file registered through the core plugin API.
 - Every handler and public function is wrapped so it cannot throw into the host page.
-- Keep the core small: the build fails above 6 KB gzip for `ts.js` (the original target was 4 KB). Prefer putting new behaviour in a plugin.
+- Trust nothing on the host page: user content can shadow globals and `document` properties (DOM clobbering). Accept `window.tidesightConfig` only as a plain object, read `document` properties through their accessors (`dget` in `core.js`; tests fake visibility on `Document.prototype`, see `hidePage`), and load scripts only from the core's base (`api.load`).
+- Never build a regular expression from configured patterns or page data: globs are matched in linear time (`spans` in `core.js`, `redact.py` on the server); URL redaction follows `server/python/tests/redact_vectors.json` everywhere.
+- The build fails above 20 KB gzip for `ts.js`: the owner's budget (ask before going over it). Size never justifies weaker functionality or robustness; heavy or optional behaviour still belongs in a plugin, loaded only where it is used.
 - Rebuild (`npm run build`) and commit `tracker/build/` with any change to `tracker/src/`.
 
 **SQLite**

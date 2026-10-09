@@ -94,6 +94,14 @@ A host that runs PHP but not Python web apps can ingest with the [PHP connector]
 
 Besides the Python collector, connectors for **PHP**, **Node** and **Cloudflare Workers (D1)** speak the same protocol and write the same schema, checked by a shared conformance suite ([`docs/connectors.md`](docs/connectors.md)).
 
+## Security and abuse protection
+
+- **The collector is a public endpoint, so it is bounded:** body sizes and gzip expansion are capped. Each client (an IPv4 address or an IPv6 /64) has per-minute allowances for requests and kilobytes, with separate allowances for recordings. Once a client is over its allowance, its requests are refused before their body is even parsed. Junk traffic (unknown sites, wrong origins, malformed bodies) gets its own small allowance, so it cannot crowd out real data. An optional daily quota per site caps storage, and writes stop with a 503 when disk space runs low. Refusals are counted on the Status page ([details](docs/configuration.md#limits-and-abuse-protection)).
+- **The tracker cannot flood it either:** it caps its own events and uploads per minute, splits batches under the collector's size limit, and backs off on errors. It also trusts nothing on the host page: markup injected into a page cannot redirect it or make it load another script.
+- **No secrets are stored:** credentials and other sites' cookies are redacted from headers. Tokens, passwords, session ids and signatures in URLs are replaced by `redacted` before they leave the browser (and in the `Referer` the collector keeps). Form values are never collected, and session replays mask inputs and rich-text editors.
+- **The dashboard is protected:** it uses HTTP Basic authentication with PBKDF2 hashes and throttles password guessing. The API is read-only, bounds the work hostile data can cause, and the pages have a strict Content Security Policy that keeps recordings from contacting other hosts. Public share pages are optional, token-protected, rate-limited, and never show figures for fewer than 3 visitors.
+- **Audited:** the collectors, the tracker and the dashboard went through adversarial security reviews, and every finding was fixed and covered by tests (`docs/roadmap.md`).
+
 ## Status
 
 Every phase of the plan is built and tested: collector, tracker, enrichment, behaviour plugins, session replay, dashboard and API, privacy mode and maintenance jobs, and the PHP, Node and Worker connectors. Still open: running the hosting test on the production Dreamhost account, and trying the PHP and Worker connectors on live hosts. See [`docs/roadmap.md`](docs/roadmap.md).
