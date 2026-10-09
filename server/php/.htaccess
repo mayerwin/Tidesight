@@ -1,0 +1,31 @@
+# Tidesight collector (PHP connector): Apache front controller.
+#
+# Routes the collector endpoints to index.php. Tracker files (ts.js, ts/*.js) copied into
+# this directory are served by Apache directly; when they are missing, index.php serves
+# them from [server] static_dir. Only mod_rewrite directives are used (AllowOverride FileInfo).
+# Without mod_rewrite, point the tracker at .../index.php instead (data-api), which routes
+# by path info: .../index.php/collect, .../index.php/p.gif, ...
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # In a sub-directory, if the rules do not match, uncomment and adapt:
+    # RewriteBase /stats/
+
+    # Pass the Authorization header on to PHP so that its presence is recorded (value redacted).
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Never serve the library, a configuration file, notes or spool data.
+    RewriteRule ^(src(/|$)|tidesight\.json$|tidesight\.php$|README\.md$|\.user\.ini$|.*\.jsonl$) - [F,L]
+
+    # Collector endpoints.
+    RewriteRule ^(collect|chunk|p\.gif|config\.js|config\.json|health)$ index.php [L,QSA]
+
+    # Tracker files and robots.txt through PHP only when they do not exist as files here.
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^(ts\.js|ts/[A-Za-z0-9][A-Za-z0-9._-]*|robots\.txt)$ index.php [L,QSA]
+</IfModule>
+
+# Optional: give PHP the configuration path here instead of editing index.php
+# (needs mod_env; the path must be OUTSIDE the web root).
+# SetEnv TIDESIGHT_CONFIG /home/USER/tidesight/tidesight.json
