@@ -35,8 +35,8 @@ Layout used below (replace `USER` and the domain names):
 1. In the panel, make sure your user is a **shell user** (SSH access).
 2. Add the subdomain `stats.example.com` as a hosted website. Its web directory is `~/stats.example.com`.
 3. **If the domain's DNS is managed elsewhere** (Cloudflare, a registrar), add an `A` record for the subdomain there, pointing at the address Dreamhost gives it (`dig +short stats.example.com @ns1.dreamhost.com` prints it; add an `AAAA` record too if `dig AAAA` shows one). On Cloudflare, make it **DNS only** (grey cloud), at least until the certificate is issued.
-4. Turn on HTTPS for the subdomain (the free Let's Encrypt certificate) once its DNS points at Dreamhost. Tracking from an `https` site needs an `https` collector.
-5. **Turn off Extra Web Security** for the subdomain (in the website's settings in the panel). It is Dreamhost's web application firewall (ModSecurity with the OWASP rules): it takes the tracker's compressed batches and session-replay chunks for attacks and refuses them (`418`, or a `500` error page), so most hits would be lost. Tidesight checks and bounds everything it receives itself. Step 4 below shows how to check.
+4. Turn on HTTPS for the subdomain once its DNS points at Dreamhost: Manage Websites → the subdomain's menu → **SSL Security** → Add → the free Let's Encrypt certificate (it works within 10 to 30 minutes). Tracking from an `https` site needs an `https` collector. Dreamhost answers the certificate checks (`/.well-known/acme-challenge/`) itself, so Tidesight's `.htaccess` does not get in their way.
+5. **Turn off the Web Application Firewall** for the subdomain (formerly called Extra Web Security): Websites → Manage Websites → **Manage** on the subdomain → **Security** tab → Website Security → switch off **Web Application Firewall** → Save Changes. It is ModSecurity with the OWASP rules, set per website (other sites keep theirs), and cannot be adjusted from `.htaccess`. It takes the tracker's compressed batches (every batch of 1 KB or more) and session-replay chunks for attacks and refuses them (`418`, or a `500` error page), so most hits would be lost; even uncompressed, a page title or an error message that looks like SQL or a script would be refused now and then. What it guards against (attacks on PHP applications) does not apply: Tidesight runs no PHP, uses parameterised SQL only, and checks and bounds everything it receives itself. Step 4 below shows how to check.
 
 **Behind Cloudflare's proxy** (orange cloud, optional): use the SSL mode "Full (strict)" (the Let's Encrypt certificate stays on Dreamhost), and keep the two `rate_limit_*` lines of step 3: the visitor's address is then taken from Cloudflare's header, believed only when the request comes from one of Cloudflare's addresses, so the same lines are right with and without the proxy. Geolocation follows the same rule by itself (`[enrich] ip_header = "auto"`).
 
@@ -105,6 +105,8 @@ cat > ~/stats.example.com/.htaccess <<'EOF'
 Options +ExecCGI -Indexes
 CGIPassAuth On
 RewriteEngine On
+# /.well-known/ belongs to the web server (certificate checks, security.txt), not to Tidesight.
+RewriteRule ^\.well-known/ - [L]
 # The dashboard and share pages only over HTTPS: passwords and session cookies never travel in clear.
 RewriteCond %{HTTPS} !=on
 RewriteRule ^(dashboard|share)(/.*)?$ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
@@ -119,7 +121,7 @@ Dreamhost runs `.fcgi` files with FastCGI as they are. On another Apache host wi
 
 `tidesight.fcgi` finds the code in `~/tidesight/server/python` and the configuration in `~/tidesight/tidesight.toml`. Open `https://stats.example.com/health`: it must answer `{"status": "ok", …}`. The dashboard is at `https://stats.example.com/dashboard/`.
 
-Then check that the web application firewall lets compressed data through (step 1.5). `200` is right; `418` or `500` means Extra Web Security is still on:
+Then check that the web application firewall lets compressed data through (step 1.5). `200` is right; `418` or `500` means the firewall is still on:
 
 ```sh
 gzip -c ~/tidesight/tracker/build/ts.js | curl -s -o /dev/null -w '%{http_code}\n' \
@@ -210,7 +212,7 @@ Where Passenger still runs Python apps, copy `server/python/passenger_wsgi.py` i
 ## Troubleshooting
 
 - **`/health` fails:** read `~/tidesight-data/tidesight.log` (with `log_file` set) and the site's error log (`~/logs/stats.example.com/http/error.log`). `python3 -m tidesight.jobs status` checks the configuration.
-- **Tracker requests fail with `418` or `500` while `/health` works:** Extra Web Security is on for the subdomain (step 1.5); the error log then shows `ModSecurity: Access denied with code 418`.
+- **Tracker requests fail with `418` or `500` while `/health` works:** the Web Application Firewall is on for the subdomain (step 1.5); the error log then shows `ModSecurity: Access denied with code 418`.
 - **Nothing recorded:** open the site with the browser's network panel: `ts.js`, `config.js` and `collect` must answer 200/204. Check `origins` (hits from other origins are stored but flagged: see the dashboard's Status page).
 - **The dashboard says it is off:** no user exists yet: `python3 -m tidesight.jobs user set NAME` (step 3).
 - **Signing in fails:** check the name with `jobs.py user list`, and set a new password with `jobs.py user set NAME`. After 10 failures a client waits 10 minutes (`429`).
