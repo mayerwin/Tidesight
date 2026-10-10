@@ -1,9 +1,9 @@
 """Passenger entry point (Dreamhost and other Passenger hosts).
 
 Copy this file into the Passenger app root (e.g. ~/stats.example.com/passenger_wsgi.py).
-It finds the Tidesight code in ~/tidesight/server/python (or $TIDESIGHT_CODE, or next to
-this file when run from the repository) and the configuration in ~/tidesight/tidesight.toml
-(or $TIDESIGHT_CONFIG). See docs/deploy-dreamhost.md.
+It finds the Tidesight code beside it (app/server/python), in ~/tidesight/server/python, or in
+$TIDESIGHT_CODE, and the configuration beside it (tidesight.toml), in ~/tidesight/tidesight.toml,
+or in $TIDESIGHT_CONFIG. See docs/deploy-dreamhost.md.
 """
 
 import os
@@ -21,7 +21,9 @@ if INTERP and os.path.realpath(sys.executable) != os.path.realpath(INTERP) and o
 
 CODE = os.environ.get("TIDESIGHT_CODE", "")
 if not CODE:
-    CODE = HERE if os.path.isdir(os.path.join(HERE, "tidesight")) else os.path.expanduser("~/tidesight/server/python")
+    for CODE in (HERE, os.path.join(HERE, "app", "server", "python"), os.path.expanduser("~/tidesight/server/python")):
+        if os.path.isdir(os.path.join(CODE, "tidesight")):  # next to this file, in app/ beside it, or in ~/tidesight
+            break
 if CODE not in sys.path:
     sys.path.insert(0, CODE)
 

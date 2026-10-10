@@ -361,7 +361,7 @@ def test_export_and_backup(world, tmp_path):
     b = backup(world, keep=1)
     assert sorted(f["file"] for f in b["files"]) == ["events.db", "properties.json", "users.json", "web.db"]
     assert json.load(open(os.path.join(b["backup"], "users.json"), encoding="utf-8"))["users"] == {
-        "admin": "pbkdf2_sha256$1000$c2FsdA$aGFzaA"}
+        "admin": {"hash": "pbkdf2_sha256$1000$c2FsdA$aGFzaA"}}
 
 
 def test_page_status_from_meta_and_status_event(tmp_path, monkeypatch):

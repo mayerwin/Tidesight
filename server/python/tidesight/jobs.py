@@ -12,7 +12,7 @@
     python -m tidesight.jobs --config … purge-site ID [--apply]
     python -m tidesight.jobs --config … vacuum
     python -m tidesight.jobs --config … status
-    python -m tidesight.jobs --config … user set NAME | user remove NAME | user list
+    python -m tidesight.jobs --config … user set NAME [--role viewer] | user link NAME | user remove NAME | user list
     python -m tidesight.jobs --config … setup-link        # the dashboard's first-account form, code filled in
     python -m tidesight.jobs hash-password
 
@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__
 from . import users as users_mod
+from . import webcheck
 from .auth import hash_password
 from .config import Config, load
 from .storage import load_spool
@@ -90,6 +91,12 @@ def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         out["resolved_config"] = write_resolved(cfg, cfg.server["resolved_config_file"], only_if_changed=True)
     if cfg.dashboard["users"]:  # a setup code made by a process that had not seen the first user yet
         users_mod.remove_setup_code(cfg.data_dir)
+    # Files inside the website's folder: can the web download them? Every 10 minutes, every run while it could.
+    last = webcheck.state(cfg)
+    if not last or last.get("exposed") or time.time() * 1000 - (last.get("checked_at") or 0) > 600000:
+        result = webcheck.check(cfg)
+        if result.get("exposed") or result.get("unverified") or result.get("warnings"):
+            out["web_check"] = result
     return out
 
 
@@ -154,6 +161,9 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     if not cfg.dashboard["users"]:
         out["next_step"] = ("no dashboard user yet: open the dashboard and enter the setup code of %s (or run "
                             "jobs.py setup-link, or jobs.py user set NAME)" % users_mod.setup_path(cfg.data_dir))
+    check = webcheck.state(cfg)
+    if check:
+        out["web_check"] = check  # files inside the website's folder: could the web download them?
     for name in ("events.db", "replay.db", "derived.db"):
         path = os.path.join(cfg.data_dir, name)
         if os.path.exists(path):
@@ -235,13 +245,12 @@ def cmd_user(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def _user(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
-    admins = cfg.dashboard.get("admins") or []
     if args.action == "list":
-        stored = users_mod.read(cfg.data_dir)
-        rows = [{"user": n, "where": "configuration file"} for n in sorted(cfg.file_users)]
-        rows += [{"user": n, "where": "users.json"} for n in sorted(stored) if n not in cfg.file_users]
-        for row in rows:
-            row["admin"] = not admins or row["user"] in admins
+        stored = users_mod.records(cfg.data_dir)
+        rows = [{"user": n, "where": "configuration file", "role": cfg.role(n)} for n in sorted(cfg.file_users)]
+        rows += [{"user": n, "where": "users.json", "role": cfg.role(n),
+                  "password": "set" if stored[n]["hash"] else "not yet (invited)"}
+                 for n in sorted(stored) if n not in cfg.file_users]
         return {"users": rows}
     name = args.name or ""
     if not name:
@@ -250,26 +259,56 @@ def _user(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         raise SystemExit("%s is defined in the configuration file (%s, [dashboard] users): change it there."
                          % (name, cfg.path))
     if args.action == "remove":
-        if not users_mod.update(cfg.data_dir, lambda table: table.pop(name, None) is not None):
+        def remove(table: Dict[str, Dict[str, Any]]) -> bool:
+            if table.pop(name, None) is None:
+                return False
+            if not users_mod.active_admins(cfg.file_users, cfg.dashboard.get("admins") or [], table):
+                raise SystemExit("%s is the last admin who can sign in: make someone else an admin first." % name)
+            return True
+        if not users_mod.update(cfg.data_dir, remove):
             raise SystemExit("There is no user %s in %s." % (name, users_mod.path(cfg.data_dir)))
+        from .webdb import WebDB
+        WebDB(cfg.data_dir).forget_user(name)
         return {"removed": name}
+    if args.action == "link":
+        return _user_link(cfg, name)
     if not users_mod.NAME_RE.match(name):
         raise SystemExit("A user name has 1 to 64 letters, digits and . _ @ + - (and starts with a letter or digit).")
     encoded = hash_password(_new_password(name, args.password_stdin))
 
-    def put(table: Dict[str, str]) -> bool:
+    def put(table: Dict[str, Dict[str, Any]]) -> bool:
         existed = name in table
-        table[name] = encoded
+        rec = dict(table.get(name) or {"created_at": int(time.time() * 1000)}, hash=encoded)
+        if args.role:  # else the role stays as it is (none: users.role_of decides)
+            rec["role"] = args.role
+        table[name] = rec
         return existed
 
     changed = users_mod.update(cfg.data_dir, put)
     users_mod.remove_setup_code(cfg.data_dir)  # a user exists: the dashboard's first-account form is closed
+    from .webdb import WebDB
+    web = WebDB(cfg.data_dir)
+    web.delete_user_sessions(name)
+    web.delete_links(name)  # a password link made before the new password must not override it
     url = (cfg.server.get("public_url") or "").rstrip("/")
-    out: Dict[str, Any] = {"user": name, "password": "changed (their sessions ended)" if changed else "set",
-                           "sign_in": (url or "") + "/dashboard/"}
-    if admins and name not in admins:
-        out["note"] = "not in [dashboard] admins: may read every report, not change properties"
-    return out
+    return {"user": name, "role": Config(cfg.raw, cfg.path).role(name),
+            "password": "changed (their sessions ended)" if changed else "set", "sign_in": (url or "") + "/dashboard/"}
+
+
+def _user_link(cfg: Config, name: str) -> Dict[str, Any]:
+    """A one-time link to choose a password, printed: for someone who cannot sign in (the last admin too)."""
+    from .webdb import WebDB
+    rec = users_mod.records(cfg.data_dir).get(name)
+    if rec is None:
+        raise SystemExit("There is no user %s in %s." % (name, users_mod.path(cfg.data_dir)))
+    kind = "reset" if rec["hash"] else "invite"
+    token, expires = WebDB(cfg.data_dir).create_link(name, kind, None, users_mod.RESET_HOURS if kind == "reset"
+                                                     else users_mod.INVITE_HOURS)
+    url = (cfg.server.get("public_url") or "").rstrip("/") or "https://<Tidesight's address>"
+    print("Open this address to choose the password of %s (once, before %s UTC):"
+          % (name, time.strftime("%Y-%m-%d %H:%M", time.gmtime(expires / 1000))))
+    print("  %s/dashboard/#password=%s" % (url, token))
+    return {}
 
 
 def cmd_setup_link(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
@@ -379,10 +418,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="-", help="output file (default stdout); created with mode 600")
     p.set_defaults(func=cmd_config_json)
 
-    p = sub.add_parser("user", help="dashboard users: set (add, or change a password), remove, list")
-    p.add_argument("action", choices=["set", "remove", "list"])
+    p = sub.add_parser("user", help="dashboard users: set (add, or change a password), link (a one-time password "
+                                    "link), remove, list")
+    p.add_argument("action", choices=["set", "link", "remove", "list"])
     p.add_argument("name", nargs="?", default=None)
     p.add_argument("--password-stdin", action="store_true", help="read the password from standard input")
+    p.add_argument("--role", choices=["admin", "viewer"], default=None,
+                   help="for set: the role (else unchanged; a new user without one is an admin while [dashboard] "
+                        "admins is empty)")
     p.set_defaults(func=cmd_user)
 
     p = sub.add_parser("setup-link", help="the address of the dashboard's first-account form, setup code included")

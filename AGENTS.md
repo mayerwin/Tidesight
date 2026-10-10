@@ -52,8 +52,10 @@ server/python/
   tidesight/admin.py, properties.py       # properties, segments, annotations (properties.json is stdlib-only: config loads it)
   tidesight/jobs.py, maintenance.py    # cron CLI: enrich, rollup, backup, privacy-clean, archive, export…
   tidesight/fcgi.py               # standard-library FastCGI server (mod_fcgid), CGI fallback, code-change restart
-  tidesight/users.py              # dashboard users in data_dir/users.json (jobs.py user …), the first account's setup code
+  tidesight/users.py              # people (users.json: hashes, roles), the first account's setup code
+  tidesight/webcheck.py           # data inside the website's folder: its .htaccess, the outside download check (cron)
   tidesight.fcgi, collect.cgi, passenger_wsgi.py   # hosting entry points (copy into the web directory)
+  web.htaccess                    # the web folder's .htaccess: every request to the app
   devserver.py                    # local server (--no-auth, --test-api, --static)
   tests/                          # pytest, incl. test_conformance.py for every connector
 server/php/  server/node/  server/worker/   # other connectors (same protocol and schema)

@@ -290,6 +290,73 @@ test('the first account needs the setup code written on the server', async ({ pa
   await expect(page.locator('.user-btn')).toBeVisible();
 });
 
+test('users: invite someone, a password link, a role, changing a password, removing', async ({ page, browser }) => {
+  const signIn = async (p, user, password) => {
+    await p.goto(AUTH);
+    await p.fill('input[name=username]', user);
+    await p.fill('input[name=password]', password);
+    await p.click('button[type=submit]');
+    await expect(p.locator('.user-btn')).toBeVisible();
+  };
+  // Opens a link in a browser of its own (no cookie of the admin's) and chooses the password.
+  const useLink = async (url, password, heading) => {
+    const context = await browser.newContext();
+    const p = await context.newPage();
+    await p.goto(url);
+    await expect(p.getByRole('heading', { name: heading })).toBeVisible();
+    expect(new URL(p.url()).hash).toBe(''); // the token is out of the address bar
+    await p.getByLabel('Password', { exact: true }).fill(password);
+    await p.getByLabel('Repeat the password').fill(password);
+    await p.locator('button[type=submit]').click();
+    await expect(p.locator('.user-btn')).toContainText('e2e-alice');
+    return { context, p };
+  };
+  await signIn(page, 'admin', 'test-pass');
+  await page.goto(AUTH + '#/users');
+  await expect(page.getByRole('button', { name: 'Invite someone' })).toBeVisible(); // the users page has replaced the overview
+  await expect(page.locator('#view table.data')).toContainText('admin');
+  await expect(page.locator('#view table.data .badge', { hasText: 'You' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Invite someone' }).click();
+  await page.getByLabel('User name').fill('e2e-alice');
+  await page.getByRole('button', { name: 'Create the invitation' }).click();
+  const invite = await page.getByRole('textbox', { name: 'Link for e2e-alice' }).inputValue();
+  expect(invite).toMatch(/#password=[A-Za-z0-9_-]{20,}$/);
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('tr', { hasText: 'e2e-alice' })).toContainText('Invited');
+
+  const alice = await useLink(invite, 'alice password 1', 'Welcome, e2e-alice');
+  await expect(alice.p.locator('#nav a', { hasText: 'Users' })).toHaveCount(0); // a viewer manages no one
+
+  await page.reload();
+  const row = page.locator('tr', { hasText: 'e2e-alice' });
+  await expect(row).toContainText('Active');
+  await row.getByRole('button', { name: 'Actions for e2e-alice' }).click();
+  await page.getByRole('menuitem', { name: 'Password link…' }).click();
+  const reset = await page.getByRole('textbox', { name: 'Link for e2e-alice' }).inputValue();
+  await page.getByRole('button', { name: 'Done' }).click();
+  const again = await useLink(reset, 'alice password 2', 'A new password');
+
+  // Alice changes her own password from her menu.
+  await again.p.locator('.user-btn').click();
+  await again.p.getByRole('menuitem', { name: 'Change password…' }).click();
+  await again.p.getByLabel('Current password').fill('alice password 2');
+  await again.p.getByLabel('New password', { exact: true }).fill('alice password 3');
+  await again.p.getByLabel('Repeat the new password').fill('alice password 3');
+  await again.p.getByRole('button', { name: 'Change the password' }).click();
+  await expect(again.p.locator('.toast', { hasText: 'Password changed' })).toBeVisible();
+
+  await page.reload();
+  await page.getByLabel('Role of e2e-alice').selectOption('admin');
+  await expect(page.locator('.toast', { hasText: 'e2e-alice is now an admin' })).toBeVisible();
+  await page.locator('tr', { hasText: 'e2e-alice' }).getByRole('button', { name: 'Actions for e2e-alice' }).click();
+  await page.getByRole('menuitem', { name: 'Remove…' }).click();
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(page.locator('tr', { hasText: 'e2e-alice' })).toHaveCount(0);
+  await alice.context.close();
+  await again.context.close();
+});
+
 test('the public page shows its metrics and nothing else', async ({ page }) => {
   await page.goto('http://127.0.0.1:8795/share/demo/');
   await expect(page.locator('.tile')).toHaveCount(2);

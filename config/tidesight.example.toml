@@ -7,7 +7,7 @@
 # docs/configuration.md.
 
 [server]
-data_dir = "/home/USER/tidesight-data"   # REQUIRED in production; keep it outside the web root
+data_dir = "data"                        # relative to this file; in the website's folder only with web.htaccess
 storage_mode = "sqlite"                  # "sqlite", or "spool" (append-only files loaded by cron)
 journal_mode = "wal"                     # "wal" or "delete" (pick what the Phase 0 test passes with)
 synchronous = "normal"                   # "normal" or "full"

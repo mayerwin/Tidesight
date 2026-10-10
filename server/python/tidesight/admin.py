@@ -20,7 +20,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
-from . import properties
+from . import properties, users
 from .config import (FEATURE_DEFAULTS, PRIVACY_DEFAULTS, Config, ConfigError, ConfigHolder, SiteConfig,
                      normalize_origin)
 from .query import ApiError, parse_filters
@@ -110,11 +110,12 @@ def _now_ms() -> int:
 class Admin:
     """Property, segment and annotation endpoints for one request."""
 
-    def __init__(self, holder: ConfigHolder, user: str, is_admin: bool) -> None:
+    def __init__(self, holder: ConfigHolder, user: str, is_admin: bool, signed_in: bool = True) -> None:
         self.holder = holder
         self.cfg = holder.get()
         self.user = user
         self.is_admin = is_admin
+        self.signed_in = signed_in  # False on the dev server's --no-auth: no user to check against users.json
         self.web = WebDB(self.cfg.data_dir)
 
     def call(self, method: str, endpoint: str, params: Dict[str, str], body: Any) -> Any:
@@ -125,6 +126,9 @@ class Admin:
             ("POST", "segments"): self.create_segment, ("PUT", "segment"): self.update_segment,
             ("PATCH", "segment"): self.update_segment, ("DELETE", "segment"): self.delete_segment,
             ("POST", "annotations"): self.create_annotation, ("DELETE", "annotation"): self.delete_annotation,
+            ("GET", "users"): self.list_users, ("POST", "users"): self.create_user,
+            ("PATCH", "user"): self.update_user, ("DELETE", "user"): self.delete_user,
+            ("POST", "user_link"): self.create_user_link,
         }.get((method, endpoint))
         if route is None:
             raise ApiError(405 if method != "GET" else 404, "unknown endpoint or method")
@@ -134,13 +138,159 @@ class Admin:
 
     def _require_admin(self) -> None:
         if not self.is_admin:
-            raise ApiError(403, "only dashboard admins may change properties ([dashboard] admins)")
+            raise ApiError(403, "only admins may change properties")
 
     def _site(self, params: Dict[str, str]) -> SiteConfig:
         site = self.cfg.site(params.get("site"))
         if site is None:
             raise ApiError(404, "unknown property")
         return site
+
+    # -- users ----------------------------------------------------------------------------
+    # Admins invite people (a one-time link to choose a password, valid a week), send password links to people who
+    # forgot theirs (valid a day), change roles and remove users. Tidesight sends no email: the admin passes the
+    # link on. Users of the configuration file are listed, and changed in that file.
+
+    def _require_user_admin(self) -> None:
+        if not self.is_admin:
+            raise ApiError(403, "only admins may manage users")
+
+    def _save_users(self, change: Any) -> Any:
+        """Change users.json, once more making sure, under its lock, that whoever asks is still an admin who can
+        sign in (another process may have changed their role a moment ago)."""
+        admins = self.cfg.dashboard.get("admins") or []
+
+        def guarded(table: Dict[str, Dict[str, Any]]) -> Any:
+            if self.signed_in and self.user not in self.cfg.file_users:
+                rec = table.get(self.user) or {}
+                roles = {n: r.get("role") for n, r in table.items()}
+                if not rec.get("hash") or users.role_of(self.user, self.cfg.file_users, admins, roles) != "admin":
+                    raise ApiError(403, "only admins may manage users")
+            return change(table)
+
+        try:
+            return users.update(self.cfg.data_dir, guarded)
+        except (users.UsersError, TimeoutError, OSError) as exc:
+            raise ApiError(503, "users.json could not be saved (%s): try again" % exc)
+
+    def _keep_an_admin(self, table: Dict[str, Dict[str, Any]]) -> None:
+        if not users.active_admins(self.cfg.file_users, self.cfg.dashboard.get("admins") or [], table):
+            raise ApiError(409, "Tidesight needs at least one admin who can sign in")
+
+    def _stored_user(self, params: Dict[str, Any]) -> str:
+        name = params.get("name")
+        if not isinstance(name, str) or not name:
+            raise ApiError(400, "name: a user name")
+        if name in self.cfg.file_users:
+            raise ApiError(409, "%s is defined in the configuration file ([dashboard] users): change it there" % name)
+        return name
+
+    def list_users(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        self._require_user_admin()
+        cfg = self.cfg
+        try:
+            stored = users.records(cfg.data_dir)
+        except users.UsersError as exc:
+            raise ApiError(503, str(exc))
+        links, seen = self.web.links(), self.web.last_sign_ins()
+        rows = []
+        for name in sorted(set(cfg.file_users) | set(stored), key=lambda n: n.lower()):
+            in_file = name in cfg.file_users
+            rec = {} if in_file else stored[name]
+            link = links.get(name)
+            if in_file or rec.get("hash"):
+                status = "active"
+            else:
+                status = "invited" if link else "invitation expired"
+            rows.append({"name": name, "role": cfg.role(name), "source": "config" if in_file else "dashboard",
+                         "role_locked": name in (cfg.dashboard.get("admins") or []),
+                         "status": status, "you": name == self.user, "last_sign_in": seen.get(name),
+                         "link": {"kind": link["kind"], "expires_at": link["expires"]} if link else None,
+                         "created_at": rec.get("created_at"), "created_by": rec.get("created_by")})
+        return {"users": rows, "min_password": users.MIN_PASSWORD}
+
+    def create_user(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        """Invite someone: the user exists without a password until they open the link and choose one."""
+        self._require_user_admin()
+        name, role = body.get("name"), body.get("role", "viewer")
+        if not isinstance(name, str) or not users.NAME_RE.match(name):
+            raise ApiError(400, "a user name has 1 to 64 letters, digits and . _ @ + - (and starts with a letter or digit)")
+        if role not in users.ROLES:
+            raise ApiError(400, "role: admin or viewer")
+        if name in self.cfg.file_users:
+            raise ApiError(409, "%s is already a user (in the configuration file)" % name)
+        if role == "viewer" and name in (self.cfg.dashboard.get("admins") or []):
+            raise ApiError(409, "%s is named in [dashboard] admins of the configuration file: an admin" % name)
+
+        def add(table: Dict[str, Dict[str, Any]]) -> bool:
+            if name in table:
+                return False
+            table[name] = {"hash": None, "role": role, "created_at": _now_ms(), "created_by": self.user}
+            return True
+
+        if not self._save_users(add):
+            raise ApiError(409, "%s is already a user" % name)
+        token, expires = self.web.create_link(name, "invite", self.user, users.INVITE_HOURS)
+        self.holder.reload()
+        return {"name": name, "role": role, "kind": "invite", "token": token, "expires_at": expires}
+
+    def update_user(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        """Change someone's role (not your own: another admin does that)."""
+        self._require_user_admin()
+        name = self._stored_user(params)
+        role = body.get("role")
+        if role not in users.ROLES:
+            raise ApiError(400, "role: admin or viewer")
+        if name == self.user:
+            raise ApiError(409, "your own role is changed by another admin")
+        if name in (self.cfg.dashboard.get("admins") or []):
+            raise ApiError(409, "%s is named in [dashboard] admins of the configuration file: change it there" % name)
+
+        def change(table: Dict[str, Dict[str, Any]]) -> None:
+            if name not in table:
+                raise ApiError(404, "unknown user")
+            table[name] = dict(table[name], role=role)
+            self._keep_an_admin(table)
+
+        self._save_users(change)
+        return {"name": name, "role": self.holder.reload().role(name)}
+
+    def delete_user(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        """Remove someone (not yourself): their sessions end at once."""
+        self._require_user_admin()
+        name = self._stored_user(params)
+        if name == self.user:
+            raise ApiError(409, "you cannot remove yourself: another admin can")
+
+        def remove(table: Dict[str, Dict[str, Any]]) -> None:
+            if name not in table:
+                raise ApiError(404, "unknown user")
+            del table[name]
+            self._keep_an_admin(table)
+
+        self._save_users(remove)
+        self.web.forget_user(name)
+        self.holder.reload()
+        return {"deleted": name}
+
+    def create_user_link(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        """A new one-time link for someone: an invitation again, or a password reset. Their current password keeps
+        working until the link is used; a newer link replaces an older one."""
+        self._require_user_admin()
+        name = self._stored_user(dict(params, name=params.get("name") or body.get("name") or ""))
+        try:
+            rec = users.records(self.cfg.data_dir).get(name)
+        except users.UsersError as exc:
+            raise ApiError(503, str(exc))
+        if rec is None:
+            raise ApiError(404, "unknown user")
+        kind = "reset" if rec.get("hash") else "invite"
+        token, expires = self.web.create_link(name, kind, self.user,
+                                              users.RESET_HOURS if kind == "reset" else users.INVITE_HOURS)
+        if name not in users.records(self.cfg.data_dir):  # removed meanwhile: the link must not outlive them
+            self.web.delete_links(name)
+            raise ApiError(404, "unknown user")
+        return {"name": name, "kind": kind, "token": token, "expires_at": expires}
 
     # -- properties: reading ------------------------------------------------------------
 

@@ -46,7 +46,7 @@ SECURITY_HEADERS = [("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "
                     ("Referrer-Policy", "same-origin"), ("X-Robots-Tag", "noindex, nofollow")]
 COOKIE = "ts_login"
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
-ADMIN_READS = ("properties", "property")
+ADMIN_READS = ("properties", "property", "users")
 REPORT_EXPORTS = ("breakdown", "overview", "goals")
 _COOKIE_PATH = re.compile(r"/[A-Za-z0-9._~%/-]*")  # with fullmatch
 # What the dashboard folder serves (package.json, node_modules and the like are not for anyone).
@@ -55,6 +55,7 @@ DASHBOARD_DIRS = {"js", "vendor"}
 # Files other than pages run nothing: an SVG opened on its own cannot run a script.
 ASSET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; sandbox"
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
+PASSWORD_ENDPOINTS = ("login", "setup", "password_link", "password")
 
 
 def _respond(start_response: StartResponse, status: str, headers: List[Tuple[str, str]], body: bytes = b"",
@@ -172,12 +173,15 @@ class App:
         if dashboard or path.startswith("/share/"):
             # As the collector does: never run with the data (sessions, users, the setup code) where the web server
             # would hand them out.
-            exposed = web_root_exposure(self.holder.get(), environ.get("DOCUMENT_ROOT"))
+            exposed = web_root_exposure(self.holder.get(), environ)
             if exposed:
-                ERRORS.error("refusing to run: %s is inside the web root %s, where its files could be downloaded "
-                             "(move it, or set [server] allow_data_in_web_root)", exposed, environ.get("DOCUMENT_ROOT"))
-                return _respond(start_response, "503 Service Unavailable", [("Content-Type", "text/plain")],
-                                b"configuration error\n")
+                ERRORS.error("refusing to run: %s (see the .htaccess in docs/deploy-dreamhost.md)", exposed)
+                message = ("Tidesight has stopped: its files could be downloaded from the web. Check the .htaccess of its "
+                           "folder (docs/deploy-dreamhost.md); the log says more.")
+                if path.startswith("/dashboard/api/"):
+                    return _json(start_response, "503 Service Unavailable", {"error": message})
+                return _respond(start_response, "503 Service Unavailable", [("Content-Type", "text/plain; charset=utf-8")],
+                                message.encode("utf-8") + b"\n")
         if dashboard:
             return self.dashboard(environ, start_response, path)
         if path.startswith("/share/"):
@@ -187,8 +191,7 @@ class App:
     # -- signing in ---------------------------------------------------------------
 
     def is_admin(self, cfg: Config, user: str) -> bool:
-        admins = cfg.dashboard.get("admins") or []
-        return not self.require_auth or not admins or user in admins
+        return not self.require_auth or cfg.role(user) == "admin"
 
     def session_user(self, cfg: Config, environ: Dict[str, Any]) -> Optional[str]:
         """The user of a valid session cookie (a session ends when its user's password changes)."""
@@ -270,13 +273,13 @@ class App:
         return _json(start_response, "200 OK", {"user": user, "admin": self.is_admin(cfg, user)},
                      [("Set-Cookie", cookie)])
 
-    def _fresh_users(self, cfg: Config) -> Config:
-        """The configuration, reloaded at once when it has no user but users.json exists: another process may have
-        created the first user a moment ago (each one looks at the files only every few seconds)."""
-        from . import users
-        if self.require_auth and not cfg.dashboard["users"] and users.mtime(cfg.data_dir) is not None:
-            return self.holder.reload()
-        return cfg
+    @staticmethod
+    def _safe_for_passwords(cfg: Config, environ: Dict[str, Any]) -> bool:
+        """A password may come over this request: HTTPS, this computer, or a deployment without HTTPS at all."""
+        host = (environ.get("HTTP_HOST") or environ.get("SERVER_NAME") or "").lower()
+        name = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]", 1)[0] + "]"
+        return (_https(environ) or name in LOCAL_HOSTS
+                or not str(cfg.server.get("public_url") or "").lower().startswith("https://"))
 
     def setup(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         """The first user, created in the dashboard: only with the setup code of data_dir/setup-code.txt (only
@@ -316,10 +319,10 @@ class App:
             return _json(start_response, "409 Conflict", {"error": "Tidesight already has users: sign in."})
         encoded = hash_password(password)
 
-        def first(table: Dict[str, str]) -> bool:
+        def first(table: Dict[str, Dict[str, Any]]) -> bool:
             if table:  # another request created a user meanwhile
                 return False
-            table[name] = encoded
+            table[name] = {"hash": encoded, "role": "admin", "created_at": int(time.time() * 1000)}
             return True
 
         try:
@@ -337,6 +340,114 @@ class App:
             return _json(start_response, "409 Conflict", {"error": "The user was saved, but cannot sign in this way: "
                                                          "sign in, or choose another name with jobs.py user set."})
         return self._signed_in(cfg, environ, start_response, name, body.get("remember") is not False)
+
+    def _new_password(self, body: Dict[str, Any], key: str = "password") -> Tuple[Optional[str], Optional[str]]:
+        """(the password, None) or (None, why it is refused)."""
+        from . import users
+        password = body.get(key)
+        if not isinstance(password, str) or not users.MIN_PASSWORD <= len(password) <= 1024:
+            return None, "Use a password of at least %d characters." % users.MIN_PASSWORD
+        return password, None
+
+    def _set_password(self, cfg: Config, name: str, encoded: str) -> Optional[Config]:
+        """Store a new password hash for a user of users.json and end their sessions; the reloaded configuration,
+        or None when the user is gone (or could not be saved)."""
+        from . import users
+        from .webdb import WebDB
+
+        def put(table: Dict[str, Dict[str, Any]]) -> bool:
+            if name not in table:
+                return False
+            table[name] = dict(table[name], hash=encoded)
+            return True
+
+        try:
+            if not users.update(cfg.data_dir, put):
+                return None
+        except (users.UsersError, TimeoutError, OSError) as exc:
+            log.error("could not save a password: %s", exc)
+            return None
+        web = WebDB(cfg.data_dir)
+        web.delete_user_sessions(name)  # a new password ends every session (others sign in again)
+        web.delete_links(name)  # and every password link made before it
+        fresh = self.holder.reload()
+        return fresh if fresh.dashboard["users"].get(name) == encoded else None
+
+    def password_link(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
+        """A one-time link (an invitation, or a password reset): {token} says whose it is; {token, password} sets
+        the password, spends the link and signs in. Wrong tokens count like failed sign-ins."""
+        from .admin import read_body
+        from .auth import hash_password
+        from .webdb import WebDB
+        if environ.get("REQUEST_METHOD", "GET").upper() != "POST":
+            return _json(start_response, "405 Method Not Allowed", {"error": "POST the link's token"})
+        try:
+            body = read_body(environ)
+        except ApiError as exc:
+            return _json(start_response, _status(exc.status), {"error": exc.message})
+        if not isinstance(body, dict):
+            return _json(start_response, "400 Bad Request", {"error": "send {token, password}"})
+        client = self._client(cfg, environ)
+        throttle = self.shared_throttle(cfg)
+        if not throttle.reserve(client):
+            return _json(start_response, "429 Too Many Requests",
+                         {"error": "Too many attempts from your network. Try again in a few minutes."},
+                         [("Retry-After", "60")])
+        web = WebDB(cfg.data_dir)
+        token = body.get("token")
+        found = web.link(token)
+        gone = {"error": "This link does not work any more (used, replaced or expired): ask an admin for a new one."}
+        if found is None or found["user"] in cfg.file_users:
+            return _json(start_response, "401 Unauthorized", gone)
+        throttle.forgive(client)
+        name = found["user"]
+        if "password" not in body:
+            return _json(start_response, "200 OK", {"user": name, "kind": found["kind"]})
+        password, problem = self._new_password(body)
+        if problem:
+            return _json(start_response, "400 Bad Request", {"error": problem})
+        encoded = hash_password(password)
+        if web.link(token, use=True) is None:  # spent by a request a moment ago
+            return _json(start_response, "401 Unauthorized", gone)
+        fresh = self._set_password(cfg, name, encoded)
+        if fresh is None:
+            return _json(start_response, "410 Gone", {"error": "This user does not exist any more."})
+        return self._signed_in(fresh, environ, start_response, name, body.get("remember") is not False)
+
+    def change_password(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse,
+                        user: str) -> Iterable[bytes]:
+        """A signed-in user changes their own password (the current one is asked again): their other sessions end,
+        this one goes on."""
+        from .admin import read_body
+        from .auth import hash_password
+        from .webdb import WebDB
+        if environ.get("REQUEST_METHOD", "GET").upper() != "POST":
+            return _json(start_response, "405 Method Not Allowed", {"error": "POST {current, password}"})
+        if not self.require_auth or user in cfg.file_users:
+            return _json(start_response, "409 Conflict",
+                         {"error": "This password is in the configuration file ([dashboard] users): change it there."})
+        try:
+            body = read_body(environ)
+        except ApiError as exc:
+            return _json(start_response, _status(exc.status), {"error": exc.message})
+        if not isinstance(body, dict):
+            return _json(start_response, "400 Bad Request", {"error": "send {current, password}"})
+        checked, status = self.authenticator(cfg).login(user, body.get("current", ""), self._client(cfg, environ))
+        if status == "throttled":
+            return _json(start_response, "429 Too Many Requests",
+                         {"error": "Too many attempts from your network. Try again in a few minutes."},
+                         [("Retry-After", "60")])
+        if checked != user:  # 403, not 401: this session is still good
+            return _json(start_response, "403 Forbidden", {"error": "The current password is not right."})
+        password, problem = self._new_password(body)
+        if problem:
+            return _json(start_response, "400 Bad Request", {"error": problem})
+        session = WebDB(cfg.data_dir).session_user(_cookie(environ, COOKIE)) or {}
+        remember = int(session.get("expires") or 0) - int(time.time() * 1000) > 86400000
+        fresh = self._set_password(cfg, user, hash_password(password))
+        if fresh is None:
+            return _json(start_response, "503 Service Unavailable", {"error": "The password could not be saved: try again."})
+        return self._signed_in(fresh, environ, start_response, user, remember)
 
     def logout(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         from .webdb import WebDB
@@ -411,19 +522,24 @@ class App:
         # sibling subdomain, which SameSite cookies do not keep out.
         if environ.get("HTTP_SEC_FETCH_SITE", "same-origin") not in ("same-origin", "none"):
             return _json(start_response, "403 Forbidden", {"error": "cross-site request"})
-        cfg = self._fresh_users(cfg)
+        cfg = self.holder.fresh_users()  # roles, passwords and people as they are now, in every process
         if method in WRITE_METHODS:
             problem = self._write_problem(cfg, environ)
             if problem:
                 return _json(start_response, "403 Forbidden", {"error": problem})
         elif method not in ("GET", "HEAD"):
             return _json(start_response, "405 Method Not Allowed", {"error": "unsupported method"})
+        if endpoint in PASSWORD_ENDPOINTS and not self._safe_for_passwords(cfg, environ):
+            return _json(start_response, "403 Forbidden", {"error": "Passwords travel over HTTPS only: open the dashboard "
+                                                           "with https://"})
         if endpoint == "login":
             return self.login(cfg, environ, start_response)
         if endpoint == "logout":
             return self.logout(cfg, environ, start_response)
         if endpoint == "setup":
             return self.setup(cfg, environ, start_response)
+        if endpoint == "password_link":
+            return self.password_link(cfg, environ, start_response)
         if self.require_auth and not cfg.dashboard["users"]:
             # No user yet: the page offers to create the first one, with the setup code written on the server.
             from . import users
@@ -441,7 +557,10 @@ class App:
         if endpoint == "me":
             return _json(start_response, "200 OK", {
                 "user": user, "admin": self.is_admin(cfg, user), "auth": how, "can_sign_out": how == "session",
+                "can_change_password": how == "session" and user not in cfg.file_users,
                 "public_url": cfg.server["public_url"] or None})
+        if endpoint == "password":
+            return self.change_password(cfg, environ, start_response, user)
         if endpoint in ADMIN_READS or method in WRITE_METHODS:
             return self.admin(cfg, environ, start_response, method, endpoint, params, user)
         if endpoint == "export":
@@ -453,7 +572,7 @@ class App:
         from .admin import Admin, read_body
         try:
             body = read_body(environ) if method in WRITE_METHODS else None
-            data = Admin(self.holder, user, self.is_admin(cfg, user)).call(method, endpoint, params, body)
+            data = Admin(self.holder, user, self.is_admin(cfg, user), signed_in=self.require_auth).call(method, endpoint, params, body)
         except ApiError as exc:
             return _json(start_response, _status(exc.status), {"error": exc.message})
         except Exception:
@@ -600,6 +719,8 @@ class App:
         if ext == ".html":
             headers.append(("Content-Security-Policy", SHARE_CSP if share else content_security_policy(cfg)))
             headers.append(("Vary", "Cookie"))
+            if _https(environ):  # browsers then never ask this host over plain HTTP again
+                headers.append(("Strict-Transport-Security", "max-age=31536000"))
         else:
             headers.append(("Content-Security-Policy", ASSET_CSP))
         if environ.get("HTTP_IF_NONE_MATCH") == etag and ext != ".html":

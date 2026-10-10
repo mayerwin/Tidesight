@@ -124,8 +124,10 @@ The dashboard's own state, apart from the analytics data (only the Python app re
 | `annotations(id, site_id, day, text, created_by, created_at)` | Notes shown on a property's charts. |
 | `purges(site_id, requested_by, requested_at)` | *(migration 2)* Properties deleted with their data: `jobs.py cron` deletes everything stored under the id (raw and archived hits, recordings, derived rows, segments, notes), then the row. |
 | `calls(client, minute, n)` | *(migration 3)* Public share-page API calls per client (keyed hash) in the current minute, when each request is its own process (CGI); older minutes are deleted as they pass. |
+| `password_links(token_hash, user, kind, created_by, created_at, expires)` | *(migration 4)* One-time links to choose a password: `invite` or `reset`. Only the SHA-256 of the token; one link per user (a new one replaces it); deleted when used. |
+| `sign_ins(user, at)` | *(migration 4)* Each user's last sign-in, shown on the Users page. |
 
-Properties added in the dashboard are not in a database: they are `data_dir/properties.json` (`{"format": "tidesight-properties/1", "sites": {id: table}}`), loaded with the configuration file. Dashboard users added with `jobs.py user set` or the first-account form are in `data_dir/users.json` (`{"format": "tidesight-users/1", "users": {name: password hash}}`), loaded the same way; until the first one exists, `data_dir/setup-code.txt` holds the code that form asks for.
+Properties added in the dashboard are not in a database: they are `data_dir/properties.json` (`{"format": "tidesight-properties/1", "sites": {id: table}}`), loaded with the configuration file. The people managed in the dashboard (or with `jobs.py user`) are in `data_dir/users.json` (`{"format": "tidesight-users/2", "users": {name: {hash, role, created_at, created_by}}}`, `hash` missing for someone invited who has not chosen a password yet; format 1, `{name: hash}`, is still read), loaded the same way; until the first one exists, `data_dir/setup-code.txt` holds the code that form asks for.
 
 ## Adding a migration
 

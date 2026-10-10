@@ -29,7 +29,7 @@ async function request(method, endpoint, params, body) {
   try { data = await res.json(); } catch (e) { /* not JSON */ }
   if (!res.ok) {
     const err = new ApiError(res.status, (data && data.error) || res.statusText || 'Request failed', data);
-    if (res.status === 401 && endpoint !== 'login' && endpoint !== 'setup') events.dispatchEvent(new CustomEvent('signedout'));
+    if (res.status === 401 && !['login', 'setup', 'password_link'].includes(endpoint)) events.dispatchEvent(new CustomEvent('signedout'));
     throw err;
   }
   return data;

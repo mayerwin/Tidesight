@@ -14,7 +14,7 @@ import os
 import secrets
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .storage import connect, migrate
 
@@ -66,6 +66,22 @@ MIGRATIONS = [
         )""",
         "CREATE INDEX IF NOT EXISTS calls_minute ON calls(minute)",
     ]),
+    (4, [
+        # One-time links to choose a password: an invitation, or a reset an admin (or jobs.py user link) made.
+        """CREATE TABLE IF NOT EXISTS password_links (
+            token_hash TEXT PRIMARY KEY,
+            user       TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            created_by TEXT,
+            created_at INTEGER NOT NULL,
+            expires    INTEGER NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS password_links_user ON password_links(user)",
+        """CREATE TABLE IF NOT EXISTS sign_ins (
+            user TEXT PRIMARY KEY,
+            at   INTEGER NOT NULL
+        )""",
+    ]),
 ]
 
 
@@ -105,21 +121,89 @@ class WebDB:
                              "ORDER BY created LIMIT 10)", (user,))
             conn.execute("INSERT INTO sessions(token_hash, user, pw_tag, created, expires) VALUES (?, ?, ?, ?, ?)",
                          (_hash(token), user, pw_tag, now, now + int(days * 86400000)))
+            conn.execute("INSERT OR REPLACE INTO sign_ins(user, at) VALUES (?, ?)", (user, now))
         finally:
             conn.close()
         return token
 
     def session_user(self, token: Optional[str]) -> Optional[Dict[str, Any]]:
-        """{user, pw_tag} of a valid session token, else None."""
+        """{user, pw_tag, expires} of a valid session token, else None."""
         if not token or len(token) > 200:
             return None
         conn = self._conn()
         try:
-            row = conn.execute("SELECT user, pw_tag FROM sessions WHERE token_hash = ? AND expires > ?",
+            row = conn.execute("SELECT user, pw_tag, expires FROM sessions WHERE token_hash = ? AND expires > ?",
                                (_hash(token), _now())).fetchone()
         finally:
             conn.close()
         return dict(row) if row else None
+
+    def last_sign_ins(self) -> Dict[str, int]:
+        conn = self._conn()
+        try:
+            return {r["user"]: r["at"] for r in conn.execute("SELECT user, at FROM sign_ins")}
+        finally:
+            conn.close()
+
+    # -- password links (invitations and resets) ---------------------------------------------------
+
+    def create_link(self, user: str, kind: str, created_by: Optional[str], hours: float) -> Tuple[str, int]:
+        """A one-time link for `user` to choose a password ((token, expiry in ms)); it replaces the user's earlier
+        links. Only a hash of the token is stored."""
+        token = secrets.token_urlsafe(32)
+        now = _now()
+        expires = now + int(hours * 3600000)
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM password_links WHERE expires < ? OR user = ?", (now, user))
+            conn.execute("INSERT INTO password_links(token_hash, user, kind, created_by, created_at, expires) "
+                         "VALUES (?, ?, ?, ?, ?, ?)", (_hash(token), user, kind, created_by, now, expires))
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+        return token, expires
+
+    def link(self, token: Any, use: bool = False) -> Optional[Dict[str, Any]]:
+        """{user, kind, expires} of a valid link; with `use`, the link is spent (atomically: once only)."""
+        if not isinstance(token, str) or not 20 <= len(token) <= 200:
+            return None
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT user, kind, expires FROM password_links WHERE token_hash = ? AND expires > ?",
+                               (_hash(token), _now())).fetchone()
+            if row is not None and use:
+                conn.execute("DELETE FROM password_links WHERE token_hash = ?", (_hash(token),))
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+        return dict(row) if row else None
+
+    def links(self) -> Dict[str, Dict[str, Any]]:
+        """The valid links, by user: {kind, expires, created_by, created_at}."""
+        conn = self._conn()
+        try:
+            rows = conn.execute("SELECT user, kind, expires, created_by, created_at FROM password_links "
+                                "WHERE expires > ?", (_now(),)).fetchall()
+        finally:
+            conn.close()
+        return {r["user"]: {k: r[k] for k in ("kind", "expires", "created_by", "created_at")} for r in rows}
+
+    def delete_links(self, user: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute("DELETE FROM password_links WHERE user = ?", (user,))
+        finally:
+            conn.close()
 
     def delete_session(self, token: Optional[str]) -> None:
         if not token:
@@ -134,6 +218,15 @@ class WebDB:
         conn = self._conn()
         try:
             conn.execute("DELETE FROM sessions WHERE user = ?", (user,))
+        finally:
+            conn.close()
+
+    def forget_user(self, user: str) -> None:
+        """A removed user: their sessions, password links and last sign-in."""
+        conn = self._conn()
+        try:
+            for table in ("sessions", "password_links", "sign_ins"):
+                conn.execute("DELETE FROM %s WHERE user = ?" % table, (user,))
         finally:
             conn.close()
 

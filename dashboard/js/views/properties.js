@@ -15,7 +15,7 @@ export async function render(root, ctx) {
   const head = card({ title: 'Properties', span: 12, className: 'props-head' });
   const search = el('input', { class: 'input search', type: 'search', placeholder: 'Find a property…', 'aria-label': 'Find a property' });
   const add = el('button', { type: 'button', class: 'btn primary', disabled: !admin || null }, icon('plus'), el('span', { text: 'Add property' }));
-  if (!admin) hint(add, 'Only dashboard admins can add properties ([dashboard] admins)');
+  if (!admin) hint(add, 'Only admins can add properties (an admin can change your role on the Users page)');
   add.addEventListener('click', () => addWizard(ctx, res));
   head.body.appendChild(el('div', { class: 'props-bar' },
     el('p', { class: 'note', text: fmt.plural(res.properties.length, 'property', 'properties') + '. A property is a website (one or more domains) with its own reports, goals and settings.' }),

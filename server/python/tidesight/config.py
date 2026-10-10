@@ -398,17 +398,19 @@ class Config:
             if values[key]:
                 values[key] = resolve(values[key])
 
-        # Users added with `jobs.py user set` (data_dir/users.json); the configuration file's users win.
+        # Users managed in the dashboard (data_dir/users.json); the configuration file's users win.
         self.file_users: Dict[str, Any] = dict(self.dashboard["users"])
         self.users_error: Optional[str] = None
-        stored: Dict[str, str] = {}
+        stored: Dict[str, Dict[str, Any]] = {}
         if load_properties:
             try:
-                stored = users.read(self.data_dir)
+                stored = users.records(self.data_dir)
             except users.UsersError as exc:
                 self.users_error = str(exc)
                 self.warnings.append("%s (its users cannot sign in)" % exc)
-        self.dashboard["users"] = {**stored, **self.file_users}
+        self.user_roles: Dict[str, Optional[str]] = {name: rec["role"] for name, rec in stored.items()
+                                                     if name not in self.file_users}
+        self.dashboard["users"] = {**{n: r["hash"] for n, r in stored.items() if r["hash"]}, **self.file_users}
 
         defaults = raw.get("defaults", {})
         if not isinstance(defaults, dict):
@@ -518,6 +520,10 @@ class Config:
             merged.update(s_opts.get(fname, {}))
             opts[fname] = merged
         return SiteConfig(site_id, settings, features, opts, privacy)
+
+    def role(self, user: str) -> str:
+        """"admin" (manages properties and users) or "viewer" (reads every report): users.role_of."""
+        return users.role_of(user, self.file_users, self.dashboard.get("admins") or [], self.user_roles)
 
     def site(self, site_id: Optional[str]) -> Optional[SiteConfig]:
         if not site_id:
@@ -646,6 +652,8 @@ def find_config_path(explicit: Optional[str] = None) -> Optional[str]:
     candidates = [
         os.path.join(os.getcwd(), "tidesight.toml"),
         os.path.join(os.path.expanduser("~"), "tidesight", "tidesight.toml"),
+        # Everything in one folder (docs/deploy-dreamhost.md): the code in app/, the configuration beside it.
+        os.path.join(here, "..", "..", "..", "..", "tidesight.toml"),
         os.path.join(here, "..", "..", "..", "config", "tidesight.toml"),
     ]
     for c in candidates:
@@ -717,15 +725,24 @@ class ConfigHolder:
     def reload(self) -> Config:
         """Reload now (after the dashboard changed a property)."""
         with self._lock:
+            mtime = self._stat()  # before reading: a change made while reading is seen at the next look
             fresh = self._rebuild()
             problem = self._worse(fresh)
             if problem:
                 log.error("config reload: %s; keeping the previous configuration", problem)
             else:
                 self._config = fresh
-                self._mtime = self._stat()
+                self._mtime = mtime
             self._checked = time.monotonic()
         return self._config
+
+    def fresh_users(self) -> Config:
+        """The configuration, reloaded at once if users.json changed since it was read (another process changed a
+        role, a password or a user a moment ago): who may do what is never a few seconds late. A stat, else."""
+        current = self._config
+        if users.mtime(current.data_dir) != (self._mtime[2] if len(self._mtime) > 2 else None):
+            return self.reload()
+        return self.get()
 
     def get(self) -> Config:
         now = time.monotonic()

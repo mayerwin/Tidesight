@@ -64,10 +64,13 @@ rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `re
 - ✅ **Installed on `tidesight.erwinmayer.com`** (2026-10-09): code in `~/tidesight`, data in `~/tidesight-data` (geo databases loaded), FastCGI entry point and `.htaccess` in the web directory, cron jobs (every 2 minutes, nightly backup, monthly geo update, weekly vacuum). Checked over HTTP: health, tracker, configuration, collect (plain), dashboard sign-in and API. DNS record at Cloudflare, Let's Encrypt certificate and the Web Application Firewall off: done by the owner the same day; HTTPS, compressed batches and replay-sized bodies checked. Waiting on the owner: the first account.
 - ✅ **The first account in the dashboard** (2026-10-09): while there is no user, the dashboard offers to create one, with a setup code written on the server (`data_dir/setup-code.txt`, or `jobs.py setup-link` for an address with the code) so that a bot finding the new site first cannot claim it. An adversarial review of it found no way in without the code, and four smaller issues, fixed: the dashboard now refuses to run with its data inside the web root (as the collector did), a damaged code file matches nothing and is replaced (written whole, then linked into place), the form re-reads every user file before creating the first user and never signs in as a user of the configuration file, and bodies with lone surrogates answer `400` instead of an error. Two races behind occasional test failures are gone too: `web.db` migrations re-check their version under the write lock, and a new database switched to WAL by several processes at once retries instead of failing.
 
+- ✅ **People in the dashboard** (2026-10-09): a Users page for admins (invitations as one-time links, roles, password links for forgotten passwords, removal, last sign-in), changing one's own password, `jobs.py user link` for a locked-out admin; no email involved.
+- ✅ **Tidesight in one folder** (2026-10-09): code (`app/`), configuration and data may live in the website's folder, behind `server/python/web.htaccess`, which sends every request to the app; the data directory gets an `.htaccess` refusing everything, and `jobs.py cron` checks from the outside that its files cannot be downloaded (the collector and the dashboard stop while they can).
+
 ## Ideas for later
 
 - Custom channel groupings (e.g. AI traffic beyond GA4's list).
-- Managing dashboard users from the dashboard (today: `jobs.py user` on the server, or the configuration file); email reports and alerts (traffic drops, error spikes).
+- Email reports and alerts (traffic drops, error spikes).
 - Funnels saved per property and built from goals.
 - An optional consent mode in the tracker (wait for a consent call before setting identifiers).
 - Faster enrichment for very large sites (bulk inserts, parallel rebuilds).

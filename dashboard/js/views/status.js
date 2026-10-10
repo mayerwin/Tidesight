@@ -1,5 +1,5 @@
 // Status: storage, enrichment progress and flagged traffic.
-import { card, el, table } from '../charts.js';
+import { card, el, icon, table } from '../charts.js';
 import * as fmt from '../fmt.js';
 
 export async function render(root, ctx) {
@@ -39,4 +39,26 @@ export async function render(root, ctx) {
   ], st.counters_today || [], { sortKey: 'n', exportName: 'counters-today', empty: 'Nothing counted today.' });
   counters.body.appendChild(el('p', { class: 'note', text: 'Refused requests are counted, not stored: see "Limits and abuse protection" in docs/configuration.md.' }));
   root.append(files.root, enrich.root, flagged.root, counters.root);
+  if (st.web_check) root.insertBefore(webCheckCard(st.web_check).root, files.root);
+}
+
+// Tidesight's files inside the website's folder: what the last outside check found (jobs.py cron, every 10 minutes).
+function webCheckCard(w) {
+  const c = card({ title: 'Website folder', span: 12 });
+  const say = (cls, iconName, text) => c.body.appendChild(el('div', { class: 'notice' + cls }, icon(iconName), el('span', { text })));
+  if (w.exposed) {
+    say(' warn', 'alert', 'Tidesight\'s files could be downloaded from ' + (w.url || 'the website') + ': it refuses to record or show anything until they cannot. Check the .htaccess of its folder (docs/deploy-dreamhost.md); the next check (within 10 minutes) clears this by itself.');
+  } else if (w.unverified) {
+    say(' warn', 'info', 'Not verified' + (w.verified_at ? ' since ' + fmt.when(w.verified_at) : ' yet') + ': ' + w.unverified);
+  } else if (w.skipped) {
+    say('', 'info', w.skipped);
+  } else {
+    say('', 'check', 'Checked ' + fmt.ago(w.checked_at) + ' from the outside: the files of Tidesight\'s folders cannot be downloaded.');
+  }
+  for (const text of w.warnings || []) say(' warn', 'alert', text);
+  if (w.checked) {
+    table(c.body.appendChild(el('div')), [{ key: 'what', label: 'Folder' }, { key: 'url', label: 'Asked at' },
+      { key: 'status', label: 'Answer', num: true }], w.checked, { sortKey: null });
+  }
+  return c;
 }

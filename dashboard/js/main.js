@@ -8,7 +8,7 @@ import { filterChips, loadSegments, openFilterBuilder, segmentButton, trafficBut
 import * as fmt from './fmt.js';
 import { openPalette, openShortcuts, registerShortcuts } from './palette.js';
 import { context, go, hrefFor, onReplace, shiftRange, state, storage } from './state.js';
-import { closeDialogs, closePopover, menu, popover } from './ui.js';
+import { closeDialogs, closePopover, dialog, menu, popover, toast } from './ui.js';
 
 export const VIEWS = [
   { group: 'Reports' },
@@ -38,10 +38,11 @@ export const VIEWS = [
   { group: 'Admin' },
   { id: 'properties', title: 'Properties', icon: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z', bar: 'none', admin: true },
   { id: 'property', title: 'Property settings', hidden: true, bar: 'none' },
+  { id: 'users', title: 'Users', icon: 'M9 11a4 4 0 100-8 4 4 0 000 8zM2 21v-1a7 7 0 0114 0v1M16 3.5a4 4 0 010 7.5M22 21v-1a7 7 0 00-4.5-6.5', bar: 'none', admin: true },
   { id: 'status', title: 'Status', icon: 'M12 3v4M12 17v4M3 12h4M17 12h4M12 15a3 3 0 100-6 3 3 0 000 6z', bar: 'none' },
 ];
 const PUBLIC_VIEWS = new Set(['overview', 'realtime']);
-const NO_SITE_VIEWS = new Set(['properties', 'status']);
+const NO_SITE_VIEWS = new Set(['properties', 'users', 'status']);
 
 // ---- rail ------------------------------------------------------------------------------------------
 function renderNav(ctx) {
@@ -52,6 +53,7 @@ function renderNav(ctx) {
     if (v.hidden || (PUBLIC && !PUBLIC_VIEWS.has(v.id))) continue;
     if (PUBLIC && v.id === 'realtime' && !(ctx.siteInfo && (ctx.siteInfo.public_metrics || []).includes('realtime'))) continue;
     if (v.id === 'goals' && !ctx.goals.length && !(state.me && state.me.admin)) continue;
+    if (v.id === 'users' && !(state.me && state.me.admin && state.me.auth !== 'none')) continue;
     const a = el('a', { href: hrefFor(v.id), 'aria-current': ctx.view === v.id || (v.id === 'properties' && ctx.view === 'property') ? 'page' : null });
     const ic = s('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' });
     ic.appendChild(s('path', { d: v.icon, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
@@ -122,10 +124,45 @@ function renderUser() {
     { heading: state.me.user === 'local' ? 'Signed in automatically (dev server --no-auth)' : 'Signed in as ' + state.me.user + (state.me.admin ? ' · admin' : '') },
     { label: 'Keyboard shortcuts', icon: 'keyboard', kbd: '?', onClick: openShortcuts },
     { label: 'Switch theme', icon: 'theme', onClick: toggleTheme },
+    state.me.can_change_password ? { label: 'Change password…', icon: 'user', onClick: changePassword } : null,
     state.me.can_sign_out ? 'sep' : null,
     state.me.can_sign_out ? { label: 'Sign out', icon: 'logout', onClick: signOut } : null,
   ]));
   box.appendChild(b);
+}
+
+function changePassword() {
+  const input = (name, label, autocomplete) => el('input', { class: 'input wide', type: 'password', name, autocomplete, 'aria-label': label });
+  const current = input('current-password', 'Current password', 'current-password');
+  const pass = input('new-password', 'New password', 'new-password');
+  const again = input('new-password-again', 'Repeat the new password', 'new-password');
+  const err = el('div', { class: 'login-error', role: 'alert', hidden: true });
+  const cancel = el('button', { type: 'button', class: 'btn', text: 'Cancel' });
+  const save = el('button', { type: 'button', class: 'btn primary', text: 'Change the password' });
+  const field = (label, control, help) => el('label', { class: 'field' }, el('span', { class: 'field-label', text: label }), control,
+    help ? el('span', { class: 'field-help', text: help }) : null);
+  const d = dialog({ title: 'Change your password', width: 460, actions: [cancel, save],
+    body: el('div', { class: 'stack' }, field('Current password', current), field('New password', pass, 'At least 8 characters.'),
+      field('Repeat the new password', again), err,
+      el('p', { class: 'note', text: 'Your other browsers and devices are signed out; this one stays signed in.' })) });
+  const fail = (message, focus) => { err.textContent = message; err.hidden = false; save.disabled = false; if (focus) focus.focus(); };
+  const go = async () => {
+    err.hidden = true;
+    if (!current.value) return fail('Enter your current password.', current);
+    if (pass.value.length < 8) return fail('Use a password of at least 8 characters.', pass);
+    if (again.value !== pass.value) return fail('The two new passwords differ.', again);
+    save.disabled = true;
+    try {
+      await send('POST', 'password', { current: current.value, password: pass.value });
+      d.close();
+      toast('Password changed', { kind: 'success' });
+    } catch (e) {
+      fail(e.message, e.status === 403 ? current : null);
+    }
+  };
+  cancel.addEventListener('click', () => d.close());
+  save.addEventListener('click', go);
+  for (const f of [current, pass, again]) f.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
 }
 
 async function signOut() {
@@ -361,64 +398,121 @@ function showLogin(setup = false, message = '') {
   setTimeout(() => user.focus(), 0);
 }
 
-// The first account, while Tidesight has no user: the setup code, which Tidesight writes in a file on the server,
-// proves the installation is the visitor's own (bots that find a new site first cannot claim it).
-// `jobs.py setup-link` prints this page's address with the code after a #setup=, which never reaches the server.
-function takeSetupCode() {
-  const m = location.hash.match(/^#setup=([0-9A-Za-z-]{4,40})$/);
+// One-time codes travel after a # (browsers never send that part to the server); each is taken out of the address
+// bar and the history at once. #setup= carries the first account's setup code (jobs.py setup-link), #password= a
+// password link (an invitation, or a reset made by an admin or by jobs.py user link).
+function takeFromHash(re) {
+  const m = location.hash.match(re);
   if (!m) return '';
-  history.replaceState(null, '', location.pathname + location.search); // out of the address bar and the history
+  history.replaceState(null, '', location.pathname + location.search);
   return m[1];
 }
 
-function showSetup(code = '') {
+function showCard(title, sub, ...children) {
   document.body.classList.add('signed-out');
   const root = document.getElementById('login');
   root.hidden = false;
   document.getElementById('shell').hidden = true;
-  const field = (label, input, help) => el('label', { class: 'field' }, el('span', { class: 'field-label', text: label }), input, help || null);
-  const codeInput = el('input', { class: 'input mono', name: 'setup-code', value: code, required: true, autocomplete: 'one-time-code',
-    spellcheck: 'false', autocapitalize: 'characters', placeholder: 'XXXX-XXXX-XXXX-XXXX', 'aria-label': 'Setup code', 'aria-describedby': 'setup-help' });
-  const user = el('input', { class: 'input', name: 'username', required: true, autocomplete: 'username', placeholder: 'admin', 'aria-label': 'User name', 'aria-describedby': 'user-help' });
+  root.replaceChildren(el('div', { class: 'login-card' }, brand(), el('h1', { text: title }),
+    sub ? el('p', { class: 'login-sub', text: sub }) : null, ...children));
+}
+
+const labelled = (label, control, help) => el('label', { class: 'field' }, el('span', { class: 'field-label', text: label }), control, help || null);
+
+// The two fields of a new password, with a button to show them, and what is wrong with them (or null).
+function newPasswordFields() {
   const pass = el('input', { class: 'input', name: 'new-password', type: 'password', required: true, autocomplete: 'new-password', 'aria-label': 'Password', 'aria-describedby': 'pass-help' });
   const again = el('input', { class: 'input', name: 'new-password-again', type: 'password', required: true, autocomplete: 'new-password', 'aria-label': 'Repeat the password' });
   const show = el('button', { type: 'button', class: 'icon-btn eye', 'aria-label': 'Show the password' }, icon('eye'));
   show.addEventListener('click', () => { const type = pass.type === 'password' ? 'text' : 'password'; pass.type = type; again.type = type; pass.focus(); });
+  return {
+    pass,
+    fields: [labelled('Password', el('span', { class: 'pw-wrap' }, pass, show), el('span', { class: 'field-help', id: 'pass-help', text: 'At least 8 characters.' })),
+      labelled('Repeat the password', again)],
+    problem: () => (pass.value.length < 8 ? ['Use a password of at least 8 characters.', pass]
+      : again.value !== pass.value ? ['The two passwords differ.', again] : null),
+  };
+}
+
+// A form that posts to the API and, once it worked, reloads the page signed in (with the signed-in Content
+// Security Policy). `check` returns [message, field] when something is wrong before sending.
+function signInForm({ fields, submitLabel, busyLabel, check, endpoint, payload, onError }) {
   const remember = el('input', { type: 'checkbox', id: 'remember', checked: true });
   const err = el('div', { class: 'login-error', role: 'alert', hidden: true });
-  const submit = el('button', { type: 'submit', class: 'btn primary wide', text: 'Create the account' });
+  const submit = el('button', { type: 'submit', class: 'btn primary wide', text: submitLabel });
   const fail = (message, input) => { err.textContent = message; err.hidden = false; if (input) input.focus(); };
-  const form = el('form', { class: 'login-form', novalidate: true },
-    field('Setup code', codeInput, el('span', { class: 'field-help', id: 'setup-help' },
-      'On the server: ', el('code', { text: 'cat ~/tidesight-data/setup-code.txt' }),
-      ' (the file setup-code.txt of Tidesight\'s data directory). It stops working once the account exists.')),
-    field('User name', user, el('span', { class: 'field-help', id: 'user-help', text: 'Letters, digits and . _ @ + -' })),
-    field('Password', el('span', { class: 'pw-wrap' }, pass, show), el('span', { class: 'field-help', id: 'pass-help', text: 'At least 8 characters.' })),
-    field('Repeat the password', again),
-    el('label', { class: 'check-row', for: 'remember' }, remember, el('span', { text: 'Keep me signed in on this device' })),
-    err, submit);
+  const form = el('form', { class: 'login-form', novalidate: true }, ...fields,
+    el('label', { class: 'check-row', for: 'remember' }, remember, el('span', { text: 'Keep me signed in on this device' })), err, submit);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     err.hidden = true;
-    if (!codeInput.value.trim()) return fail('Enter the setup code.', codeInput);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$/.test(user.value)) return fail('Choose a user name: letters, digits and . _ @ + - (starting with a letter or digit).', user);
-    if (pass.value.length < 8) return fail('Use a password of at least 8 characters.', pass);
-    if (again.value !== pass.value) return fail('The two passwords differ.', again);
+    const wrong = check();
+    if (wrong) { fail(wrong[0], wrong[1]); return; }
     submit.disabled = true;
-    submit.textContent = 'Creating the account…';
+    submit.textContent = busyLabel;
     try {
-      await send('POST', 'setup', { code: codeInput.value, user: user.value, password: pass.value, remember: remember.checked });
-      location.reload(); // signed in: the page comes back with the signed-in Content Security Policy
+      await send('POST', endpoint, Object.assign(payload(), { remember: remember.checked }));
+      location.replace(location.pathname);
     } catch (ex) {
-      if (ex.status === 409) { showLogin(false, 'Tidesight already has an account: sign in.'); return; }
-      fail(ex.message, ex.status === 401 ? codeInput : null);
       submit.disabled = false;
-      submit.textContent = 'Create the account';
+      submit.textContent = submitLabel;
+      if (!onError || !onError(ex, fail)) fail(ex.message);
     }
   });
-  root.replaceChildren(el('div', { class: 'login-card' }, brand(), el('h1', { text: 'Welcome' }),
-    el('p', { class: 'login-sub', text: 'Create the first account of this Tidesight.' }), form));
+  return form;
+}
+
+// The first account, while Tidesight has no user: the setup code, which Tidesight writes in a file on the server,
+// proves the installation is the visitor's own (bots that find a new site first cannot claim it).
+function showSetup(code = '') {
+  const codeInput = el('input', { class: 'input mono', name: 'setup-code', value: code, required: true, autocomplete: 'one-time-code',
+    spellcheck: 'false', autocapitalize: 'characters', placeholder: 'XXXX-XXXX-XXXX-XXXX', 'aria-label': 'Setup code', 'aria-describedby': 'setup-help' });
+  const user = el('input', { class: 'input', name: 'username', required: true, autocomplete: 'username', placeholder: 'admin', 'aria-label': 'User name', 'aria-describedby': 'user-help' });
+  const pw = newPasswordFields();
+  const form = signInForm({
+    fields: [
+      labelled('Setup code', codeInput, el('span', { class: 'field-help', id: 'setup-help' },
+        'On the server: ', el('code', { text: 'cat ~/tidesight-data/setup-code.txt' }),
+        ' (the file setup-code.txt of Tidesight\'s data directory). It stops working once the account exists.')),
+      labelled('User name', user, el('span', { class: 'field-help', id: 'user-help', text: 'Letters, digits and . _ @ + -' })),
+      ...pw.fields],
+    submitLabel: 'Create the account', busyLabel: 'Creating the account…', endpoint: 'setup',
+    check: () => (!codeInput.value.trim() ? ['Enter the setup code.', codeInput]
+      : !/^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$/.test(user.value) ? ['Choose a user name: letters, digits and . _ @ + - (starting with a letter or digit).', user]
+        : pw.problem()),
+    payload: () => ({ code: codeInput.value, user: user.value, password: pw.pass.value }),
+    onError: (ex, fail) => {
+      if (ex.status === 409) { showLogin(false, 'Tidesight already has an account: sign in.'); return true; }
+      fail(ex.message, ex.status === 401 ? codeInput : null);
+      return true;
+    },
+  });
+  showCard('Welcome', 'Create the first account of this Tidesight.', form);
   setTimeout(() => (code ? user : codeInput).focus(), 0);
+}
+
+// A password link: someone invited chooses their password, or someone who forgot theirs a new one.
+async function showPasswordLink(token) {
+  let info;
+  try {
+    info = await send('POST', 'password_link', { token });
+  } catch (ex) {
+    showCard('This link does not work', ex.status === 429 ? ex.message
+      : 'It was used already, replaced by a newer link, or it expired. Ask an admin for a new one.',
+    el('a', { class: 'btn primary wide', href: location.pathname, text: 'Go to the sign-in page' }));
+    return;
+  }
+  const user = el('input', { class: 'input', name: 'username', autocomplete: 'username', value: info.user, readonly: true, 'aria-label': 'User name' });
+  const pw = newPasswordFields();
+  const invite = info.kind === 'invite';
+  const form = signInForm({
+    fields: [labelled('User name', user), ...pw.fields],
+    submitLabel: invite ? 'Choose the password and sign in' : 'Save the new password', busyLabel: 'Saving…', endpoint: 'password_link',
+    check: pw.problem, payload: () => ({ token, password: pw.pass.value }),
+  });
+  showCard(invite ? 'Welcome, ' + info.user : 'A new password', invite ? 'You are invited to this Tidesight: choose your password.'
+    : 'Choose a new password for ' + info.user + '. Every other session of yours ends.', form);
+  setTimeout(() => pw.pass.focus(), 0);
 }
 
 function brand() {
@@ -440,7 +534,9 @@ async function boot() {
   document.getElementById('theme').addEventListener('click', toggleTheme);
   events.addEventListener('signedout', () => { if (!PUBLIC) showLogin(false, 'Your session ended: sign in again.'); });
   if (!PUBLIC) {
-    const setupCode = takeSetupCode();
+    const setupCode = takeFromHash(/^#setup=([0-9A-Za-z-]{4,40})$/);
+    const passwordToken = takeFromHash(/^#password=([A-Za-z0-9_-]{20,200})$/);
+    if (passwordToken) { await showPasswordLink(passwordToken); return; }
     try {
       state.me = await api('me');
     } catch (err) {

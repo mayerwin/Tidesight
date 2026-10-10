@@ -663,12 +663,53 @@ def test_auth_like_headers_are_redacted_by_default(harness):
     assert headers["accept-language"] == "en"
 
 
-def test_refuses_to_run_with_its_data_inside_the_web_root(make_harness):
+def test_data_inside_the_web_root_is_protected_and_checked(make_harness, monkeypatch):
+    """Everything may live in the website's folder (docs/deploy-dreamhost.md) as long as its files cannot be
+    downloaded: the data directory gets an .htaccess refusing everything, jobs.py cron asks the site for a file put
+    there, and the collector stops while that file comes back."""
+    from conftest import fake_site
+    from tidesight import webcheck
     h = make_harness()
     root = os.path.dirname(h.data_dir)
-    r = h.call("POST", "/collect", body=json.dumps(envelope()).encode(),
-               headers={"Content-Type": "text/plain", "Origin": "https://example.com", "DOCUMENT_ROOT": root})
-    assert r.code == 503
+    monkeypatch.setattr(webcheck, "CODE_DIR", os.path.join(root, "app"))  # the code beside the data
+    os.makedirs(os.path.join(root, "app"))
+    web = {"DOCUMENT_ROOT": root, "SCRIPT_FILENAME": os.path.join(root, "tidesight.fcgi")}
+    post = lambda: h.call("POST", "/collect", body=json.dumps(envelope()).encode(),  # noqa: E731
+                          headers=dict(web, **{"Content-Type": "text/plain", "Origin": "https://example.com"}))
+    assert post().code == 204
+    with open(os.path.join(h.data_dir, ".htaccess"), encoding="utf-8") as fh:
+        assert "Require all denied" in fh.read()
+    assert webcheck.check(h.cfg)["unverified"].startswith("set [server] public_url")
+    public = "https://stats.example.com/tidesight/"
+    h.cfg.server["public_url"] = public
+
+    exposed = fake_site(h.cfg, root, public, status=200)
+    result = webcheck.check(h.cfg, fetch=exposed)
+    assert result["exposed"] is True and result["url"] == public + os.path.basename(h.data_dir) + "/"
+    assert exposed.asked[0].startswith(public + "health?check=")  # first: does public_url lead here?
+    assert sorted(f["what"] for f in result["folders"]) == ["the code", "the configuration file", "the data directory"]
+    for folder in (root, h.data_dir, os.path.join(root, "app")):  # the files asked for are gone
+        assert not [n for n in os.listdir(folder) if n.startswith("tidesight-web-check-")]
+    assert post().code == 503 and h.call("GET", "/health", headers=web).code == 503
+
+    refused = fake_site(h.cfg, root, public, status=403)
+    assert webcheck.check(h.cfg, fetch=refused)["exposed"] is False and post().code == 204
+    # No verdict when public_url leads elsewhere, or nowhere: the last verdict stands, and it says why.
+    stranger = fake_site(h.cfg, root, public, status=200, health="0" * 32)
+    unsure = webcheck.check(h.cfg, fetch=stranger)
+    assert "does not lead to this installation" in unsure["unverified"] and unsure["exposed"] is False
+    assert len(stranger.asked) == 1 and post().code == 204  # no file was even asked for
+    webcheck.check(h.cfg, fetch=exposed)
+    assert webcheck.check(h.cfg, fetch=lambda url, timeout: 1 / 0)["exposed"] is True  # an exposure stays known
+    assert post().code == 503
+    assert webcheck.check(h.cfg, fetch=refused)["exposed"] is False and post().code == 204
     assert h.call("GET", "/health", headers={"DOCUMENT_ROOT": os.path.join(root, "elsewhere")}).code == 200
-    h.cfg.server["allow_data_in_web_root"] = True
-    assert h.call("GET", "/health", headers={"DOCUMENT_ROOT": root}).code == 200
+    h.cfg.server["allow_data_in_web_root"] = True  # the owner vouches for it: no check
+    assert webcheck.check(h.cfg)["skipped"]
+
+
+def test_health_proves_which_installation_answers(harness):
+    from tidesight import webcheck
+    answer = harness.call("GET", "/health", query="check=" + "ab" * 16).json()
+    assert answer["check"] == webcheck.check_digest(harness.cfg, "ab" * 16) and len(answer["check"]) == 32
+    assert "check" not in harness.call("GET", "/health", query="check=not-hex").json()

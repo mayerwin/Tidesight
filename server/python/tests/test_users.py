@@ -52,8 +52,8 @@ def test_set_list_remove(setup, monkeypatch, capsys):
     assert set(cfg.dashboard["users"]) == {"boss", "erwin"} and set(cfg.file_users) == {"boss"}
 
     _, out = run(monkeypatch, capsys, path, "list")
-    assert json.loads(out)["users"] == [{"user": "boss", "where": "configuration file", "admin": True},
-                                        {"user": "erwin", "where": "users.json", "admin": True}]
+    assert json.loads(out)["users"] == [{"user": "boss", "where": "configuration file", "role": "admin"},
+                                        {"user": "erwin", "where": "users.json", "role": "admin", "password": "set"}]
     _, out = run(monkeypatch, capsys, path, "set", "erwin", "--password-stdin", stdin="another password\n")
     assert json.loads(out)["password"].startswith("changed")
     run(monkeypatch, capsys, path, "remove", "erwin")
@@ -213,17 +213,25 @@ def test_no_setup_when_the_configuration_file_has_users(setup):
 
 # -- from the security review of the first-account form ---------------------------------------------------------
 
-def test_no_dashboard_when_the_data_is_inside_the_web_root(tmp_path, monkeypatch):
-    """With the data where the web server hands files out, a setup code written there could be downloaded."""
+def test_no_dashboard_while_its_files_can_be_downloaded(tmp_path):
+    """Tidesight in the website's folder works (protected by .htaccess), and stops when the check finds a file of
+    its data directory downloadable: a setup code there could be read by anyone."""
+    from conftest import fake_site
+    from tidesight import webcheck
     root = tmp_path / "www"
     (root / "data").mkdir(parents=True)
     path = root / "tidesight.toml"
-    path.write_text('[server]\ndata_dir = "data"\n', encoding="utf-8")
+    path.write_text('[server]\ndata_dir = "data"\npublic_url = "https://stats.example.com/"\n', encoding="utf-8")
     app = App(ConfigHolder(str(path), check_interval=0))
-    env = {"DOCUMENT_ROOT": str(root)}
+    env = {"DOCUMENT_ROOT": str(root), "SCRIPT_FILENAME": str(root / "tidesight.fcgi")}
+    assert call(app, "GET", "/dashboard/api/me", headers=env).json()["setup"] is True
+    assert os.path.exists(root / "data" / ".htaccess")
+    cfg = load(str(path))
+    assert webcheck.check(cfg, fetch=fake_site(cfg, str(root), "https://stats.example.com/"))["exposed"] is True
     for url in ("/dashboard/", "/dashboard/api/me", "/share/x/"):
-        assert call(app, "GET", url, headers=env).code == 503
-    assert not os.path.exists(users.setup_path(str(root / "data")))
+        answer = call(app, "GET", url, headers=env)
+        assert answer.code == 503 and b"could be downloaded" in answer.body
+    assert "error" in call(app, "GET", "/dashboard/api/me", headers=env).json()
 
 
 @pytest.mark.parametrize("content", ["", "\0" * 19 + "\n", "----\n", "too-short\n", "IIII-LLLL-OOOO-UUUU\n"])

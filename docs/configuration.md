@@ -2,7 +2,7 @@
 
 One TOML file configures the collector, the jobs and the dashboard. Start from `config/tidesight.example.toml`. Every key is optional; defaults are defined in `server/python/tidesight/config.py` (the single source of truth) and listed below.
 
-**Where it is read from:** `--config <file>` (jobs, dev server), else `$TIDESIGHT_CONFIG`, else `./tidesight.toml`, `~/tidesight/tidesight.toml` or `<repo>/config/tidesight.toml`. Relative paths inside the file (`data_dir`, `geo_dir`, `bot_list`, `static_dir`, `dashboard_dir`, `log_file`) are relative to the file. The collector re-reads the file within 5 seconds of a change; an invalid file is reported in the log and the previous configuration stays in use.
+**Where it is read from:** `--config <file>` (jobs, dev server), else `$TIDESIGHT_CONFIG`, else `./tidesight.toml`, `~/tidesight/tidesight.toml`, `tidesight.toml` beside the folder of the code (Tidesight in one folder, the code in `app/`: docs/deploy-dreamhost.md) or `<repo>/config/tidesight.toml`. Relative paths inside the file (`data_dir`, `geo_dir`, `bot_list`, `static_dir`, `dashboard_dir`, `log_file`) are relative to the file. The collector re-reads the file within 5 seconds of a change; an invalid file is reported in the log and the previous configuration stays in use.
 
 **Validation:** wrong types and unknown values are errors; unknown keys are warnings (logged, and shown by `jobs.py status`).
 
@@ -14,7 +14,7 @@ One TOML file configures the collector, the jobs and the dashboard. Start from `
 
 | Key | Default | Meaning |
 |---|---|---|
-| `data_dir` | `"data"` | Databases, spool, backups, generated secret. **Keep it outside the web root.** |
+| `data_dir` | `"data"` | Databases, spool, backups, generated secret, users. Inside the website's folder only with Tidesight's `.htaccess` (`server/python/web.htaccess`), which sends every request to the app: Tidesight then protects the folder and checks from the outside that it cannot be downloaded (see `allow_data_in_web_root`). |
 | `storage_mode` | `"sqlite"` | `"sqlite"`, or `"spool"`: append-only files loaded into SQLite by `jobs.py load-spool` (choose from the Phase 0 test). |
 | `journal_mode` | `"wal"` | `"wal"` or `"delete"` (`delete` on network filesystems). |
 | `synchronous` | `"normal"` | `"normal"` or `"full"`. |
@@ -41,7 +41,7 @@ One TOML file configures the collector, the jobs and the dashboard. Start from `
 | `dashboard_dir` | `""` | Folder of dashboard files served at `/dashboard/` (default: the repository's `dashboard`). |
 | `store_raw_body` | `false` | Also keep the raw body of requests that parsed fine. |
 | `spool_fallback` | `true` | When SQLite fails, write the request to the spool instead of answering 503. |
-| `allow_data_in_web_root` | `false` | The collector refuses to run (`503`, logged) when the data directory, the configuration file or the log file is inside the web server's document root (`DOCUMENT_ROOT`), where its databases or secret could be downloaded. Set to `true` only if that directory is otherwise protected. |
+| `allow_data_in_web_root` | `false` | When the data directory, the configuration file or the log file is inside the web server's folder (`DOCUMENT_ROOT`), Tidesight writes `data_dir/.htaccess` (refusing every request), and `jobs.py cron` checks every 10 minutes, through `public_url`, that a file put in each of those folders (the code's too) cannot be downloaded, after making sure `public_url` leads to this installation (its `/health` answers a digest only it can make); if a file can be downloaded, the collector and the dashboard answer `503` (logged, and said in the dashboard) until a later check passes. A check that cannot conclude (no `public_url`, the site unreachable, `public_url` leading elsewhere) changes nothing and says why in `jobs.py status` and on the Status page, which also warn about a configuration file or data directory other accounts can read. `true` skips the check, for folders protected some other way. |
 | `log_file` | `""` | Error log; stderr (the host's error log) when empty. Set it under FastCGI on Dreamhost, which does not show a FastCGI program's own messages in the site's error log. |
 | `resolved_config_file` | `""` | When set, `jobs.py cron` rewrites this file with the resolved configuration (as `config-json`) whenever it changed: properties added in the dashboard reach the PHP and Node connectors this way. |
 
@@ -91,8 +91,8 @@ Days to keep, applied by `jobs.py privacy-clean --retention --apply`; `0` keeps 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `users` | `{}` | `{name = "pbkdf2_sha256$…"}`: who may sign in (the dashboard's form, or HTTP Basic for scripts), besides the users of `data_dir/users.json`. Until a user exists, the dashboard offers to create the first one, with the one-time setup code Tidesight writes in `data_dir/setup-code.txt` (only someone who can read the server's files has it; `jobs.py setup-link` prints the dashboard's address with the code). Afterwards, `python -m tidesight.jobs user set NAME` asks for a password and keeps its hash in `users.json` (`user remove NAME`, `user list`); a user defined here wins over `users.json` and is changed here (hash a password with `jobs.py hash-password --user NAME`). Changing a user's password ends their sessions. |
-| `admins` | `[]` | Users who may add, change and delete properties in the dashboard. Empty: every user. Others can still read every report, save segments and add annotations. |
+| `users` | `{}` | `{name = "pbkdf2_sha256$…"}`: who may sign in (the dashboard's form, or HTTP Basic for scripts), besides the people managed in the dashboard (`data_dir/users.json`). Usually empty: until a user exists, the dashboard offers to create the first one, with the one-time setup code Tidesight writes in `data_dir/setup-code.txt` (only someone who can read the server's files has it; `jobs.py setup-link` prints the dashboard's address with the code); afterwards admins invite people on the Users page, and send password links to those who forgot theirs. A user defined here wins over `users.json`, is listed on the Users page and changed here (hash a password with `jobs.py hash-password --user NAME`). On the server, `jobs.py user set NAME`, `user link NAME`, `user remove NAME` and `user list` do the same as the Users page. Changing a user's password ends their sessions. |
+| `admins` | `[]` | Users who are admins whatever their role in the dashboard (the Users page shows their role as set here, and cannot change it). A user's role is otherwise the one set on the Users page (admins manage properties and people; viewers read every report, save segments and add annotations); a user without one (of this file, or of `users.json` written before roles) is an admin while this list is empty, a viewer otherwise. |
 | `session_days` | `30` | How long "Keep me signed in" lasts (a session without it lasts 12 hours). |
 | `realtime_minutes` | `30` | Window of the realtime view. |
 | `asset_origins` | `[]` | Origins, besides the sites' own, that replays, heatmap backgrounds and the framed live page may load images, styles, fonts and media from (e.g. a CDN: `["https://cdn.example.net"]`). The dashboard's Content Security Policy blocks every other host, so a recording sent by anyone cannot make your browser contact a server of their choosing. |

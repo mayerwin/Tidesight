@@ -1,0 +1,18 @@
+# Tidesight's .htaccess for the website's folder (copy it there as .htaccess, next to tidesight.fcgi).
+# Every request goes to the app, files included: the web server never hands out a file of this folder, so the
+# configuration, the code (app/) and the data (data/) can live here, side by side. Tidesight checks it from the
+# outside (jobs.py cron) and stops if a file of its data directory can be downloaded. docs/deploy-dreamhost.md.
+Options -Indexes -MultiViews +ExecCGI
+DirectoryIndex disabled
+CGIPassAuth On
+RewriteEngine On
+# These rules apply in every subfolder too, before any .htaccess of its own (Apache 2.4.8+).
+RewriteOptions InheritDownBefore
+# /.well-known/ belongs to the web server (certificate checks, security.txt).
+RewriteRule ^\.well-known/ - [L]
+# The dashboard and share pages only over HTTPS: passwords and session cookies never travel in clear.
+RewriteCond %{HTTPS} !=on
+RewriteRule ^(tidesight\.fcgi/)?(dashboard|share)(/.*)?$ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+# Everything else is the app's.
+RewriteRule ^tidesight\.fcgi(/|$) - [L]
+RewriteRule ^(.*)$ tidesight.fcgi/$1 [L,QSA]

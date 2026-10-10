@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
-from . import __version__
+from . import __version__, webcheck
 from .config import Config, SiteConfig
 from .enrich.timeutil import local_day, zone
 
@@ -279,6 +279,13 @@ class Api:
         except OSError:
             out["disk_free_mb"] = None
         out["min_free_disk_mb"] = self.cfg.server["min_free_disk_mb"]
+        check = webcheck.state(self.cfg)
+        if check and not public:  # files inside the website's folder: can the web download them? (no server paths)
+            out["web_check"] = {k: check.get(k) for k in ("checked_at", "verified_at", "exposed", "unverified", "url",
+                                                           "skipped", "warnings") if check.get(k) is not None}
+            if check.get("folders"):
+                out["web_check"]["checked"] = [{"what": f.get("what"), "url": f.get("url"), "status": f.get("status")}
+                                               for f in check["folders"]]
         return out
 
     def ep_overview(self, params: Dict[str, str], public: bool) -> Any:

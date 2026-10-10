@@ -763,6 +763,10 @@ details.advanced[open] summary { margin-bottom: 12px; }
 .pw-wrap { position: relative; display: flex; }
 .pw-wrap .eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); }
 .login-error { color: var(--critical); background: var(--bad-wash); padding: 8px 10px; border-radius: 8px; font-size: 13px; }
+.user-cell { display: inline-flex; align-items: center; gap: 8px; }
+.user-cell svg { width: 15px; height: 15px; color: var(--muted); }
+.copy-row { display: flex; gap: 8px; align-items: center; }
+.copy-row .input { flex: 1; min-width: 0; }
 .login-card pre.code { margin: 8px 0 12px; }
 
 .foot-credit { margin-top: 28px; color: var(--muted); font-size: 12px; }

@@ -31,7 +31,7 @@ import zlib
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
-from . import __version__
+from . import __version__, webcheck
 from .anonymize import anonymize_headers, anonymize_ip, hash_ip
 from .config import Config, ConfigHolder, SiteConfig
 from .enrich.ip import in_networks, networks
@@ -65,6 +65,7 @@ SERVER_ENV_KEYS = ("SERVER_PROTOCOL", "REQUEST_SCHEME", "HTTPS", "SSL_PROTOCOL",
 # \Z rather than $, which also matches before a trailing newline.
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _ORIGIN_RE = re.compile(r"^(null|[A-Za-z][A-Za-z0-9+.-]*://[^\s/?#,]+)\Z")
+_NONCE_RE = re.compile(r"[0-9a-f]{16,64}")  # with fullmatch
 _STATIC_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _DOMAIN_RE = re.compile(r"^\.?[A-Za-z0-9.-]+\Z")
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
@@ -114,29 +115,10 @@ def _int(value: Any) -> Optional[int]:
     return None
 
 
-_EXPOSURE: Dict[Tuple[str, str, str, str], Optional[str]] = {}
-
-
-def web_root_exposure(cfg: Config, document_root: Optional[str]) -> Optional[str]:
-    """Which of the data directory, the configuration file and the log file lies inside the web server's
-    document root (where anyone could download the databases or the secret), or None."""
-    if not document_root or cfg.server.get("allow_data_in_web_root"):
-        return None
-    key = (document_root, cfg.data_dir, cfg.path or "", cfg.server.get("log_file") or "")
-    if key not in _EXPOSURE:
-        root = os.path.normcase(os.path.realpath(document_root))
-        found = None
-        for what, path in (("the data directory", cfg.data_dir), ("the configuration file", cfg.path),
-                           ("the log file", cfg.server.get("log_file"))):
-            if path:
-                real = os.path.normcase(os.path.realpath(path))
-                if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
-                    found = "%s (%s)" % (what, path)
-                    break
-        if len(_EXPOSURE) > 100:
-            _EXPOSURE.clear()
-        _EXPOSURE[key] = found
-    return _EXPOSURE[key]
+def web_root_exposure(cfg: Config, environ: Dict[str, Any]) -> Optional[str]:
+    """Why the app must refuse to work: its data, configuration or log file lies inside the web server's folder and
+    can be downloaded from the web (webcheck.py: protected there by .htaccess, and checked by jobs.py cron)."""
+    return webcheck.refusal(cfg, environ)
 
 
 def _reject_constant(name: str) -> Any:
@@ -389,10 +371,9 @@ class Collector:
                             b"configuration error\n")
         path = environ.get("PATH_INFO") or "/"
         method = environ.get("REQUEST_METHOD", "GET").upper()
-        exposed = web_root_exposure(cfg, environ.get("DOCUMENT_ROOT"))
+        exposed = web_root_exposure(cfg, environ)
         if exposed:
-            ERRORS.error("refusing to run: %s is inside the web root %s, where its files could be downloaded "
-                         "(move it, or set [server] allow_data_in_web_root)", exposed, environ.get("DOCUMENT_ROOT"))
+            ERRORS.error("refusing to run: %s (see the .htaccess in docs/deploy-dreamhost.md)", exposed)
             return _respond(start_response, "503 Service Unavailable", [("Content-Type", "text/plain")],
                             b"configuration error\n")
         try:
@@ -883,6 +864,9 @@ class Collector:
         ok = bool(store.healthy())
         body = {"status": "ok" if ok else "error", "version": __version__,
                 "storage": cfg.server["storage_mode"], "time": now_ms()}
+        nonce = parse_qs(environ.get("QUERY_STRING") or "").get("check", [""])[0]
+        if _NONCE_RE.fullmatch(nonce):  # jobs.py cron making sure public_url leads here (webcheck.py)
+            body["check"] = webcheck.check_digest(cfg, nonce)
         return _respond(start_response, "200 OK" if ok else "503 Service Unavailable",
                         [("Content-Type", "application/json"), ("Cache-Control", "no-store")],
                         json.dumps(body).encode("utf-8"))

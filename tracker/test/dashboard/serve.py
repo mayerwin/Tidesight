@@ -28,7 +28,7 @@ def main() -> None:
     from tidesight.wsgi import create_app
 
     os.makedirs(DATA, exist_ok=True)
-    for name in ("properties.json", "web.db", "web.db-wal", "web.db-shm"):  # what the tests change
+    for name in ("properties.json", "users.json", "web.db", "web.db-wal", "web.db-shm"):  # what the tests change
         try:
             os.remove(os.path.join(DATA, "data", name))
         except OSError:

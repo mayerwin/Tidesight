@@ -291,7 +291,7 @@ Cached with `Cache-Control: public, max-age=300` and an `ETag`. The tracker also
 
 ## `GET /health`
 
-`200` with `{"status": "ok", "version": "…", "storage": "sqlite", "time": <ms>}` when storage is writable, `503` with `"status": "error"` otherwise. It never reveals paths.
+`200` with `{"status": "ok", "version": "…", "storage": "sqlite", "time": <ms>}` when storage is writable, `503` with `"status": "error"` otherwise. It never reveals paths. With `?check=<16 to 64 hex digits>` (the Python collector), the answer also holds `check`: a keyed digest of that value, which only this installation can make (its key is derived from the deployment secret and used for nothing else); `jobs.py cron` uses it to make sure `public_url` leads to this installation before checking that its files cannot be downloaded.
 
 ## Client storage
 

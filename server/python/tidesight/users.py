@@ -1,15 +1,16 @@
 """Dashboard users kept in the data directory (standard library only: the configuration loads them).
 
-`python -m tidesight.jobs user set NAME` adds a user, or changes a password, without editing the configuration
-file: users.json in the data directory maps each name to a password hash (PBKDF2, never the password itself). At
-load they are merged with the configuration file's [dashboard] users, which win: a user defined there is changed
-there. The web app picks changes up within seconds (ConfigHolder watches the file), and a changed password ends
-the user's sessions.
+Users are managed in the dashboard (the Users page: admins invite people and send password links), or on the
+server with `python -m tidesight.jobs user …`. users.json in the data directory keeps, for each name, a password
+hash (PBKDF2, never the password itself; none yet for someone invited) and a role: an admin manages properties and
+users, a viewer reads every report. At load they are merged with the configuration file's [dashboard] users, which
+win: a user defined there is changed there. The web app picks changes up within seconds (ConfigHolder watches the
+file), and a changed password ends the user's sessions.
 
-The first user can also be created in the dashboard, with the setup code of setup-code.txt in the data
-directory: only someone who can read the server's files has it, so a stranger who finds a new installation first
-cannot claim it (bots watch for new HTTPS certificates and try setup pages within minutes). The code stops
-working once a user exists.
+The first user is created in the dashboard with the setup code of setup-code.txt in the data directory: only
+someone who can read the server's files has it, so a stranger who finds a new installation first cannot claim it
+(bots watch for new HTTPS certificates and try setup pages within minutes). The code stops working once a user
+exists.
 """
 
 from __future__ import annotations
@@ -19,14 +20,18 @@ import os
 import re
 import secrets
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 from . import properties
 
 FILE = "users.json"
+FORMAT = "tidesight-users/2"  # format 1 kept the hash alone: {name: hash}; it is still read
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}\Z")  # used with match(): \Z, so "name\n" fails
 HASH_PREFIX = "pbkdf2_sha256$"
 MIN_PASSWORD = 8
+ROLES = ("admin", "viewer")
+INVITE_HOURS = 7 * 24  # an invitation link is good for a week
+RESET_HOURS = 24       # a password link for someone who has a password, for a day
 SETUP_FILE = "setup-code.txt"
 SETUP_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford's base 32: no I, L, O or U to misread
 SETUP_LENGTH = 16
@@ -41,20 +46,72 @@ def path(data_dir: str) -> str:
     return os.path.join(data_dir, FILE)
 
 
-def read(data_dir: str) -> Dict[str, str]:
-    """{name: password hash} ({} without a file). A file that cannot be read or parsed raises UsersError."""
+def _record(value: Any) -> Optional[Dict[str, Any]]:
+    """A stored user as {hash, role, created_at, created_by}: hash None for someone invited who has not chosen a
+    password yet, role None when none was set (format 1 stored the hash alone)."""
+    if isinstance(value, str):
+        value = {"hash": value}
+    if not isinstance(value, dict):
+        return None
+    encoded = value.get("hash")
+    rec: Dict[str, Any] = {"hash": encoded if isinstance(encoded, str) and encoded.startswith(HASH_PREFIX) else None,
+                           "role": value.get("role") if value.get("role") in ROLES else None}
+    if isinstance(value.get("created_at"), int):
+        rec["created_at"] = value["created_at"]
+    if isinstance(value.get("created_by"), str):
+        rec["created_by"] = value["created_by"]
+    return rec
+
+
+def records(data_dir: str) -> Dict[str, Dict[str, Any]]:
+    """Every stored user ({} without a file). A file that cannot be read or parsed raises UsersError."""
     table = properties.read_json_table(path(data_dir), "users", UsersError)
-    return {k: v for k, v in table.items() if isinstance(v, str) and v.startswith(HASH_PREFIX)}
+    out = {}
+    for name, value in table.items():
+        rec = _record(value)
+        if rec is not None:
+            out[name] = rec
+    return out
 
 
-def update(data_dir: str, change: Callable[[Dict[str, str]], Any]) -> Any:
-    """Read the users, let `change` modify them in place, write them back, under a lock."""
+def read(data_dir: str) -> Dict[str, str]:
+    """{name: password hash} of the stored users who can sign in."""
+    return {name: rec["hash"] for name, rec in records(data_dir).items() if rec["hash"]}
+
+
+def update(data_dir: str, change: Callable[[Dict[str, Dict[str, Any]]], Any]) -> Any:
+    """Read the users ({name: record}), let `change` modify them in place, write them back, under a lock. A change
+    that raises writes nothing."""
     with properties.locked(data_dir, name=".users.lock"):
-        table = read(data_dir)  # a file that cannot be read is never written over
+        table = records(data_dir)  # a file that cannot be read is never written over
         result = change(table)
-        properties.write_json(path(data_dir), {"format": "tidesight-users/1",
-                                               "updated_at": int(time.time() * 1000), "users": table})
+        stored = {}
+        for name, rec in table.items():
+            rec = _record(rec)
+            if rec is not None:
+                stored[name] = {k: v for k, v in rec.items() if v is not None}
+        properties.write_json(path(data_dir), {"format": FORMAT, "updated_at": int(time.time() * 1000),
+                                               "users": stored})
         return result
+
+
+def role_of(name: str, file_users: Iterable[str], admins: Iterable[str], roles: Dict[str, Optional[str]]) -> str:
+    """"admin" or "viewer". Named in [dashboard] admins: admin. A user of users.json with a role: that role. Anyone
+    else: admin while [dashboard] admins is empty (every user was an admin before roles existed), else viewer."""
+    admins = list(admins)
+    if name in admins:
+        return "admin"
+    if name not in file_users and roles.get(name) in ROLES:
+        return str(roles[name])
+    return "viewer" if admins else "admin"
+
+
+def active_admins(file_users: Dict[str, Any], admins: Iterable[str], table: Dict[str, Dict[str, Any]]) -> list:
+    """The admins who can sign in (an invited admin cannot yet): Tidesight never runs out of them."""
+    admins = list(admins)
+    roles = {name: rec.get("role") for name, rec in table.items()}
+    names = set(file_users) | {name for name, rec in table.items() if rec.get("hash")}
+    return sorted(n for n in names if role_of(n, file_users, admins, roles) == "admin")
 
 
 def mtime(data_dir: str) -> Optional[float]:

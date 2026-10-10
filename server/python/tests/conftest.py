@@ -136,3 +136,28 @@ def envelope(events: Optional[List[Dict[str, Any]]] = None, **kw: Any) -> Dict[s
                 "url": "https://example.com/a?utm_source=x#top", "title": "A"}]}
     env.update(kw)
     return env
+
+
+def fake_site(cfg: Config, root: str, public_url: str, status: int = 200, health: Optional[str] = None) -> Any:
+    """A web server for webcheck.check(): its /health answers the check (with `health` instead, if given), and it
+    hands out the files of `root` under public_url's path (status 200), or refuses them (any other status)."""
+    from urllib.parse import parse_qs, urlsplit
+    from tidesight import webcheck
+    prefix = urlsplit(public_url).path
+    asked: List[str] = []
+
+    def fetch(url: str, timeout: float) -> Any:
+        asked.append(url)
+        parts = urlsplit(url)
+        if parts.path == prefix + "health":
+            nonce = parse_qs(parts.query)["check"][0]
+            answer = health if health is not None else webcheck.check_digest(cfg, nonce)
+            return 200, json.dumps({"check": answer}).encode()
+        path = os.path.join(root, *parts.path[len(prefix):].split("/")) if parts.path.startswith(prefix) else ""
+        if status == 200 and os.path.isfile(path):
+            with open(path, "rb") as fh:
+                return 200, fh.read()
+        return (404 if status == 200 else status), b""
+
+    fetch.asked = asked  # type: ignore[attr-defined]
+    return fetch
