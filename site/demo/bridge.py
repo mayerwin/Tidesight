@@ -18,7 +18,7 @@ from tidesight.wsgi import create_app  # noqa: E402
 CONFIG = "/demo/tidesight.toml"
 app = create_app(CONFIG)
 cfg = load(CONFIG)
-demo.live(cfg, minutes=30)  # the last half hour: Realtime has visitors from the start
+demo.live(cfg, minutes=30, scale=0.35)  # the last half hour: Realtime has visitors from the start
 
 
 def handle(method, path, query, headers, body):
@@ -39,5 +39,5 @@ def handle(method, path, query, headers, body):
 
 
 def tick():
-    """Now and then, someone new arrives (about one visit a minute on each website)."""
-    return demo.live(cfg, minutes=1, scale=0.35)
+    """Now and then, someone new arrives (a visit every couple of minutes on each website)."""
+    return demo.live(cfg, minutes=1, scale=0.12)

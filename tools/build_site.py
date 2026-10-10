@@ -185,8 +185,12 @@ def demo(out: str, visitors: int, seed: int, cache: str) -> None:
     version = pyodide(os.path.join(dest, "pyodide"), cache)
     python_code(os.path.join(dest, "tidesight.zip"))
     demo_data(os.path.join(dest, "demo-data.tar.gz"), visitors, seed)
-    size = sum(os.path.getsize(os.path.join(dest, "pyodide", n)) for n in PYODIDE_FILES)
-    size += os.path.getsize(os.path.join(dest, "tidesight.zip")) + os.path.getsize(os.path.join(dest, "demo-data.tar.gz"))
+    # What a first visit downloads: GitHub Pages compresses the WebAssembly and the scripts (about 38 % and 22 % of
+    # their size), not the archives, which are compressed already.
+    shrink = {"pyodide.asm.wasm": 0.38, "pyodide.asm.mjs": 0.22, "pyodide.mjs": 0.3, "pyodide-lock.json": 0.15}
+    size = sum(os.path.getsize(os.path.join(dest, "pyodide", n)) * shrink.get(n, 1) for n in PYODIDE_FILES)
+    size += sum(os.path.getsize(os.path.join(dest, n)) for n in ("tidesight.zip", "demo-data.tar.gz"))
+    size += sum(os.path.getsize(os.path.join(dest, "pyodide", n)) for n in os.listdir(os.path.join(dest, "pyodide")) if n.endswith(".whl"))
     page = os.path.join(dest, "index.html")
     with open(page, encoding="utf-8") as fh:
         html = fh.read()
@@ -194,19 +198,19 @@ def demo(out: str, visitors: int, seed: int, cache: str) -> None:
                         "  <meta name=\"description\" content=\"Try Tidesight's dashboard on made-up data: it runs entirely in your browser.\">\n"
                         "  <meta name=\"robots\" content=\"noindex\">", 1)
     html = html.replace('  <script type="module" src="js/main.js"></script>\n', BOOT + '  <script type="module" src="js/main.js"></script>\n', 1)
-    html = html.replace("<body>\n", "<body>\n" + OVERLAY % {"mb": max(1, round(size / 1e6 * 0.55))}, 1)
+    html = html.replace("<body>\n", "<body>\n" + OVERLAY % {"mb": max(1, round(size / 1e6))}, 1)
     if "boot.js" not in html or "demo-boot" not in html:
         raise SystemExit("dashboard/index.html changed: update tools/build_site.py")
     with open(page, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(html)
-    print("live demo: Pyodide %s, %.1f MB to download (before compression)" % (version, size / 1e6))
+    print("live demo: Pyodide %s, about %.1f MB to download" % (version, size / 1e6))
 
 
 def main(argv: List[str] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="_site")
     ap.add_argument("--no-demo", action="store_true", help="the landing page only")
-    ap.add_argument("--visitors", type=int, default=900, help="the demo shop's visitors (tools/demo.py --visitors)")
+    ap.add_argument("--visitors", type=int, default=650, help="the demo shop's visitors (tools/demo.py --visitors)")
     ap.add_argument("--seed", type=int, default=0, help="demo data seed (default: a new one each day)")
     args = ap.parse_args(argv)
     out = os.path.abspath(args.out)
