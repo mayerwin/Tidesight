@@ -243,3 +243,44 @@ def test_an_update_being_installed_cannot_be_withdrawn(team, tmp_path, monkeypat
     assert refused.code == 409 and "being installed" in refused.json()["error"]
     assert api(app, "POST", "update", owner, {"version": "99.0.0"}).code == 409
     assert api(app, "GET", "update", owner).json()["request"]["started_at"] == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_an_update_keeps_the_code_private(cfg, tmp_path):
+    site = tmp_path / "site"
+    app, web = str(site / "app"), str(site)
+    code_tree(app, "0.1.0")
+    write(os.path.join(web, "tidesight.fcgi"), "#!/usr/bin/env python3\n# entry, old\n")
+    write(os.path.join(web, ".htaccess"), "RewriteEngine On\n# old\n")
+    os.chmod(os.path.join(web, "tidesight.fcgi"), 0o755)
+    os.chmod(os.path.join(web, ".htaccess"), 0o644)
+    for root, dirs, files in os.walk(app):
+        for name in files:
+            os.chmod(os.path.join(root, name), 0o600)
+    os.chmod(app, 0o700)  # the guide's chmod 700 app
+    updates.install(cfg, "9.9.9", code_dir=app, download=release(tmp_path, "9.9.9"), web_dirs=[web])
+    assert os.stat(app).st_mode & 0o777 == 0o700
+    loose = [os.path.join(r, n) for r, ds, fs in os.walk(app) for n in ds + fs
+             if os.stat(os.path.join(r, n)).st_mode & 0o077]
+    assert not loose
+    assert os.stat(os.path.join(web, "tidesight.fcgi")).st_mode & 0o777 == 0o755  # the web server runs it
+    assert os.stat(os.path.join(web, ".htaccess")).st_mode & 0o777 == 0o644  # and reads it
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_cron_repairs_what_an_older_updater_left_open(cfg, tmp_path):
+    app = str(tmp_path / "app")
+    code_tree(app, "0.2.0")
+    code_tree(app + ".previous", "0.1.0")
+    os.chmod(app + ".previous", 0o700)
+    os.chmod(app, 0o755)
+    os.chmod(os.path.join(app, "README.md"), 0o644)
+    updates._write(updates._path(cfg, updates.STATE_FILE), {"last_update": {"from": "0.1.0", "to": "0.2.0", "at": 1}})
+    assert updates.settle(cfg, code_dir=app) is True
+    assert os.stat(app).st_mode & 0o777 == 0o700 and os.stat(os.path.join(app, "README.md")).st_mode & 0o077 == 0
+    assert updates.state(cfg)["last_update"]["settled"] is True
+    assert updates.settle(cfg, code_dir=app) is False  # once
+
+
+def test_settling_needs_an_update(cfg, tmp_path):
+    assert updates.settle(cfg, code_dir=str(tmp_path / "app")) is False

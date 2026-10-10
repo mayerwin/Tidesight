@@ -245,6 +245,7 @@ def install(cfg: Any, version: str, code_dir: str = CODE_DIR, download: Optional
             shutil.rmtree(os.path.join(parent, name), ignore_errors=True)
     work = os.path.join(parent, ".%s.update-%s" % (os.path.basename(code_dir), secrets.token_hex(4)))
     fresh = os.path.join(work, "code")
+    os.makedirs(work, mode=0o700)  # the download is for this account only, like the code it becomes
     os.makedirs(fresh)
     notes: List[str] = []
     try:
@@ -263,7 +264,7 @@ def install(cfg: Any, version: str, code_dir: str = CODE_DIR, download: Optional
                 else:
                     shutil.copy2(src, dst)
                 notes.append("kept %s" % name)
-        os.chmod(fresh, stat.S_IMODE(os.stat(code_dir).st_mode))  # as private as the code it replaces (chmod 700)
+        match_privacy(fresh, code_dir)  # as private as the code it replaces (chmod 700 in the guide)
         previous = code_dir + ".previous"
         if os.path.exists(previous):
             shutil.rmtree(previous)
@@ -285,12 +286,51 @@ def install(cfg: Any, version: str, code_dir: str = CODE_DIR, download: Optional
             if _same_file(target, os.path.join(previous, *old.split("/"))):
                 if not _same_file(target, os.path.join(code_dir, *new.split("/"))):
                     tmp = target + ".new"
-                    shutil.copy2(os.path.join(code_dir, *new.split("/")), tmp)
+                    shutil.copyfile(os.path.join(code_dir, *new.split("/")), tmp)
+                    os.chmod(tmp, 0o755 if copy == "tidesight.fcgi" else 0o644)  # the web server reads them
                     os.replace(tmp, target)
                     notes.append("refreshed %s" % target)
             else:
                 notes.append("%s was edited by hand: compare it with %s" % (target, os.path.join(code_dir, *new.split("/"))))
     return {"from": __version__, "to": version, "at": int(time.time() * 1000), "previous": previous, "notes": notes}
+
+
+def match_privacy(root: str, like: str) -> bool:
+    """Give `root` the mode of the folder `like`; when `like` is closed to other accounts (no group or other
+    permission), close everything inside `root` too. Returns whether anything changed."""
+    want = stat.S_IMODE(os.stat(like).st_mode)
+    changed = False
+    if stat.S_IMODE(os.stat(root).st_mode) != want:
+        os.chmod(root, want)
+        changed = True
+    if want & 0o077:
+        return changed
+    for base, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = os.path.join(base, name)
+            if os.path.islink(path):
+                continue
+            mode = stat.S_IMODE(os.lstat(path).st_mode)
+            if mode & 0o077:
+                os.chmod(path, mode & ~0o077)
+                changed = True
+    return changed
+
+
+def settle(cfg: Any, code_dir: str = CODE_DIR) -> bool:
+    """After an update (jobs.py cron): the new code is as private as the code it replaced. Updaters before 0.2.1
+    unpacked with the default permissions; this repairs what they installed, once."""
+    doc = _read(_path(cfg, STATE_FILE))
+    last = doc.get("last_update")
+    if not isinstance(last, dict) or last.get("error") or last.get("settled"):
+        return False
+    previous = code_dir + ".previous"
+    changed = os.path.isdir(previous) and os.path.isdir(code_dir) and match_privacy(code_dir, previous)
+    last["settled"] = True
+    _write(_path(cfg, STATE_FILE), doc)
+    if changed:
+        log.info("the updated code in %s was made as private as the code it replaced", code_dir)
+    return changed
 
 
 def _lock(cfg: Any) -> Any:

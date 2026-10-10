@@ -1,0 +1,29 @@
+# The Python tests on Linux (POSIX permissions, the oldest and newest supported Pythons), for every push and pull
+# request. The browser tests and the other connectors' conformance run locally (AGENTS.md).
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install pytest
+      - name: pytest
+        run: python -m pytest -q
+        env:
+          TIDESIGHT_CONNECTORS: python

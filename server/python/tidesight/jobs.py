@@ -100,6 +100,8 @@ def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
             out["web_check"] = result
     # New releases: looked for once a day; one an admin asked for is installed last, when nothing else runs here.
     from . import updates
+    if updates.settle(cfg):  # the code an update installed: as private as the code it replaced
+        out["update_settled"] = True
     if updates.due(cfg):
         found = updates.check(cfg)
         if found.get("available"):
