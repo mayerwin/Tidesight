@@ -16,6 +16,8 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional
 
+from .storage import connect, migrate
+
 SESSION_DAYS = 30
 MIGRATIONS = [
     (1, [
@@ -80,18 +82,13 @@ class WebDB:
         self.path = os.path.join(data_dir, "web.db")
 
     def _conn(self) -> sqlite3.Connection:
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        conn = connect(self.path, journal_mode="wal", busy_timeout_ms=5000)  # makes the folder, switches to WAL once
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        version = conn.execute("PRAGMA user_version").fetchone()[0]
-        for number, statements in MIGRATIONS:
-            if number > version:
-                conn.execute("BEGIN IMMEDIATE")
-                for sql in statements:
-                    conn.execute(sql)
-                conn.execute("PRAGMA user_version = %d" % number)
-                conn.execute("COMMIT")
+        try:
+            migrate(conn, MIGRATIONS)  # checks the version again under the write lock: processes may race here
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     # -- login sessions ----------------------------------------------------------

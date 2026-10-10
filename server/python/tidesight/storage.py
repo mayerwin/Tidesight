@@ -21,6 +21,7 @@ import base64
 import json
 import logging
 import os
+import random
 import re
 import socket
 import sqlite3
@@ -163,11 +164,32 @@ def connect(path: str, journal_mode: str = "wal", synchronous: str = "normal",
         conn = sqlite3.connect(path, timeout=busy_timeout_ms / 1000.0, isolation_level=None)
     conn.execute("PRAGMA busy_timeout=%d" % int(busy_timeout_ms))
     if not readonly:
-        mode = conn.execute("PRAGMA journal_mode=%s" % ("WAL" if journal_mode == "wal" else "DELETE")).fetchone()[0]
-        if mode.lower() != journal_mode:
+        try:
+            mode = _journal_mode(conn, "wal" if journal_mode == "wal" else "delete")
+        except BaseException:
+            conn.close()
+            raise
+        if mode != journal_mode:
             log.warning("journal_mode %s requested for %s, got %s", journal_mode, path, mode)
         conn.execute("PRAGMA synchronous=%s" % ("FULL" if synchronous == "full" else "NORMAL"))
     return conn
+
+
+def _journal_mode(conn: sqlite3.Connection, wanted: str) -> str:
+    """Switch to `wanted` unless the database is in that mode already. When several processes switch a new
+    database at once, SQLite answers "database is locked" at once to all but one (it does not wait there, which
+    could deadlock): they try again."""
+    for attempt in range(100):
+        try:
+            mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            if mode != wanted:
+                mode = str(conn.execute("PRAGMA journal_mode=%s" % wanted.upper()).fetchone()[0]).lower()
+            return mode
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 99:
+                raise
+            time.sleep(0.01 + random.random() * 0.02)
+    return wanted  # not reached
 
 
 _ADD_COLUMN_RE = re.compile(r"^ALTER TABLE (\w+) ADD COLUMN (\w+)", re.IGNORECASE)

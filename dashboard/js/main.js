@@ -323,18 +323,11 @@ function welcome() {
 
 // ---- sign-in ----------------------------------------------------------------------------------------------------
 function showLogin(setup = false, message = '') {
+  if (setup) { showSetup(); return; }
   document.body.classList.add('signed-out');
   const root = document.getElementById('login');
   root.hidden = false;
   document.getElementById('shell').hidden = true;
-  if (setup) {
-    root.replaceChildren(el('div', { class: 'login-card' }, brand(),
-      el('h1', { text: 'Almost there' }),
-      el('p', { text: 'The dashboard is off until a user is added. On the server, in Tidesight\'s server/python folder, run:' }),
-      el('pre', { class: 'code', text: 'python3 -m tidesight.jobs user set admin' }),
-      el('p', { text: 'It asks for the password. Then reload this page.' })));
-    return;
-  }
   const user = el('input', { class: 'input', name: 'username', autocomplete: 'username', required: true, autofocus: true, 'aria-label': 'User name' });
   const pass = el('input', { class: 'input', name: 'password', type: 'password', autocomplete: 'current-password', required: true, 'aria-label': 'Password' });
   const show = el('button', { type: 'button', class: 'icon-btn eye', 'aria-label': 'Show the password' }, icon('eye'));
@@ -368,6 +361,66 @@ function showLogin(setup = false, message = '') {
   setTimeout(() => user.focus(), 0);
 }
 
+// The first account, while Tidesight has no user: the setup code, which Tidesight writes in a file on the server,
+// proves the installation is the visitor's own (bots that find a new site first cannot claim it).
+// `jobs.py setup-link` prints this page's address with the code after a #setup=, which never reaches the server.
+function takeSetupCode() {
+  const m = location.hash.match(/^#setup=([0-9A-Za-z-]{4,40})$/);
+  if (!m) return '';
+  history.replaceState(null, '', location.pathname + location.search); // out of the address bar and the history
+  return m[1];
+}
+
+function showSetup(code = '') {
+  document.body.classList.add('signed-out');
+  const root = document.getElementById('login');
+  root.hidden = false;
+  document.getElementById('shell').hidden = true;
+  const field = (label, input, help) => el('label', { class: 'field' }, el('span', { class: 'field-label', text: label }), input, help || null);
+  const codeInput = el('input', { class: 'input mono', name: 'setup-code', value: code, required: true, autocomplete: 'one-time-code',
+    spellcheck: 'false', autocapitalize: 'characters', placeholder: 'XXXX-XXXX-XXXX-XXXX', 'aria-label': 'Setup code', 'aria-describedby': 'setup-help' });
+  const user = el('input', { class: 'input', name: 'username', required: true, autocomplete: 'username', placeholder: 'admin', 'aria-label': 'User name', 'aria-describedby': 'user-help' });
+  const pass = el('input', { class: 'input', name: 'new-password', type: 'password', required: true, autocomplete: 'new-password', 'aria-label': 'Password', 'aria-describedby': 'pass-help' });
+  const again = el('input', { class: 'input', name: 'new-password-again', type: 'password', required: true, autocomplete: 'new-password', 'aria-label': 'Repeat the password' });
+  const show = el('button', { type: 'button', class: 'icon-btn eye', 'aria-label': 'Show the password' }, icon('eye'));
+  show.addEventListener('click', () => { const type = pass.type === 'password' ? 'text' : 'password'; pass.type = type; again.type = type; pass.focus(); });
+  const remember = el('input', { type: 'checkbox', id: 'remember', checked: true });
+  const err = el('div', { class: 'login-error', role: 'alert', hidden: true });
+  const submit = el('button', { type: 'submit', class: 'btn primary wide', text: 'Create the account' });
+  const fail = (message, input) => { err.textContent = message; err.hidden = false; if (input) input.focus(); };
+  const form = el('form', { class: 'login-form', novalidate: true },
+    field('Setup code', codeInput, el('span', { class: 'field-help', id: 'setup-help' },
+      'On the server: ', el('code', { text: 'cat ~/tidesight-data/setup-code.txt' }),
+      ' (the file setup-code.txt of Tidesight\'s data directory). It stops working once the account exists.')),
+    field('User name', user, el('span', { class: 'field-help', id: 'user-help', text: 'Letters, digits and . _ @ + -' })),
+    field('Password', el('span', { class: 'pw-wrap' }, pass, show), el('span', { class: 'field-help', id: 'pass-help', text: 'At least 8 characters.' })),
+    field('Repeat the password', again),
+    el('label', { class: 'check-row', for: 'remember' }, remember, el('span', { text: 'Keep me signed in on this device' })),
+    err, submit);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    err.hidden = true;
+    if (!codeInput.value.trim()) return fail('Enter the setup code.', codeInput);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$/.test(user.value)) return fail('Choose a user name: letters, digits and . _ @ + - (starting with a letter or digit).', user);
+    if (pass.value.length < 8) return fail('Use a password of at least 8 characters.', pass);
+    if (again.value !== pass.value) return fail('The two passwords differ.', again);
+    submit.disabled = true;
+    submit.textContent = 'Creating the account…';
+    try {
+      await send('POST', 'setup', { code: codeInput.value, user: user.value, password: pass.value, remember: remember.checked });
+      location.reload(); // signed in: the page comes back with the signed-in Content Security Policy
+    } catch (ex) {
+      if (ex.status === 409) { showLogin(false, 'Tidesight already has an account: sign in.'); return; }
+      fail(ex.message, ex.status === 401 ? codeInput : null);
+      submit.disabled = false;
+      submit.textContent = 'Create the account';
+    }
+  });
+  root.replaceChildren(el('div', { class: 'login-card' }, brand(), el('h1', { text: 'Welcome' }),
+    el('p', { class: 'login-sub', text: 'Create the first account of this Tidesight.' }), form));
+  setTimeout(() => (code ? user : codeInput).focus(), 0);
+}
+
 function brand() {
   const mark = document.querySelector('.brand-mark');
   return el('div', { class: 'login-brand' }, mark ? mark.cloneNode(true) : null, el('span', { class: 'brand-name', text: 'Tidesight' }));
@@ -387,14 +440,16 @@ async function boot() {
   document.getElementById('theme').addEventListener('click', toggleTheme);
   events.addEventListener('signedout', () => { if (!PUBLIC) showLogin(false, 'Your session ended: sign in again.'); });
   if (!PUBLIC) {
+    const setupCode = takeSetupCode();
     try {
       state.me = await api('me');
     } catch (err) {
       if (err.status === 401) { showLogin(); return; }
-      if (err.status === 403 && err.body && err.body.setup) { showLogin(true); return; }
+      if (err.status === 403 && err.body && err.body.setup) { showSetup(setupCode); return; }
       document.getElementById('view').replaceChildren(el('div', { class: 'error-box' }, el('strong', { text: 'The dashboard API is not reachable. ' }), el('span', { text: err.message })));
       return;
     }
+    if (state.me && state.me.setup) { showSetup(setupCode); return; }
   }
   try {
     await refreshSites();

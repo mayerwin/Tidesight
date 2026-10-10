@@ -13,6 +13,7 @@
     python -m tidesight.jobs --config … vacuum
     python -m tidesight.jobs --config … status
     python -m tidesight.jobs --config … user set NAME | user remove NAME | user list
+    python -m tidesight.jobs --config … setup-link        # the dashboard's first-account form, code filled in
     python -m tidesight.jobs hash-password
 
 Run with server/python on PYTHONPATH (or from that directory).
@@ -87,6 +88,8 @@ def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         out["purged"] = purged
     if cfg.server["resolved_config_file"]:
         out["resolved_config"] = write_resolved(cfg, cfg.server["resolved_config_file"], only_if_changed=True)
+    if cfg.dashboard["users"]:  # a setup code made by a process that had not seen the first user yet
+        users_mod.remove_setup_code(cfg.data_dir)
     return out
 
 
@@ -146,7 +149,11 @@ def cmd_vacuum(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
 
 def cmd_status(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     out: Dict[str, Any] = {"version": __version__, "data_dir": cfg.data_dir, "storage_mode": cfg.server["storage_mode"],
-                           "sites": sorted(cfg.sites), "warnings": cfg.warnings, "files": {}}
+                           "sites": sorted(cfg.sites), "dashboard_users": len(cfg.dashboard["users"]),
+                           "warnings": cfg.warnings, "files": {}}
+    if not cfg.dashboard["users"]:
+        out["next_step"] = ("no dashboard user yet: open the dashboard and enter the setup code of %s (or run "
+                            "jobs.py setup-link, or jobs.py user set NAME)" % users_mod.setup_path(cfg.data_dir))
     for name in ("events.db", "replay.db", "derived.db"):
         path = os.path.join(cfg.data_dir, name)
         if os.path.exists(path):
@@ -256,12 +263,28 @@ def _user(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         return existed
 
     changed = users_mod.update(cfg.data_dir, put)
+    users_mod.remove_setup_code(cfg.data_dir)  # a user exists: the dashboard's first-account form is closed
     url = (cfg.server.get("public_url") or "").rstrip("/")
     out: Dict[str, Any] = {"user": name, "password": "changed (their sessions ended)" if changed else "set",
                            "sign_in": (url or "") + "/dashboard/"}
     if admins and name not in admins:
         out["note"] = "not in [dashboard] admins: may read every report, not change properties"
     return out
+
+
+def cmd_setup_link(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
+    """The address that opens the dashboard's first-account form with the setup code filled in."""
+    if cfg.dashboard["users"]:
+        raise SystemExit("Tidesight already has users (jobs.py user list): `user set NAME` adds one or changes a "
+                         "password.")
+    code = users_mod.setup_code(cfg.data_dir)
+    if not code:
+        raise SystemExit("The setup code could not be written in %s." % cfg.data_dir)
+    url = (cfg.server.get("public_url") or "").rstrip("/") or "https://<Tidesight's address>"
+    # The code travels after the #: browsers never send that part to the server, so no log keeps it.
+    print("Open this address to create the first user (the code also is in %s):" % users_mod.setup_path(cfg.data_dir))
+    print("  %s/dashboard/#setup=%s" % (url, code))
+    return {}
 
 
 def cmd_hash_password(cfg: Optional[Config], args: argparse.Namespace) -> Dict[str, Any]:
@@ -361,6 +384,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", nargs="?", default=None)
     p.add_argument("--password-stdin", action="store_true", help="read the password from standard input")
     p.set_defaults(func=cmd_user)
+
+    p = sub.add_parser("setup-link", help="the address of the dashboard's first-account form, setup code included")
+    p.set_defaults(func=cmd_setup_link)
 
     p = sub.add_parser("hash-password", help="hash a dashboard password for the config")
     p.add_argument("--user", default="admin")

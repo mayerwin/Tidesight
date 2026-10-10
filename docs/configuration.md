@@ -91,7 +91,7 @@ Days to keep, applied by `jobs.py privacy-clean --retention --apply`; `0` keeps 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `users` | `{}` | `{name = "pbkdf2_sha256$…"}`: who may sign in (the dashboard's form, or HTTP Basic for scripts), besides the users of `data_dir/users.json`. The dashboard is off until at least one user exists. The easy way: `python -m tidesight.jobs user set NAME` asks for a password and keeps its hash in `users.json` (`user remove NAME`, `user list`); a user defined here wins over `users.json` and is changed here (hash a password with `jobs.py hash-password --user NAME`). Changing a user's password ends their sessions. |
+| `users` | `{}` | `{name = "pbkdf2_sha256$…"}`: who may sign in (the dashboard's form, or HTTP Basic for scripts), besides the users of `data_dir/users.json`. Until a user exists, the dashboard offers to create the first one, with the one-time setup code Tidesight writes in `data_dir/setup-code.txt` (only someone who can read the server's files has it; `jobs.py setup-link` prints the dashboard's address with the code). Afterwards, `python -m tidesight.jobs user set NAME` asks for a password and keeps its hash in `users.json` (`user remove NAME`, `user list`); a user defined here wins over `users.json` and is changed here (hash a password with `jobs.py hash-password --user NAME`). Changing a user's password ends their sessions. |
 | `admins` | `[]` | Users who may add, change and delete properties in the dashboard. Empty: every user. Others can still read every report, save segments and add annotations. |
 | `session_days` | `30` | How long "Keep me signed in" lasts (a session without it lasts 12 hours). |
 | `realtime_minutes` | `30` | Window of the realtime view. |

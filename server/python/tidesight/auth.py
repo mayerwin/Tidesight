@@ -204,6 +204,10 @@ class Authenticator:
         """(user or None, "ok" | "denied" | "throttled") for a user name and password."""
         if not isinstance(user, str) or not isinstance(password, str) or len(user) > 200 or len(password) > 1024:
             return None, "denied"
+        try:  # a lone surrogate is not text: no password has one
+            user.encode("utf-8"), password.encode("utf-8")
+        except UnicodeEncodeError:
+            return None, "denied"
         encoded = self.users.get(user)
         token = hashlib.sha256(("%s\0%s\0%s" % (user, password, encoded or "")).encode("utf-8")).hexdigest()
         if self._cached(user, token, encoded):

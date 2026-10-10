@@ -395,8 +395,9 @@ def test_tidesight_app_answers_and_stores_hits(fastcgi, world):
         assert conn.execute("SELECT body_encoding FROM raw_requests").fetchone()[0] == "gzip"
     finally:
         conn.close()
-    page = s.request("GET", "/dashboard/")  # no user yet: the page says how to add one
-    assert page.code == 403 and b"user set NAME" in page.body
+    page = s.request("GET", "/dashboard/")  # no user yet: the page offers to create the first one
+    assert page.code == 200 and page.headers["content-type"].startswith("text/html")
+    assert s.request("GET", "/dashboard/api/me").json() == {"user": None, "setup": True}
 
 
 def _entry_env(world: Any, **extra: str) -> Dict[str, str]:

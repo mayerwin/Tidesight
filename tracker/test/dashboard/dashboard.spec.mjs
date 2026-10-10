@@ -1,10 +1,14 @@
 // The dashboard in a browser, on demo data: periods and comparisons, filters and segments, report tables and
-// exports, goals, properties, the command palette, signing in, and the public page. No test may leave an error
-// in the page.
+// exports, goals, properties, the command palette, signing in, the first account, and the public page. No test may
+// leave an error in the page.
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { expect, test as base } from '@playwright/test';
 
 const OPEN = 'http://127.0.0.1:8795/dashboard/';
 const AUTH = 'http://127.0.0.1:8796/dashboard/';
+const FRESH = 'http://127.0.0.1:8797/dashboard/'; // no user yet (test/dashboard/serve.py)
+const SETUP_CODE = fileURLToPath(new URL('./.data/setup/data/setup-code.txt', import.meta.url));
 
 const test = base.extend({
   errors: [async ({ page }, use) => {
@@ -252,6 +256,38 @@ test('signing in and out; viewers cannot change properties', async ({ page }) =>
   await expect(page.locator('#nav a', { hasText: 'Overview' })).toBeVisible();
   await page.goto(AUTH + '#/properties');
   await expect(page.getByRole('button', { name: 'Add property' })).toBeDisabled();
+});
+
+test('the first account needs the setup code written on the server', async ({ page }) => {
+  await page.goto(FRESH);
+  await expect(page.getByRole('heading', { name: 'Welcome' })).toBeVisible();
+  const fill = async (code, password, again) => {
+    if (code !== null) await page.getByLabel('Setup code').fill(code);
+    await page.getByLabel('User name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill(password);
+    await page.getByLabel('Repeat the password').fill(again);
+    await page.getByRole('button', { name: 'Create the account' }).click();
+  };
+  await fill('0000-0000-0000-0000', 'a long password', 'a long password');
+  await expect(page.locator('.login-error')).toContainText('Wrong setup code');
+  // The address `jobs.py setup-link` prints fills the code in, and leaves no trace of it in the address bar.
+  const code = readFileSync(SETUP_CODE, 'utf8').trim();
+  await page.goto('about:blank');
+  await page.goto(FRESH + '#setup=' + code);
+  await expect(page.getByLabel('Setup code')).toHaveValue(code);
+  expect(new URL(page.url()).hash).toBe('');
+  await fill(null, 'a long password', 'another password');
+  await expect(page.locator('.login-error')).toContainText('differ');
+  await fill(null, 'a long password', 'a long password');
+  await expect(page.locator('.user-btn')).toBeVisible(); // signed in
+  expect(existsSync(SETUP_CODE)).toBe(false); // the code is gone with its use
+  await page.locator('.user-btn').click();
+  await page.getByRole('menuitem', { name: 'Sign out' }).click();
+  await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible(); // from now on, an ordinary sign-in
+  await page.fill('input[name=username]', 'owner');
+  await page.fill('input[name=password]', 'a long password');
+  await page.click('button[type=submit]');
+  await expect(page.locator('.user-btn')).toBeVisible();
 });
 
 test('the public page shows its metrics and nothing else', async ({ page }) => {

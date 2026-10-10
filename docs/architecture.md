@@ -64,7 +64,8 @@ dashboard (static) ──► wsgi.py: sign-in (session cookie, or HTTP Basic for
 | `derived.db` | jobs | Everything computed: lookups, sessions, pageviews, visitors, rollups, job state. Can be deleted and rebuilt. |
 | `web.db` | dashboard | Sign-in sessions (token hashes), the sign-in throttle, saved segments, annotations, and the properties whose data `jobs.py cron` is to delete. Deleting it signs everyone out and forgets segments and notes. |
 | `properties.json` | dashboard | The properties added in the dashboard, as `[sites.<id>]` tables (written atomically, under a lock). |
-| `users.json` | `jobs.py user` | Dashboard users and their password hashes, merged with the configuration file's `[dashboard] users` (written atomically, under a lock). |
+| `users.json` | `jobs.py user`, the first-account form | Dashboard users and their password hashes, merged with the configuration file's `[dashboard] users` (written atomically, under a lock). |
+| `setup-code.txt` | dashboard | While there is no user: the one-time code that lets the first account be created in the dashboard (mode 600, deleted once a user exists). |
 
 The schema and its migrations are documented in `docs/schema.md`.
 

@@ -52,7 +52,7 @@ server/python/
   tidesight/admin.py, properties.py       # properties, segments, annotations (properties.json is stdlib-only: config loads it)
   tidesight/jobs.py, maintenance.py    # cron CLI: enrich, rollup, backup, privacy-clean, archive, export…
   tidesight/fcgi.py               # standard-library FastCGI server (mod_fcgid), CGI fallback, code-change restart
-  tidesight/users.py              # dashboard users in data_dir/users.json (jobs.py user set/remove/list)
+  tidesight/users.py              # dashboard users in data_dir/users.json (jobs.py user …), the first account's setup code
   tidesight.fcgi, collect.cgi, passenger_wsgi.py   # hosting entry points (copy into the web directory)
   devserver.py                    # local server (--no-auth, --test-api, --static)
   tests/                          # pytest, incl. test_conformance.py for every connector
@@ -73,7 +73,7 @@ Python 3.9+ (on this Windows machine: `py -3.10`); Node 18+ for the tracker buil
 | Install tracker tooling | `cd tracker && npm install && npx playwright install chromium` |
 | Build the tracker | `cd tracker && npm run build` |
 | Tracker tests | `cd tracker && npm test` (builds first; starts the dev server on ports 8787/8788) |
-| Dashboard tests | `cd tracker && npm run test:dashboard` (demo data; servers on 8795 open, 8796 with sign-in) |
+| Dashboard tests | `cd tracker && npm run test:dashboard` (demo data; servers on 8795 open, 8796 with sign-in, 8797 without any user) |
 | Demo data + dashboard | `python tools/demo.py --out demo-data` then `python server/python/devserver.py --config demo-data/tidesight.toml --no-auth --port 8790` → `/dashboard/` |
 | Refresh dashboard vendor files | `cd dashboard && npm install && npm run vendor` |
 | Jobs (cron) | `cd server/python && python -m tidesight.jobs --config <file> cron` (also `enrich`, `status`, `backup`, …) |

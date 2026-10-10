@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .api import Api, ApiError
 from .auth import Authenticator, SharedThrottle, Throttle, password_tag
-from .collect import ERRORS, Collector
+from .collect import ERRORS, Collector, web_root_exposure
 from .config import Config, ConfigHolder
 
 log = logging.getLogger("tidesight.web")
@@ -55,9 +55,6 @@ DASHBOARD_DIRS = {"js", "vendor"}
 # Files other than pages run nothing: an SVG opened on its own cannot run a script.
 ASSET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; sandbox"
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
-NO_USERS_TEXT = (b"The dashboard is off until a user is added. On the server, in Tidesight's server/python folder, run:\n\n"
-                 b"    python3 -m tidesight.jobs user set NAME\n\n"
-                 b"It asks for the password. Then reload this page.\n")
 
 
 def _respond(start_response: StartResponse, status: str, headers: List[Tuple[str, str]], body: bytes = b"",
@@ -171,7 +168,17 @@ class App:
 
     def __call__(self, environ: Dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         path = environ.get("PATH_INFO") or "/"
-        if path == "/dashboard" or path.startswith("/dashboard/"):
+        dashboard = path == "/dashboard" or path.startswith("/dashboard/")
+        if dashboard or path.startswith("/share/"):
+            # As the collector does: never run with the data (sessions, users, the setup code) where the web server
+            # would hand them out.
+            exposed = web_root_exposure(self.holder.get(), environ.get("DOCUMENT_ROOT"))
+            if exposed:
+                ERRORS.error("refusing to run: %s is inside the web root %s, where its files could be downloaded "
+                             "(move it, or set [server] allow_data_in_web_root)", exposed, environ.get("DOCUMENT_ROOT"))
+                return _respond(start_response, "503 Service Unavailable", [("Content-Type", "text/plain")],
+                                b"configuration error\n")
+        if dashboard:
             return self.dashboard(environ, start_response, path)
         if path.startswith("/share/"):
             return self.share(environ, start_response, path)
@@ -233,7 +240,6 @@ class App:
 
     def login(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         from .admin import read_body
-        from .webdb import WebDB
         if environ.get("REQUEST_METHOD", "GET").upper() != "POST":
             return _json(start_response, "405 Method Not Allowed", {"error": "POST a user name and password"})
         if self.require_auth and not cfg.dashboard["users"]:
@@ -252,12 +258,85 @@ class App:
                          [("Retry-After", "60")])
         if not user:
             return _json(start_response, "401 Unauthorized", {"error": "Wrong user name or password."})
-        remember = body.get("remember") is True
+        return self._signed_in(cfg, environ, start_response, user, body.get("remember") is True)
+
+    def _signed_in(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse, user: str,
+                   remember: bool) -> Iterable[bytes]:
+        """Open a session for `user` and answer with its cookie."""
+        from .webdb import WebDB
         days = max(1, int(cfg.dashboard.get("session_days") or 30)) if remember else 0.5
         token = WebDB(cfg.data_dir).create_session(user, password_tag(cfg.dashboard["users"][user]), days)
         cookie = self._cookie_header(environ, token, int(days * 86400) if remember else None)
         return _json(start_response, "200 OK", {"user": user, "admin": self.is_admin(cfg, user)},
                      [("Set-Cookie", cookie)])
+
+    def _fresh_users(self, cfg: Config) -> Config:
+        """The configuration, reloaded at once when it has no user but users.json exists: another process may have
+        created the first user a moment ago (each one looks at the files only every few seconds)."""
+        from . import users
+        if self.require_auth and not cfg.dashboard["users"] and users.mtime(cfg.data_dir) is not None:
+            return self.holder.reload()
+        return cfg
+
+    def setup(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
+        """The first user, created in the dashboard: only with the setup code of data_dir/setup-code.txt (only
+        someone who can read the server's files has it), and only while there is no user at all."""
+        from . import users
+        from .admin import read_body
+        from .auth import hash_password
+        if environ.get("REQUEST_METHOD", "GET").upper() != "POST":
+            return _json(start_response, "405 Method Not Allowed", {"error": "POST a setup code, user name and password"})
+        if not self.require_auth or cfg.dashboard["users"]:
+            return _json(start_response, "409 Conflict", {"error": "Tidesight already has users: sign in."})
+        try:
+            body = read_body(environ)
+        except ApiError as exc:
+            return _json(start_response, _status(exc.status), {"error": exc.message})
+        if not isinstance(body, dict):
+            return _json(start_response, "400 Bad Request", {"error": "send {code, user, password}"})
+        client = self._client(cfg, environ)
+        throttle = self.shared_throttle(cfg)
+        if not throttle.reserve(client):  # counted before the check, like a password
+            return _json(start_response, "429 Too Many Requests",
+                         {"error": "Too many attempts from your network. Try again in a few minutes."},
+                         [("Retry-After", "60")])
+        if not users.setup_code_matches(cfg.data_dir, body.get("code")):
+            return _json(start_response, "401 Unauthorized",
+                         {"error": "Wrong setup code: copy it again from setup-code.txt on the server."})
+        throttle.forgive(client)
+        name, password = body.get("user"), body.get("password")
+        if not isinstance(name, str) or not users.NAME_RE.match(name):
+            return _json(start_response, "400 Bad Request", {"error": "A user name has 1 to 64 letters, digits and "
+                                                             ". _ @ + - (and starts with a letter or digit)."})
+        if not isinstance(password, str) or not users.MIN_PASSWORD <= len(password) <= 1024:
+            return _json(start_response, "400 Bad Request",
+                         {"error": "Use a password of at least %d characters." % users.MIN_PASSWORD})
+        cfg = self.holder.reload()  # the users of every file as they are now, not as this process last saw them
+        if cfg.dashboard["users"]:
+            return _json(start_response, "409 Conflict", {"error": "Tidesight already has users: sign in."})
+        encoded = hash_password(password)
+
+        def first(table: Dict[str, str]) -> bool:
+            if table:  # another request created a user meanwhile
+                return False
+            table[name] = encoded
+            return True
+
+        try:
+            created = users.update(cfg.data_dir, first)
+        except (users.UsersError, TimeoutError, OSError) as exc:
+            log.error("could not save the first user: %s", exc)
+            return _json(start_response, "503 Service Unavailable", {"error": "The user could not be saved: try again."})
+        if not created:
+            return _json(start_response, "409 Conflict", {"error": "Tidesight already has users: sign in."})
+        users.remove_setup_code(cfg.data_dir)
+        cfg = self.holder.reload()
+        if cfg.dashboard["users"].get(name) != encoded:
+            # Not the account just made (the configuration file defines that name too, and wins), or users.json
+            # could not be read back: no session for it.
+            return _json(start_response, "409 Conflict", {"error": "The user was saved, but cannot sign in this way: "
+                                                         "sign in, or choose another name with jobs.py user set."})
+        return self._signed_in(cfg, environ, start_response, name, body.get("remember") is not False)
 
     def logout(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         from .webdb import WebDB
@@ -311,10 +390,8 @@ class App:
             return _respond(start_response, "301 Moved Permanently", [("Location", "dashboard/")])
         if path.startswith("/dashboard/api/"):
             return self.dashboard_api(cfg, environ, start_response, path[len("/dashboard/api/"):])
-        if self.require_auth and not cfg.dashboard["users"]:
-            return _respond(start_response, "403 Forbidden", [("Content-Type", "text/plain; charset=utf-8")],
-                            NO_USERS_TEXT)
-        # The page and its scripts hold no data: they load signed out too (the sign-in form). Only a signed-in
+        # The page and its scripts hold no data: they load signed out too (the sign-in form, or the first account's
+        # form while there is no user). Only a signed-in
         # page gets the CSP that lists the sites' origins (replays and heatmaps load their assets).
         rel = path[len("/dashboard/"):]
         parts = [s for s in rel.split("/") if s]
@@ -334,6 +411,7 @@ class App:
         # sibling subdomain, which SameSite cookies do not keep out.
         if environ.get("HTTP_SEC_FETCH_SITE", "same-origin") not in ("same-origin", "none"):
             return _json(start_response, "403 Forbidden", {"error": "cross-site request"})
+        cfg = self._fresh_users(cfg)
         if method in WRITE_METHODS:
             problem = self._write_problem(cfg, environ)
             if problem:
@@ -344,9 +422,17 @@ class App:
             return self.login(cfg, environ, start_response)
         if endpoint == "logout":
             return self.logout(cfg, environ, start_response)
+        if endpoint == "setup":
+            return self.setup(cfg, environ, start_response)
         if self.require_auth and not cfg.dashboard["users"]:
-            return _json(start_response, "403 Forbidden", {"error": "The dashboard is off until a user is added: "
-                                                           "python3 -m tidesight.jobs user set NAME", "setup": True})
+            # No user yet: the page offers to create the first one, with the setup code written on the server.
+            from . import users
+            if users.setup_code(cfg.data_dir) is None:
+                log.error("could not write the setup code in %s", cfg.data_dir)
+            if endpoint == "me":
+                return _json(start_response, "200 OK", {"user": None, "setup": True})
+            return _json(start_response, "403 Forbidden", {"error": "Tidesight has no user yet: create the first one "
+                                                           "in the dashboard, with the setup code.", "setup": True})
         user, how, denied = self._authenticate(cfg, environ, start_response)
         if denied is not None:
             return denied

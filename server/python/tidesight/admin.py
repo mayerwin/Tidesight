@@ -81,9 +81,12 @@ def read_body(environ: Dict[str, Any]) -> Any:
     if ctype != "application/json":
         raise ApiError(415, "send JSON (Content-Type: application/json)")
     try:
-        return json.loads(raw.decode("utf-8"))
+        body = json.loads(raw.decode("utf-8"))
+        # A lone surrogate ("\ud800" is valid JSON) is not text: it could be neither stored nor hashed.
+        json.dumps(body, ensure_ascii=False).encode("utf-8")
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise ApiError(400, "the body is not valid JSON")
+    return body
 
 
 def _ro(cfg: Config, name: str) -> Optional[sqlite3.Connection]:

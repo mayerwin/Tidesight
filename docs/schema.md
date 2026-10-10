@@ -125,7 +125,7 @@ The dashboard's own state, apart from the analytics data (only the Python app re
 | `purges(site_id, requested_by, requested_at)` | *(migration 2)* Properties deleted with their data: `jobs.py cron` deletes everything stored under the id (raw and archived hits, recordings, derived rows, segments, notes), then the row. |
 | `calls(client, minute, n)` | *(migration 3)* Public share-page API calls per client (keyed hash) in the current minute, when each request is its own process (CGI); older minutes are deleted as they pass. |
 
-Properties added in the dashboard are not in a database: they are `data_dir/properties.json` (`{"format": "tidesight-properties/1", "sites": {id: table}}`), loaded with the configuration file. Dashboard users added with `jobs.py user set` are in `data_dir/users.json` (`{"format": "tidesight-users/1", "users": {name: password hash}}`), loaded the same way.
+Properties added in the dashboard are not in a database: they are `data_dir/properties.json` (`{"format": "tidesight-properties/1", "sites": {id: table}}`), loaded with the configuration file. Dashboard users added with `jobs.py user set` or the first-account form are in `data_dir/users.json` (`{"format": "tidesight-users/1", "users": {name: password hash}}`), loaded the same way; until the first one exists, `data_dir/setup-code.txt` holds the code that form asks for.
 
 ## Adding a migration
 

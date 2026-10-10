@@ -22,7 +22,7 @@ Layout used below (replace `USER` and the domain names):
 ```
 ~/tidesight/                      code (git clone), never served
 ~/tidesight/tidesight.toml        configuration (outside the web root)
-~/tidesight-data/                 databases, spool, backups, geo databases, users, log (outside the web root: the
+~/tidesight-data/                 databases, spool, backups, geo databases, users, setup code, log (outside the web root: the
                                   collector refuses to run when it finds them inside the web server's document root)
 ~/stats.example.com/              the subdomain's web directory
     tidesight.fcgi                copied from ~/tidesight/server/python/
@@ -76,10 +76,10 @@ rate_limit_proxies = ["cloudflare"]
 
 `log_file` matters under FastCGI: Dreamhost does not put a FastCGI program's own messages in the site's error log, so without it Tidesight's errors are nowhere to be seen. The secret used for hashing is generated in the data directory on first use (`[server] secret` overrides it).
 
-Add yourself as a dashboard user (it asks for the password twice and keeps only its hash, in `~/tidesight-data/users.json`):
+You create your account in the dashboard once it runs (step 4). Other users, and password changes, are made on the server (it asks for the password twice and keeps only its hash, in `~/tidesight-data/users.json`):
 
 ```sh
-cd ~/tidesight/server/python && python3 -m tidesight.jobs user set admin
+cd ~/tidesight/server/python && python3 -m tidesight.jobs user set NAME
 ```
 
 `user set` on an existing user changes the password (and ends that user's sessions), `user remove NAME` removes one and `user list` shows them all. Users can also be written in the configuration file (`[dashboard] users`, hashes from `jobs.py hash-password`): those win, and are changed there. With several users, `[dashboard] admins` names those who may change properties.
@@ -120,6 +120,14 @@ The tracker's addresses answer over HTTP too (pages served over HTTP can still b
 Dreamhost runs `.fcgi` files with FastCGI as they are. On another Apache host with mod_fcgid, add `AddHandler fcgid-script .fcgi` to the `.htaccess`, but only where mod_fcgid is installed: without it, Apache would send the file instead of running it. `CGIPassAuth On` lets HTTP Basic credentials reach the app, for scripts using the API (the dashboard signs in with a cookie).
 
 `tidesight.fcgi` finds the code in `~/tidesight/server/python` and the configuration in `~/tidesight/tidesight.toml`. Open `https://stats.example.com/health`: it must answer `{"status": "ok", …}`. The dashboard is at `https://stats.example.com/dashboard/`.
+
+**Your account.** The first time, the dashboard offers to create the first account: a user name, a password, and the setup code that Tidesight wrote on the server when the page first opened:
+
+```sh
+cat ~/tidesight-data/setup-code.txt
+```
+
+Or run `cd ~/tidesight/server/python && python3 -m tidesight.jobs setup-link`: it prints the dashboard's address with the code filled in. The code proves the installation is yours. A form that let the first visitor create the account would not: every new HTTPS certificate is published within minutes (Certificate Transparency), and bots try the setup pages of the sites they find before their owners do. The code (16 characters, 80 random bits) is readable by your account only, attempts are limited like passwords, and it is deleted once the account exists.
 
 Then check that the web application firewall lets compressed data through (step 1.5). `200` is right; `418` or `500` means the firewall is still on:
 
@@ -214,7 +222,7 @@ Where Passenger still runs Python apps, copy `server/python/passenger_wsgi.py` i
 - **`/health` fails:** read `~/tidesight-data/tidesight.log` (with `log_file` set) and the site's error log (`~/logs/stats.example.com/http/error.log`). `python3 -m tidesight.jobs status` checks the configuration.
 - **Tracker requests fail with `418` or `500` while `/health` works:** the Web Application Firewall is on for the subdomain (step 1.5); the error log then shows `ModSecurity: Access denied with code 418`.
 - **Nothing recorded:** open the site with the browser's network panel: `ts.js`, `config.js` and `collect` must answer 200/204. Check `origins` (hits from other origins are stored but flagged: see the dashboard's Status page).
-- **The dashboard says it is off:** no user exists yet: `python3 -m tidesight.jobs user set NAME` (step 3).
+- **The dashboard asks for a setup code:** no user exists yet; the code is in `~/tidesight-data/setup-code.txt` (step 4), or create a user with `python3 -m tidesight.jobs user set NAME`.
 - **Signing in fails:** check the name with `jobs.py user list`, and set a new password with `jobs.py user set NAME`. After 10 failures a client waits 10 minutes (`429`).
 - **A property says "No data":** its tracking code is missing, or the site runs on a domain the property does not list: its Tracking code tab shows the refused origins, with a button to allow each.
 - **`database is locked`:** the collector falls back to the spool automatically; if it happens often, use `journal_mode = "delete"` or `storage_mode = "spool"` per the Phase 0 test.
