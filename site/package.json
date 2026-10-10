@@ -1,0 +1,9 @@
+{
+  "name": "tidesight-site",
+  "private": true,
+  "description": "Tidesight's website and in-browser live demo (built by tools/build_site.py)",
+  "license": "MIT",
+  "devDependencies": {
+    "pyodide": "314.0.7"
+  }
+}

@@ -4,19 +4,21 @@ import * as fmt from '../fmt.js';
 
 const storeKey = (site) => 'ts_dash_funnel_' + site;
 
-function loadSteps(site) {
+// The steps last shown for this property, else its home page followed by its goals, in their order.
+function loadSteps(site, goals) {
   try {
     const v = JSON.parse(localStorage.getItem(storeKey(site)));
     if (Array.isArray(v) && v.length) return v;
   } catch (e) { /* none */ }
-  return [{ type: 'page', value: '/' }, { type: 'page', value: '/pricing*' }, { type: 'event', value: 'signup' }];
+  return [{ type: 'page', value: '/' }, ...(goals || []).filter((g) => g.type === 'page' || g.type === 'event').slice(0, 4)
+    .map((g) => ({ type: g.type, value: g.match }))];
 }
 
 export async function render(root, ctx) {
   const editor = card({ title: 'Steps', span: 12 });
   const result = card({ title: 'Conversion', span: 12, tableToggle: true });
   root.append(editor.root, result.root);
-  let steps = loadSteps(ctx.site);
+  let steps = loadSteps(ctx.site, ctx.goals);
 
   const drawEditor = () => {
     editor.body.replaceChildren();

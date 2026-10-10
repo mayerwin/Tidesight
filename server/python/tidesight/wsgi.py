@@ -201,7 +201,7 @@ class App:
     # -- signing in ---------------------------------------------------------------
 
     def is_admin(self, cfg: Config, user: str) -> bool:
-        return not self.require_auth or cfg.role(user) == "admin"
+        return not self.require_auth or cfg.dashboard["demo"] or cfg.role(user) == "admin"
 
     def session_user(self, cfg: Config, environ: Dict[str, Any]) -> Optional[str]:
         """The user of a valid session cookie (a session ends when its user's password changes)."""
@@ -501,7 +501,7 @@ class App:
 
     def dashboard(self, environ: Dict[str, Any], start_response: StartResponse, path: str) -> Iterable[bytes]:
         cfg = self.holder.get()
-        if not self.require_auth:  # --no-auth (dev server): only for this computer, not for a rebinding DNS name
+        if not self.require_auth and not cfg.dashboard["demo"]:  # --no-auth (dev server): only for this computer, not for a rebinding DNS name
             host = (environ.get("HTTP_HOST") or environ.get("SERVER_NAME") or "").lower()
             name = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]", 1)[0] + "]"
             if name not in LOCAL_HOSTS:
@@ -522,7 +522,7 @@ class App:
             return _respond(start_response, "404 Not Found", [("Content-Type", "text/plain")], b"not found\n")
         signed_out = False
         if os.path.splitext(rel)[1].lower() in ("", ".html"):
-            signed_out = self.require_auth and self.session_user(cfg, environ) is None
+            signed_out = self.require_auth and not cfg.dashboard["demo"] and self.session_user(cfg, environ) is None
         return self.static(cfg, environ, start_response, rel, share=signed_out)
 
     def dashboard_api(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse,
@@ -533,6 +533,8 @@ class App:
         if environ.get("HTTP_SEC_FETCH_SITE", "same-origin") not in ("same-origin", "none"):
             return _json(start_response, "403 Forbidden", {"error": "cross-site request"})
         cfg = self.holder.fresh_users()  # roles, passwords and people as they are now, in every process
+        if cfg.dashboard["demo"]:
+            return self.demo_api(cfg, environ, start_response, method, endpoint)
         if method in WRITE_METHODS:
             problem = self._write_problem(cfg, environ)
             if problem:
@@ -574,6 +576,28 @@ class App:
             return self.change_password(cfg, environ, start_response, user)
         if endpoint in ADMIN_READS or method in WRITE_METHODS:
             return self.admin(cfg, environ, start_response, method, endpoint, params, user)
+        if endpoint == "export":
+            return self.export(cfg, start_response, params)
+        return self.api(cfg, environ, start_response, endpoint, None, params=params)
+
+    def demo_api(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse, method: str,
+                 endpoint: str) -> Iterable[bytes]:
+        """[dashboard] demo: every page can be seen without signing in, as an admin sees it, and nothing can be
+        changed (no sign-in, no password, no property, no person, no update)."""
+        if method in WRITE_METHODS:
+            return _json(start_response, "403 Forbidden", {"error": "This is a read-only demo: nothing can be changed "
+                                                           "here.", "demo": True})
+        if method not in ("GET", "HEAD"):
+            return _json(start_response, "405 Method Not Allowed", {"error": "unsupported method"})
+        params = {k: v[0] for k, v in parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True).items()}
+        if endpoint == "me":
+            return _json(start_response, "200 OK", {
+                "user": "demo", "admin": True, "auth": "none", "demo": True, "can_sign_out": False,
+                "can_change_password": False, "public_url": cfg.server["public_url"] or None})
+        if endpoint == "update":  # a demo is never offered an update
+            return _json(start_response, "404 Not Found", {"error": "unknown endpoint"})
+        if endpoint in ADMIN_READS:
+            return self.admin(cfg, environ, start_response, method, endpoint, params, "demo")
         if endpoint == "export":
             return self.export(cfg, start_response, params)
         return self.api(cfg, environ, start_response, endpoint, None, params=params)

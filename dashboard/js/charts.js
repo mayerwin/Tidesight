@@ -10,10 +10,12 @@ export const SERIES = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '
 export const SEQ = ['--seq-100', '--seq-200', '--seq-300', '--seq-400', '--seq-500', '--seq-600', '--seq-700'];
 
 // ---- scales -------------------------------------------------------------------------
-export function niceTicks(max, count = 4) {
+// Counts (integer: true) get whole steps: a chart of 0 to 3 visits is not labelled 0, 0.75, 1.5…
+export function niceTicks(max, count = 4, integer = false) {
   if (!(max > 0)) return [0, 1];
   const raw = max / count, mag = Math.pow(10, Math.floor(Math.log10(raw)));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((st) => st >= raw) || raw;
+  let step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((st) => st >= raw) || raw;
+  if (integer) step = step < 1 ? 1 : step === 2.5 ? 2 : Math.ceil(step);
   const ticks = [];
   for (let v = 0; v <= max + step * 0.001; v += step) ticks.push(Math.round(v * 1e6) / 1e6);
   if (ticks[ticks.length - 1] < max) ticks.push(ticks[ticks.length - 1] + step);
@@ -44,8 +46,8 @@ export function lineChart(container, { labels, series, format = fmt.num, height 
     container.replaceChildren();
     const m = { l: 48, r: 14, t: 12, b: annotations.length ? 40 : 26 };
     const W = width, H = height, iw = Math.max(10, W - m.l - m.r), ih = H - m.t - m.b;
-    const max = Math.max(1e-9, ...series.flatMap((sr) => sr.values.filter((v) => v !== null && v !== undefined)));
-    const ticks = niceTicks(max);
+    const all = series.flatMap((sr) => sr.values.filter((v) => v !== null && v !== undefined));
+    const ticks = niceTicks(Math.max(1e-9, ...all), 4, all.every(Number.isInteger));
     const top = ticks[ticks.length - 1] || 1;
     const n = labels.length;
     const x = (i) => m.l + (n <= 1 ? iw / 2 : (i * iw) / (n - 1));
@@ -175,7 +177,7 @@ export function columnChart(container, { labels, values, format = fmt.num, heigh
     container.replaceChildren();
     const m = { l: 40, r: 8, t: 8, b: 22 };
     const W = width, H = height, iw = W - m.l - m.r, ih = H - m.t - m.b;
-    const ticks = niceTicks(Math.max(1, ...values));
+    const ticks = niceTicks(Math.max(1, ...values), 4, values.every(Number.isInteger));
     const top = ticks[ticks.length - 1];
     const n = values.length, band = iw / Math.max(1, n), bw = Math.max(2, Math.min(24, band - 2));
     const y = (v) => m.t + ih - (v / top) * ih;
@@ -286,7 +288,7 @@ export function barList(container, rows, { valueLabel = 'Visitors', format = fmt
 // columns: [{key, label, num?: bool, format?: fn, render?: fn(row) -> Node|string, exportValue?: fn(row), sortable?}]
 // options: sortKey, sortDir, onRowClick, empty, exportName (adds search and export), pageSize
 export function table(container, columns, rows, { onRowClick, sortKey, sortDir = -1, empty = 'No data for this period', exportName,
-  pageSize = 100, searchable } = {}) {
+  pageSize = 100, searchable, compact = false } = {}) {
   container.replaceChildren();
   if (!rows.length) { container.appendChild(el('div', { class: 'empty', text: empty })); return; }
   let key = sortKey, dir = sortDir, filter = '', limit = pageSize;
@@ -295,7 +297,7 @@ export function table(container, columns, rows, { onRowClick, sortKey, sortDir =
     const v = c.render ? c.render(r) : c.format ? c.format(r[c.key], r) : r[c.key];
     return v instanceof Node ? v.textContent : v;
   };
-  const tbl = el('table', { class: 'data' });
+  const tbl = el('table', { class: compact ? 'data compact' : 'data' });
   const wrap = el('div', { class: 'table-wrap' }, tbl);
   const foot = el('div', { class: 'table-more' });
   if (exportName || searchable) {

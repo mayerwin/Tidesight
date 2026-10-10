@@ -409,11 +409,11 @@ svg { flex: none; }
 .segmented button[aria-checked="true"] { background: var(--surface-raised); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,0.12); font-weight: 600; }
 .segmented button:disabled { opacity: 0.35; cursor: default; }
 .segmented.small button { padding: 3px 9px; font-size: 12.5px; }
-.switch { appearance: none; width: 34px; height: 20px; border-radius: 10px; background: var(--axis); position: relative; cursor: pointer; flex: none; margin: 0; transition: background 0.15s; }
-.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3); transition: transform 0.15s; }
-.switch:checked { background: var(--s1); }
-.switch:checked::after { transform: translateX(14px); }
-.switch:disabled { opacity: 0.5; cursor: default; }
+input.switch { appearance: none; width: 34px; height: 20px; border-radius: 10px; background: var(--axis); position: relative; cursor: pointer; flex: none; margin: 0; transition: background 0.15s; }
+input.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3); transition: transform 0.15s; }
+input.switch:checked { background: var(--s1); }
+input.switch:checked::after { transform: translateX(14px); }
+input.switch:disabled { opacity: 0.5; cursor: default; }
 .switch-row, .check-row { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; }
 .check-row input { width: 16px; height: 16px; accent-color: var(--s1); margin: 0; }
 .check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 16px; }
@@ -552,6 +552,7 @@ svg { flex: none; }
 table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.data th { text-align: left; font-weight: 600; color: var(--ink-2); font-size: 11.5px; letter-spacing: 0.05em; text-transform: uppercase;
   padding: 8px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; cursor: default; position: sticky; top: 0; background: var(--surface); z-index: 1; }
+table.data th.num { text-align: right; }
 table.data th.sortable { cursor: pointer; user-select: none; }
 table.data th.sortable:hover { color: var(--ink); }
 table.data th .sort-icon { width: 12px; height: 12px; vertical-align: -2px; margin: 0 3px; color: var(--s1); }
@@ -562,6 +563,7 @@ table.data tbody tr:hover td { background: var(--hover); }
 table.data tbody tr.clickable { cursor: pointer; }
 table.data td.trunc { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 table.data td.empty { text-align: center; }
+table.data.compact th, table.data.compact td { padding: 6px 6px; }
 .table-tools, .rt-tools { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .table-tools .input.search, .rt-tools .input.search { width: 240px; height: 30px; }
 .table-more { text-align: center; }
@@ -709,7 +711,7 @@ details.advanced[open] summary { margin-bottom: 12px; }
 .copy-field code.wrap { word-break: break-all; }
 .feature-row { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--grid); }
 .feature-row:last-child { border-bottom: 0; }
-.feature-row .switch { margin-top: 2px; }
+.feature-row input.switch { margin-top: 2px; }
 .feature-text { display: flex; flex-direction: column; flex: 1; cursor: pointer; }
 .feature-text b { font-weight: 600; }
 .rate { display: inline-flex; align-items: center; gap: 6px; }
@@ -775,3 +777,11 @@ details.advanced[open] summary { margin-bottom: 12px; }
 .foot-credit .source-link:hover span { text-decoration: underline; }
 .gh-mark { width: 14px; height: 14px; margin-right: 5px; vertical-align: -3px; }
 .update-badge { display: inline-block; margin-left: 4px; padding: 1px 7px; border-radius: 10px; background: var(--s1); color: #fff; font-size: 11px; font-weight: 600; text-decoration: none; }
+.demo-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; padding: 8px 10px 8px 14px; border-radius: 12px;
+  background: color-mix(in srgb, var(--s1) 9%, var(--surface)); border: 1px solid color-mix(in srgb, var(--s1) 22%, var(--border)); font-size: 13px; color: var(--ink-2); }
+.demo-banner b { color: var(--ink); }
+.demo-banner .demo-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 22%, transparent); flex: none; }
+.demo-banner > span:nth-child(2) { flex: 1; min-width: 220px; }
+.demo-get { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 8px; background: var(--ink); color: var(--surface); font-weight: 600; text-decoration: none; }
+.demo-get .gh-mark { margin: 0; vertical-align: 0; }
+.demo-get:hover { opacity: .9; }

@@ -1,0 +1,59 @@
+# The website and its live demo (tools/build_site.py), published on GitHub Pages: after every change to what they
+# are made from, and every six hours, so that the demo's made-up visits always end today.
+name: Website
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - dashboard/**
+      - server/python/tidesight/**
+      - tools/demo.py
+      - tools/build_site.py
+      - docs/images/**
+      - .github/workflows/pages.yml
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Pyodide (pinned in site/package-lock.json)
+        run: npm ci
+        working-directory: site
+      - name: Build the website and the live demo
+        run: python tools/build_site.py --out _site
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

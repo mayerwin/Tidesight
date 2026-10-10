@@ -51,6 +51,6 @@ async function renderPlayer(root, ctx, key) {
   c.body.appendChild(wrap);
   const width = Math.max(320, Math.min(1100, wrap.clientWidth || 900));
   new Player({ target: wrap, props: { events: sanitizeEvents(rep.events), width, height: Math.round(width * 0.62), autoPlay: false, showController: true, skipInactive: true } });
-  c.body.appendChild(el('p', { class: 'note', text: fmt.num(rep.events.length) + ' recorded events in ' + rep.chunks + ' chunks. Password fields are never recorded; other inputs are masked unless configured otherwise.' }));
+  c.body.appendChild(el('p', { class: 'note', text: fmt.plural(rep.events.length, 'recorded event') + ' in ' + fmt.plural(rep.chunks, 'chunk') + '. Password fields are never recorded; other inputs are masked unless configured otherwise.' }));
   if (rep.truncated) c.body.appendChild(el('p', { class: 'note', text: 'This recording is larger than one view decodes: only its beginning is shown.' }));
 }

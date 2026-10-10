@@ -651,14 +651,16 @@ class Api:
             first = {r[0]: r[1] for r in conn.execute(
                 "SELECT s.visitor_key, MIN(s.day) FROM sessions s WHERE " + where + " GROUP BY s.visitor_key", args)}
             visits = conn.execute(
-                "SELECT DISTINCT s.visitor_key, s.day FROM sessions s WHERE s.site_id = ? AND s.day >= ? AND s.site_ok = 1 "
-                "AND s.is_bot = 0", (q.site_id, q.start)).fetchall()
+                "SELECT DISTINCT s.visitor_key, s.day FROM sessions s WHERE s.site_id = ? AND s.day >= ? AND s.day <= ? "
+                "AND s.site_ok = 1 AND s.is_bot = 0", (q.site_id, q.start, q.end)).fetchall()
         finally:
             conn.close()
         d_start = datetime.strptime(q.start, "%Y-%m-%d").date()
 
         def idx(day: str) -> int:
             return (datetime.strptime(day, "%Y-%m-%d").date() - d_start).days // size
+
+        last = idx(q.end)  # a cohort has no figure for the weeks (or days) after the end of the period
 
         cohorts: Dict[int, set] = defaultdict(set)
         for v, d in first.items():
@@ -676,7 +678,7 @@ class Api:
             size_c = len(cohorts[c])
             start_day = (d_start + timedelta(days=c * size)).isoformat()
             rows.append({"cohort": start_day, "visitors": size_c,
-                         "retention": [round(len(back.get((c, o), ())) / size_c, 4) for o in range(0, 12)]})
+                         "retention": [round(len(back.get((c, o), ())) / size_c, 4) for o in range(0, min(12, last - c + 1))]})
         return {"period": period, "cohorts": rows}
 
     def ep_geo(self, params: Dict[str, str], public: bool) -> Any:

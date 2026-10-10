@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import ssl
 import tarfile
 import time
@@ -262,6 +263,7 @@ def install(cfg: Any, version: str, code_dir: str = CODE_DIR, download: Optional
                 else:
                     shutil.copy2(src, dst)
                 notes.append("kept %s" % name)
+        os.chmod(fresh, stat.S_IMODE(os.stat(code_dir).st_mode))  # as private as the code it replaces (chmod 700)
         previous = code_dir + ".previous"
         if os.path.exists(previous):
             shutil.rmtree(previous)

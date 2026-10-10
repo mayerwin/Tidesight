@@ -1,0 +1,16 @@
+name: An idea
+description: Something Tidesight should record, show or do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you would like to do
+      description: The question you want answered or the task at hand, more than a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How it could work
+      description: Optional. Remember the constraints in AGENTS.md (shared hosting, raw data first, standard library for the collector).

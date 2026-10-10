@@ -114,9 +114,9 @@ export async function render(root, ctx) {
   const device = params.get('device') || 'desktop';
   const mode = params.get('mode') || 'clicks';
   const modes = [{ key: 'clicks', label: 'Clicks' }, { key: 'frustration', label: 'Rage & dead' }, { key: 'mouse', label: 'Mouse' }, { key: 'scroll', label: 'Scroll' }];
-  const c = card({ title: 'Heatmap', span: 9, tabs: modes, onTab: (k) => ctx.go('heatmaps', { mode: k }) });
+  const c = card({ title: 'Heatmap', span: 8, tabs: modes, onTab: (k) => ctx.go('heatmaps', { mode: k }) });
   c.head.querySelectorAll('.tabs button').forEach((b, i) => b.setAttribute('aria-selected', modes[i].key === mode ? 'true' : 'false'));
-  const side = card({ title: 'Most clicked elements', span: 3 });
+  const side = card({ title: 'Most clicked elements', span: 4 });
   root.append(c.root, side.root);
 
   const pageSel = el('select', { class: 'input', 'aria-label': 'Page' },
@@ -234,5 +234,5 @@ export async function render(root, ctx) {
     { key: 'clicks', label: 'Clicks', num: true, format: fmt.num },
     { key: 'rage', label: 'Rage', num: true, format: (v) => (v ? fmt.num(v) : '') },
     { key: 'dead', label: 'Dead', num: true, format: (v) => (v ? fmt.num(v) : '') },
-  ], data.selectors.slice(0, 40), { sortKey: 'clicks', empty: 'No clicks on this page yet.' });
+  ], data.selectors.slice(0, 40), { sortKey: 'clicks', empty: 'No clicks on this page yet.', compact: true });
 }

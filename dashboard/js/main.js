@@ -536,6 +536,15 @@ export async function refreshSites() {
   state.freshness = res.freshness || null;
 }
 
+// The read-only demo ([dashboard] demo) says what it is, above every page.
+function showDemoBanner() {
+  const get = state.repository ? el('a', { class: 'demo-get', href: state.repository, rel: 'noopener' }, githubMark(), el('span', { text: 'Get Tidesight' })) : null;
+  document.querySelector('.main').prepend(el('div', { class: 'demo-banner', role: 'note' },
+    el('span', { class: 'demo-dot', 'aria-hidden': 'true' }),
+    el('span', {}, el('b', { text: 'Live demo' }), ' · three made-up websites and their visitors. Look around freely: nothing can be changed here.'),
+    get));
+}
+
 // Admins see when a newer release exists (looked for once a day by jobs.py cron): a link to the Status page.
 function showUpdate() {
   if (PUBLIC || !(state.me && state.me.admin && state.me.auth !== 'none')) return;
@@ -570,6 +579,7 @@ async function boot() {
   try {
     await refreshSites();
     document.getElementById('version').textContent = state.version ? 'v' + state.version : '';
+    if (state.me && state.me.demo) showDemoBanner();
     showUpdate();
   } catch (err) {
     if (err.status === 401) return;

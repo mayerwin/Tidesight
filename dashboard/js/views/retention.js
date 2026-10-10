@@ -10,10 +10,12 @@ export async function render(root, ctx) {
   root.appendChild(c.root);
   const res = await ctx.api('retention', { period });
   const unit = period === 'day' ? 'Day' : 'Week';
+  // A recent cohort has fewer weeks behind it: its row stops where the period ends.
+  const cols = Math.max(1, ...res.cohorts.map((r) => r.retention.length));
   heatTable(c.body, {
-    colLabels: Array.from({ length: 12 }, (_, i) => unit + ' ' + i),
+    colLabels: Array.from({ length: cols }, (_, i) => unit + ' ' + i),
     rows: res.cohorts.map((r) => ({ label: fmt.day(r.cohort), pre: [{ label: 'Visitors', text: fmt.num(r.visitors) }],
-      cells: r.retention.map((v, i) => (i === 0 ? 1 : v)) })),
+      cells: Array.from({ length: cols }, (_, i) => (i >= r.retention.length ? null : i === 0 ? 1 : r.retention[i])) })),
     format: (v) => fmt.pct(v),
     max: 1,
   });

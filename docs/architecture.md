@@ -40,6 +40,10 @@ dashboard (static) ──► wsgi.py: sign-in (session cookie, or HTTP Basic for
 | Dashboard | `dashboard/` | Static front end (no build step) on the API: reports with rich tables, period comparisons, filters and segments, property management. |
 | Other connectors | `server/php/`, `server/node/`, `server/worker/` | Same wire protocol and schema, checked by the shared conformance suite. |
 
+## The website and the live demo
+
+`site/` is the website published on GitHub Pages (`.github/workflows/pages.yml`, after every change and every six hours), built by `tools/build_site.py`: the landing page, the screenshots of `docs/images` (made by `tools/screenshots.mjs` from `tools/demo.py`'s data), and the live demo. The live demo is the dashboard itself, with a small boot script (`site/demo/boot.js`) that answers its API calls from a web worker (`worker.js`) in which Pyodide, Python compiled to WebAssembly, runs Tidesight's own web app (`bridge.py`) on demo data made at build time with `[dashboard] demo = true`: read-only, nothing hosted, nothing sent anywhere. The data are slimmed for the download (older visits keep their pages, clicks and events but lose Web Vitals, scroll and raw context in their timelines; reports are unchanged), and while the page is open the bridge adds a visit now and then, so that the Realtime page has visitors arriving.
+
 ## Deployment topology
 
 - **Collector domain.** Prefer a subdomain per deployment (e.g. `stats.example.com`). The tracker is served from the same host, never from a third-party CDN.

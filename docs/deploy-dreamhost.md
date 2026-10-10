@@ -55,11 +55,13 @@ WordPress keeps its database in MySQL and its secrets in a PHP file that runs ra
 ```sh
 ssh USER@example.com
 cd ~/stats.example.com
-git clone https://github.com/<you>/tidesight.git app
+curl -L https://github.com/mayerwin/Tidesight/releases/latest/download/tidesight.tar.gz | tar xz   # unpacks app/
 python3 --version
 python3 app/tools/sqlite_host_test.py --data-dir ~/tidesight-hosttest && rm -rf ~/tidesight-hosttest
 chmod 700 app   # the code is for the app, not for the web server
 ```
+
+`app/` holds the latest release; the next ones are installed from the dashboard (step 9). A `git clone https://github.com/mayerwin/Tidesight.git app` works too, and is then updated with `git pull`.
 
 The test ends with `OVERALL` and a `RECOMMENDATION` line such as `storage_mode = "sqlite", journal_mode = "wal"`. Use that in the configuration. If it says `spool`, set `storage_mode = "spool"` (cron then loads the spool into SQLite). If `python3` is older than 3.9, install a newer Python with pyenv and use it below (step 5).
 

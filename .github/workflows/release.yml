@@ -1,0 +1,35 @@
+# A GitHub release for every version tag (vX.Y.Z), with tidesight.tar.gz: the code, unpacked as app/ (the first
+# install's download: releases/latest/download/tidesight.tar.gz). Installed copies see the release with their
+# daily check, and install it from the dashboard (server/python/tidesight/updates.py).
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The tag is the code's version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! grep -qx "__version__ = \"$version\"" server/python/tidesight/__init__.py; then
+            echo "::error::server/python/tidesight/__init__.py does not say __version__ = \"$version\""
+            exit 1
+          fi
+      - name: Archive
+        run: git archive --format=tar.gz --prefix=app/ -o tidesight.tar.gz "$GITHUB_REF_NAME"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" tidesight.tar.gz --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" tidesight.tar.gz --verify-tag --generate-notes --title "Tidesight ${GITHUB_REF_NAME#v}"
+          fi

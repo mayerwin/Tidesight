@@ -1,0 +1,29 @@
+name: Something does not work
+description: A bug in the tracker, the collector, the jobs or the dashboard
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: Steps to see it again, if you have them.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Tidesight version
+      description: Bottom left of the dashboard, or `python3 -m tidesight.jobs status`.
+      placeholder: "0.2.0"
+  - type: input
+    id: host
+    attributes:
+      label: Where it runs
+      description: Host and Python version; FastCGI, CGI, PHP, Node or Workers.
+      placeholder: "Dreamhost shared hosting, Python 3.12, FastCGI"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or messages
+      description: From `data/tidesight.log`, the browser's console or the dashboard's Status page. Remove anything private (IP addresses, tokens).
+      render: text

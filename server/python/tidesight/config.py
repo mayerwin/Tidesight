@@ -105,13 +105,16 @@ ENRICH_DEFAULTS: Dict[str, Any] = {
 
 DASHBOARD_DEFAULTS: Dict[str, Any] = {
     "users": {},
-    # Users who may add, change and delete properties in the dashboard; empty: every user.
+    # Users who are always admins, whatever their role on the Users page.
     "admins": [],
     "session_days": 30,                # how long "keep me signed in" lasts
     "realtime_minutes": 30,
     # Origins (besides the sites' own) that replays and heatmap backgrounds may load images, styles and fonts
     # from, e.g. a CDN: ["https://cdn.example.net"]. Anything else stays blocked by the dashboard's CSP.
     "asset_origins": [],
+    # A public, read-only demonstration (the data of tools/demo.py): anyone may open every page of the dashboard
+    # without signing in, and nothing can be changed. Never with real data.
+    "demo": False,
 }
 
 # Site-level settings (everything except features and per-feature options).

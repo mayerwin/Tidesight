@@ -32,7 +32,11 @@ AGENTS.md  README.md  LICENSE  pytest.ini
 config/tidesight.example.toml     # annotated example configuration
 docs/                             # see the table above
 tools/sqlite_host_test.py         # Phase 0 hosting test (single file, stdlib only, Python 3.6+)
-tools/demo.py                     # realistic demo data through the real collector and jobs
+tools/demo.py                     # demo data: three made-up properties through the real collector and jobs
+tools/screenshots.mjs             # docs/images from the demo data (Playwright)
+tools/build_site.py               # the website and its in-browser live demo (Pyodide) → _site/
+site/                             # the website (GitHub Pages); site/demo: the live demo's boot, worker and bridge
+.github/workflows/                # pages.yml (website, every 6 h), release.yml (a release for every vX.Y.Z tag)
 tracker/
   src/core.js                     # pageviews, events, identity, sessions, engagement, delivery, plugin API
   src/plugins/*.js                # fp, clicks, scroll, forms, perf, errors, ux, mouse, replay, adblock
@@ -76,8 +80,10 @@ Python 3.9+ (on this Windows machine: `py -3.10`); Node 18+ for the tracker buil
 | Install tracker tooling | `cd tracker && npm install && npx playwright install chromium` |
 | Build the tracker | `cd tracker && npm run build` |
 | Tracker tests | `cd tracker && npm test` (builds first; starts the dev server on ports 8787/8788) |
-| Dashboard tests | `cd tracker && npm run test:dashboard` (demo data; servers on 8795 open, 8796 with sign-in, 8797 without any user) |
+| Dashboard tests | `cd tracker && npm run test:dashboard` (demo data; servers on 8795 open, 8796 with sign-in, 8797 without any user, 8798 read-only demo) |
 | Demo data + dashboard | `python tools/demo.py --out demo-data` then `python server/python/devserver.py --config demo-data/tidesight.toml --no-auth --port 8790` → `/dashboard/` |
+| Screenshots (`docs/images`) | `python tools/demo.py --out demo-data --public-url https://stats.example.com/` then `node tools/screenshots.mjs --data demo-data` (Playwright from `tracker/`; `PYTHON` names the interpreter) |
+| Website and live demo | `cd site && npm ci && cd ..` then `python tools/build_site.py --out _site`; serve `_site/` (`.mjs` as JavaScript, `.wasm` as `application/wasm`) |
 | Refresh dashboard vendor files | `cd dashboard && npm install && npm run vendor` |
 | Jobs (cron) | `cd server/python && python -m tidesight.jobs --config <file> cron` (also `enrich`, `status`, `backup`, …) |
 | Phase 0 hosting test | `python tools/sqlite_host_test.py --help` |
@@ -134,9 +140,10 @@ These are non-negotiable. The reasoning is in `docs/design.md`.
 
 ## Releases
 
-Installations look for new versions in the repository's GitHub releases (`__repository__` in `server/python/tidesight/__init__.py`; the dashboard links to it too). To release: set `__version__` there (`X.Y.Z`), commit, tag `vX.Y.Z`, push the tag and publish a GitHub release for it. `updates.py` installs the tag's source archive and checks that it announces that version. The tracker's own `VERSION` (`tracker/src/core.js`) is separate: bump it with any change to the core, so plugins are fetched afresh.
+Installations look for new versions in the repository's GitHub releases (`__repository__` in `server/python/tidesight/__init__.py`; the dashboard links to it too). To release: set `__version__` there (`X.Y.Z`), commit, tag `vX.Y.Z` and push the tag: `.github/workflows/release.yml` checks that the tag is the code's version, creates the release with its notes and attaches `tidesight.tar.gz` (the code, unpacked as `app/`: the first install's download). `updates.py` installs the tag's source archive and checks that it announces that version. The live demo shows the dashboard of `main`; regenerate `docs/images` when the dashboard's look changes. The tracker's own `VERSION` (`tracker/src/core.js`) is separate: bump it with any change to the core, so plugins are fetched afresh.
 
 ## Workflow
 
 - Small, descriptive commits. Run the relevant tests before committing.
 - Do not commit real data, databases, GeoIP files or secrets (`.gitignore` covers the usual paths).
+- The dashboard runs in two hosts: the web app, and the website's live demo, where `js/api.js` sends its calls to Pyodide (`globalThis.tidesightDemo`). Keep every API call and download going through `api.js` (`transport`, `downloadUrl`), and check the demo (`tools/build_site.py`) after changing them.

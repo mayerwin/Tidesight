@@ -1,4 +1,5 @@
 // UI building blocks: popovers, menus, dialogs, toasts, copy and download, form controls.
+import { IN_BROWSER, transport } from './api.js';
 import { el, icon, tip } from './dom.js';
 
 // ---- popovers (one open at a time; a dialog may hold its own) -----------------------------------------
@@ -182,11 +183,23 @@ export function download(filename, content, type = 'text/plain;charset=utf-8') {
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
 }
 // Navigate to a server-made file (the response is an attachment: the page stays).
-export function downloadUrl(url) {
-  const a = el('a', { href: url, download: '', style: { display: 'none' } });
+export async function downloadUrl(url) {
+  let name = '';
+  if (IN_BROWSER) { // the in-browser demo answers downloads too: save its answer from memory
+    try {
+      const res = await transport(url, { headers: { 'X-Tidesight': '1' } });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+      name = (/filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '') || [])[1] || '';
+      url = URL.createObjectURL(await res.blob());
+    } catch (e) {
+      toast(e.message, { kind: 'error' });
+      return;
+    }
+  }
+  const a = el('a', { href: url, download: name, style: { display: 'none' } });
   document.body.appendChild(a);
   a.click();
-  setTimeout(() => a.remove(), 1000);
+  setTimeout(() => { a.remove(); if (name) URL.revokeObjectURL(url); }, 1000);
 }
 
 // Rows of plain values as CSV/TSV/JSON (exports of tables already on screen). Formulas are neutralised.

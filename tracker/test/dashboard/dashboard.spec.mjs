@@ -8,6 +8,7 @@ import { expect, test as base } from '@playwright/test';
 const OPEN = 'http://127.0.0.1:8795/dashboard/';
 const AUTH = 'http://127.0.0.1:8796/dashboard/';
 const FRESH = 'http://127.0.0.1:8797/dashboard/'; // no user yet (test/dashboard/serve.py)
+const DEMO = 'http://127.0.0.1:8798/dashboard/'; // [dashboard] demo: read-only, open to anyone
 const SETUP_CODE = fileURLToPath(new URL('./.data/setup/data/setup-code.txt', import.meta.url));
 const DATA_DIR = fileURLToPath(new URL('./.data/data/', import.meta.url)); // the data of 8795 and 8796
 
@@ -383,6 +384,21 @@ test('admins see a newer release, and its installation', async ({ page }) => {
     rmSync(DATA_DIR + 'update.json', { force: true });
     rmSync(DATA_DIR + 'update-request.json', { force: true });
   }
+});
+
+test('the read-only demo opens without signing in and changes nothing', async ({ page, errors }) => {
+  await page.goto(DEMO + '#/overview');
+  await expect(page.locator('.demo-banner')).toContainText('Live demo');
+  await expect(page.locator('.tile').first()).toBeVisible();
+  await expect(page.locator('#version .update-badge')).toHaveCount(0);
+  await page.goto(DEMO + '#/properties');
+  await page.getByRole('button', { name: 'Add property' }).click();
+  await page.locator('.wizard input').first().fill('www.example.net');
+  await page.locator('.dialog-foot .btn.primary').click();
+  await page.locator('.dialog-foot .btn.primary').click();
+  await expect(page.locator('.dialog')).toContainText('read-only demo');
+  // The refusals (403) are what this test expects; any other error still fails it.
+  errors.splice(0, errors.length, ...errors.filter((e) => !/status of 403/.test(e)));
 });
 
 test('the public page shows its metrics and nothing else', async ({ page }) => {

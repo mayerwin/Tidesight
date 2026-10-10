@@ -1,5 +1,5 @@
-// The dashboard's browser tests: demo data (tools/demo.py) served twice by test/dashboard/serve.py, without
-// signing in (8795) and with it (8796). Run with `npm run test:dashboard`.
+// The dashboard's browser tests: demo data (tools/demo.py) served by test/dashboard/serve.py without signing in
+// (8795), with it (8796), as a new installation (8797) and as a read-only demo (8798). `npm run test:dashboard`.
 import { defineConfig } from '@playwright/test';
 
 const python = process.env.TIDESIGHT_PYTHON || (process.platform === 'win32' ? 'py -3' : 'python3');

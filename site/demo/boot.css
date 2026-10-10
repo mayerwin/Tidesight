@@ -1,0 +1,20 @@
+/* The live demo's start screen (see boot.js), above the dashboard until Tidesight runs in the page. */
+.demo-boot { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px;
+  background: radial-gradient(1200px 600px at 20% 110%, #1d4f6e 0%, transparent 60%), radial-gradient(900px 500px at 90% -10%, #22476a 0%, transparent 55%), #0b1a2b;
+  color: #e9eef3; font: 15px/1.55 "Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; transition: opacity .4s ease, visibility .4s; }
+.demo-boot.done { opacity: 0; visibility: hidden; }
+.demo-boot-card { width: min(520px, 100%); text-align: center; }
+.demo-boot-mark { width: 64px; height: 64px; margin: 0 auto 18px; display: block; }
+.demo-boot-mark path { animation: demo-boot-wave 2.4s ease-in-out infinite; transform-origin: center; }
+.demo-boot-mark path + path { animation-delay: -1.2s; }
+@keyframes demo-boot-wave { 50% { transform: translateX(2px); } }
+.demo-boot-kicker { margin: 0; letter-spacing: .14em; text-transform: uppercase; font-size: 11.5px; color: #9fd1ff; }
+.demo-boot h1 { margin: 8px 0 26px; font: italic 600 32px/1.15 Fraunces, Georgia, serif; color: #fff; }
+.demo-boot-bar { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, .12); overflow: hidden; }
+.demo-boot-bar i { display: block; height: 100%; width: 4%; border-radius: 3px; background: linear-gradient(90deg, #6ab7ff, #9fd1ff);
+  transition: width .35s ease; }
+.demo-boot-step { margin: 14px 0 0; min-height: 1.5em; color: #cfe1f1; font-variant-numeric: tabular-nums; }
+.demo-boot-note { margin: 26px auto 0; max-width: 440px; font-size: 13px; color: #8ea6bc; }
+.demo-boot.failed .demo-boot-bar i { background: #e07a5f; width: 100% !important; }
+.demo-boot.failed .demo-boot-step { color: #ffd6c9; }
+@media (prefers-reduced-motion: reduce) { .demo-boot-mark path { animation: none; } .demo-boot, .demo-boot-bar i { transition: none; } }

@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Tidesight · Open-source, self-hosted web analytics that keeps every hit</title>
+  <meta name="description" content="Tidesight is open-source web analytics you host yourself: pageviews, events, heatmaps, session replays, Web Vitals and errors, stored raw on your own server. Runs on cheap shared hosting with Python, SQLite and cron. Try the live demo in your browser.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Tidesight · Analytics that keeps every wave">
+  <meta property="og:description" content="Open-source, self-hosted web analytics: every hit kept raw, a complete dashboard, on hosting you already have. Try the live demo in your browser.">
+  <meta property="og:url" content="https://mayerwin.github.io/Tidesight/">
+  <meta property="og:image" content="https://mayerwin.github.io/Tidesight/images/social-preview.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="theme-color" content="#0f2236">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="canonical" href="https://mayerwin.github.io/Tidesight/">
+  <link rel="preload" href="fonts/fraunces-latin-italic.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the content</a>
+
+  <header class="nav" id="top">
+    <div class="wrap nav-row">
+      <a class="brand" href="#top" aria-label="Tidesight, home">
+        <svg class="mark" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="15.5" fill="none" stroke="currentColor" stroke-opacity=".45"/><circle cx="17" cy="17" r="4" fill="var(--foam)"/><path d="M3 22c3.5-3 7-3 10.5 0s7 3 10.5 0 7-3 7 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M5 26.5c3-2.4 6-2.4 9 0s6 2.4 9 0 4.5-2 6 0" fill="none" stroke="var(--foam)" stroke-width="1.2" stroke-linecap="round" opacity=".8"/></svg>
+        <span>Tidesight</span>
+      </a>
+      <nav class="links" aria-label="Sections">
+        <a href="#features">Features</a>
+        <a href="#tour">Tour</a>
+        <a href="#how">How it works</a>
+        <a href="#start">Get started</a>
+        <a href="https://github.com/mayerwin/Tidesight/tree/main/docs">Docs</a>
+      </nav>
+      <div class="nav-cta">
+        <a class="gh-btn" href="https://github.com/mayerwin/Tidesight" aria-label="Tidesight on GitHub">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          <span class="gh-label">GitHub</span>
+          <span class="gh-count" data-gh-stars hidden></span>
+        </a>
+        <a class="btn btn-primary btn-sm" href="demo/#/overview?site=demo">Live demo</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <svg class="tides" viewBox="0 0 1440 560" preserveAspectRatio="none" aria-hidden="true">
+        <g fill="none" stroke="currentColor" stroke-width="1">
+          <path class="t1" d="M-200 120 C 80 60, 280 180, 560 120 S 1040 60, 1320 120 S 1800 180, 2080 120"/>
+          <path class="t2" d="M-200 190 C 100 140, 300 250, 600 190 S 1080 130, 1360 190 S 1840 250, 2120 190"/>
+          <path class="t3" d="M-200 260 C 60 210, 300 320, 580 260 S 1060 200, 1340 260 S 1820 320, 2100 260"/>
+          <path class="t1" d="M-200 330 C 120 280, 320 390, 620 330 S 1100 270, 1380 330 S 1860 390, 2140 330"/>
+          <path class="t2" d="M-200 400 C 40 350, 280 460, 560 400 S 1040 340, 1320 400 S 1800 460, 2080 400"/>
+          <path class="t3" d="M-200 470 C 100 420, 300 530, 600 470 S 1080 410, 1360 470 S 1840 530, 2120 470"/>
+        </g>
+      </svg>
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <p class="kicker"><span class="dot" aria-hidden="true"></span>Open-source web analytics · MIT licence</p>
+          <h1 id="hero-title">Analytics that keeps <em>every wave</em>.</h1>
+          <p class="lead">Tidesight is self-hosted web analytics for any number of websites. Every hit is stored raw on your own server, then turned into a dashboard as complete as the big tools: reports and comparisons, heatmaps, session replays, Web Vitals, errors, funnels and more. It runs on the cheapest shared hosting, with Python, SQLite and cron.</p>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="demo/#/overview?site=demo">Try the live demo <span aria-hidden="true">→</span></a>
+            <a class="btn btn-ghost" href="#start">Get started</a>
+          </div>
+          <p class="fine">The demo is Tidesight itself, running in your browser on made-up data. No sign-up, nothing sent anywhere.</p>
+        </div>
+      </div>
+      <div class="wrap hero-shot">
+        <figure class="frame">
+          <div class="frame-bar" aria-hidden="true"><i></i><i></i><i></i><span>stats.example.com/dashboard</span></div>
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="images/overview-dark.png">
+            <img src="images/overview.png" width="1440" height="900" alt="The Tidesight dashboard: overview of a surf shop's last 30 days, with visitors, visits, pageviews, bounce rate and visit duration against the previous period, a daily traffic chart, channels and top pages">
+          </picture>
+        </figure>
+      </div>
+    </section>
+
+    <section class="facts" aria-label="At a glance">
+      <ul class="wrap facts-row">
+        <li><b>8 KB</b><span>tracker, plugins loaded on demand</span></li>
+        <li><b>0</b><span>dependencies for the Python collector</span></li>
+        <li><b>1</b><span>folder on your host, SQLite files inside</span></li>
+        <li><b>∞</b><span>websites, each with its own reports</span></li>
+        <li><b>100%</b><span>of the data on your server</span></li>
+      </ul>
+    </section>
+
+    <section class="pillars wrap" aria-labelledby="why-title">
+      <h2 id="why-title" class="sr-only">Why Tidesight</h2>
+      <article>
+        <p class="num">01</p>
+        <h3>Raw first</h3>
+        <p>Every hit is kept as it arrived, headers and payload included. Sessions, places, devices, channels and identities come from jobs you can run again: improve a rule, and the past follows.</p>
+      </article>
+      <article>
+        <p class="num">02</p>
+        <h3>Complete</h3>
+        <p>Comparisons, filters, segments, goals, funnels, retention, heatmaps, recordings, Web Vitals, errors, forms, site search and visitor timelines, in one dashboard and for every site.</p>
+      </article>
+      <article>
+        <p class="num">03</p>
+        <h3>Yours, on cheap hosting</h3>
+        <p>A standard-library Python app and SQLite files, on the host you already pay for. No daemon, no database server, no monthly bill, and no data leaving your server.</p>
+      </article>
+    </section>
+
+    <section class="features" id="features" aria-labelledby="features-title">
+      <div class="wrap">
+        <p class="eyebrow">Features</p>
+        <h2 id="features-title">Everything the big tools show you. <em>Nothing they keep.</em></h2>
+        <div class="grid">
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg><h3>Realtime</h3><p>Who is on your sites right now, the pages they read and where they came from.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h4v7H4zM10 8h4v12h-4zM16 4h4v16h-4z"/></svg><h3>Reports and comparisons</h3><p>Any period against the previous one or a year before, changes everywhere, filters on every dimension, saved segments, annotations.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10M7 8l5 5 5-5M5 21h14"/></svg><h3>Acquisition</h3><p>Channels as in GA4, AI assistants included; sources, campaigns, referrers and click ids.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c4 5 6 8 6 11a6 6 0 01-12 0c0-3 2-6 6-11z"/></svg><h3>Heatmaps</h3><p>Clicks, rage and dead clicks, mouse movement and scroll reach, drawn on the page as it looked.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4l14 8-14 8z"/></svg><h3>Session replay</h3><p>Watch visits again with rrweb. Inputs are masked and passwords never recorded.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20a8 8 0 118-8M12 12l5-5"/></svg><h3>Web Vitals and errors</h3><p>LCP, INP and CLS by page and over time; JavaScript and resource errors, grouped.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg><h3>Funnels and retention</h3><p>Ordered steps within a visit, and the share of visitors who come back, week after week.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM9.5 5v14M4 10h16"/></svg><h3>Explorer and exports</h3><p>Any dimension, a second one, every matching row to Excel, CSV, TSV or JSON. A JSON API for scripts.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11a4 4 0 100-8 4 4 0 000 8zM2 21v-1a7 7 0 0114 0v1"/></svg><h3>Visitors and visits</h3><p>A timeline for every visit, a profile for every visitor, identities stitched across devices.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg><h3>Any number of sites</h3><p>Add a property in the dashboard, paste one line into its pages, see the first visit arrive.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21a9 9 0 100-18 9 9 0 000 18zM12 16a4 4 0 100-8 4 4 0 000 8z"/></svg><h3>Goals</h3><p>Pages or events as goals, with conversions and conversion rates in every report.</p></article>
+          <article><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg><h3>Privacy mode</h3><p>IP truncation or hashing, retention windows, Do Not Track and GPC, no fingerprinting: a setting and a clean-up job.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="tour" id="tour" aria-labelledby="tour-title">
+      <div class="wrap">
+        <p class="eyebrow">Tour</p>
+        <h2 id="tour-title">See it before you install it.</h2>
+        <div class="tour-box">
+          <div class="tour-tabs" role="tablist" aria-label="Dashboard screens">
+            <button role="tab" aria-selected="true" aria-controls="p-realtime" id="t-realtime"><span>01</span>Realtime</button>
+            <button role="tab" aria-selected="false" aria-controls="p-acquisition" id="t-acquisition"><span>02</span>Acquisition</button>
+            <button role="tab" aria-selected="false" aria-controls="p-heatmap" id="t-heatmap"><span>03</span>Heatmaps</button>
+            <button role="tab" aria-selected="false" aria-controls="p-replay" id="t-replay"><span>04</span>Session replay</button>
+            <button role="tab" aria-selected="false" aria-controls="p-visit" id="t-visit"><span>05</span>Visit timeline</button>
+            <button role="tab" aria-selected="false" aria-controls="p-funnels" id="t-funnels"><span>06</span>Funnels</button>
+            <button role="tab" aria-selected="false" aria-controls="p-locations" id="t-locations"><span>07</span>Locations</button>
+            <button role="tab" aria-selected="false" aria-controls="p-performance" id="t-performance"><span>08</span>Web Vitals</button>
+            <button role="tab" aria-selected="false" aria-controls="p-retention" id="t-retention"><span>09</span>Retention</button>
+          </div>
+          <div class="tour-panels">
+            <figure role="tabpanel" id="p-realtime" aria-labelledby="t-realtime">
+              <img src="images/realtime.png" width="1440" height="900" loading="lazy" alt="Realtime: eleven visitors in the last five minutes, pageviews per minute, active pages and referrers">
+              <figcaption>Visitors in the last five minutes, pageviews minute by minute, the pages they read and where they came from.</figcaption>
+            </figure>
+            <figure role="tabpanel" id="p-acquisition" aria-labelledby="t-acquisition" hidden>
+              <img src="images/acquisition.png" width="1440" height="900" loading="lazy" alt="Acquisition report: channels over time and a table of channels with visitors, visits, pageviews, bounce rate and duration, with their changes">
+              <figcaption>Channels, sources, campaigns and referrers: sorted, searched, compared, broken down by a second dimension, exported.</figcaption>
+            </figure>
+            <figure role="tabpanel" id="p-heatmap" aria-labelledby="t-heatmap" hidden>
+              <img src="images/heatmap.png" width="1440" height="900" loading="lazy" alt="Click heatmap of a product page drawn over its DOM snapshot, with the most clicked elements and their rage and dead clicks">
+              <figcaption>Clicks drawn on the elements they hit, from a snapshot of the page; rage and dead clicks point at what frustrates.</figcaption>
+            </figure>
+            <figure role="tabpanel" id="p-replay" aria-labelledby="t-replay" hidden>
+              <img src="images/replay.png" width="1440" height="900" loading="lazy" alt="A session recording replayed in the dashboard, with the visit's details beside it">
+              <figcaption>Recordings of sampled visits, replayed in the dashboard. Inputs are masked; passwords are never recorded.</figcaption>
+            </figure>
+            <figure role="tabpanel" id="p-visit" aria-labelledby="t-visit" hidden>
+              <img src="images/visit.png" width="1440" height="900" loading="lazy" alt="A visit's timeline: pageviews, clicks, Web Vitals, scroll, a form and a purchase, with the visit's source, location and device">
+              <figcaption>Every visit, step by step: pages, clicks, forms, events, Web Vitals and errors, with where it came from.</figcaption>
+            </figure>
+            <figure role="tabpanel" id="p-funnels" aria-labelledby="t-funnels" hidden>
+              <img src="images/funnels.png" width="1440" height="900" loading="lazy" alt="A funnel from the home page to a product page, add to cart, checkout and purchase, with the conversion of each step">
+              <figcaption>Funnels of pages and events, completed in order within a visit, with the conversion of each step.</figcaption>
+            </figure>
+            <figure role="tabpanel" id="p-locations" aria-labelledby="t-locations" hidden>
+              <img src="images/locations.png" width="1440" height="900" loading="lazy" alt="World map shaded by visitors per country, with city markers">
+              <figcaption>Countries, regions, cities, languages, time zones and networks, from IP geolocation databases updated monthly.</figcaption>
+            </figure>
+            <figure role="tabpanel" id="p-performance" aria-labelledby="t-performance" hidden>
+              <img src="images/performance.png" width="1440" height="900" loading="lazy" alt="Core Web Vitals at the 75th percentile, their daily trend and per page">
+              <figcaption>Core Web Vitals from real visits, by day and by page, with navigation timing.</figcaption>
+            </figure>
+            <figure role="tabpanel" id="p-retention" aria-labelledby="t-retention" hidden>
+              <img src="images/retention.png" width="1440" height="900" loading="lazy" alt="Weekly cohorts of visitors and the share who came back in the following weeks">
+              <figcaption>Cohorts by the week of the first visit, and how many came back.</figcaption>
+            </figure>
+          </div>
+        </div>
+        <p class="center"><a class="btn btn-primary" href="demo/#/overview?site=demo">Open the live demo <span aria-hidden="true">→</span></a></p>
+      </div>
+    </section>
+
+    <section class="how" id="how" aria-labelledby="how-title">
+      <div class="wrap">
+        <p class="eyebrow">How it works</p>
+        <h2 id="how-title">Raw in, insight out, <em>nothing in between</em>.</h2>
+        <ol class="flow">
+          <li><b>Tracker</b><span><code>ts.js</code>, about 8 KB. Pageviews, events, single-page apps; plugins load only where they are switched on.</span></li>
+          <li><b>Collector</b><span>Python's standard library. Appends every hit, raw, to SQLite, answers in milliseconds, and never enriches.</span></li>
+          <li><b>Jobs</b><span>Cron derives sessions, places, devices, bots, channels and identities, then daily rollups. Re-runnable and versioned.</span></li>
+          <li><b>Dashboard</b><span>A static app on a small JSON API, for the dashboard and your scripts alike.</span></li>
+        </ol>
+        <p class="note-line">The derived database can be deleted at any time: it is rebuilt from the raw hits.</p>
+        <div class="hosts">
+          <div>
+            <h3>Runs where your website runs</h3>
+            <p>Shared hosting with Python (FastCGI or CGI) and cron is enough: everything lives in one folder, the website's, behind an <code>.htaccess</code>, and Tidesight checks from the outside that none of its files can be downloaded. A host without Python web apps can collect with the PHP connector; Node and Cloudflare Workers connectors speak the same protocol, checked by a shared conformance suite.</p>
+          </div>
+          <div>
+            <h3>Updates in one click</h3>
+            <p>Tidesight looks for new releases once a day. An admin clicks <b>Update</b>; the next cron run downloads it, checks it, puts it in place and keeps the previous version for a rollback. The tracking code on your sites never changes: it is served by Tidesight, so it follows.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="start" id="start" aria-labelledby="start-title">
+      <div class="wrap">
+        <p class="eyebrow">Get started</p>
+        <h2 id="start-title">From zero to your first visitor, <em>in five steps</em>.</h2>
+        <ol class="steps">
+          <li class="step">
+            <div class="step-text">
+              <h3>Try it on your computer</h3>
+              <p>Python 3.9 or later, nothing else. The demo makes 60 days of visits to three made-up websites, through the real collector and jobs.</p>
+              <div class="code"><div class="code-head"><span>Terminal</span><button class="copy" type="button" aria-label="Copy the commands">Copy</button></div><pre><code>git clone https://github.com/mayerwin/Tidesight.git
+cd Tidesight
+python tools/demo.py --out demo-data
+python server/python/devserver.py --no-auth --port 8790 \
+  --config demo-data/tidesight.toml</code></pre></div>
+              <p class="small">Then open <code>http://127.0.0.1:8790/dashboard/</code>.</p>
+            </div>
+            <figure class="step-shot"><img src="images/properties.png" width="1440" height="900" loading="lazy" alt="The three demo properties in the dashboard: a surf shop, a magazine and a web app"></figure>
+          </li>
+          <li class="step wide">
+            <div class="step-text">
+              <h3>Put it on your host</h3>
+              <p>Unpack the latest release in your website's folder, copy two files next to it, write <code>tidesight.toml</code> and add one cron line. The guide walks through it, for Dreamhost and similar hosts.</p>
+              <div class="code"><div class="code-head"><span>Terminal, on the server</span><button class="copy" type="button" aria-label="Copy the commands">Copy</button></div><pre><code>cd ~/stats.example.com    # your website's folder
+curl -L https://github.com/mayerwin/Tidesight/releases/latest/download/tidesight.tar.gz | tar xz
+cp app/server/python/tidesight.fcgi . &amp;&amp; chmod 755 tidesight.fcgi
+cp app/server/python/web.htaccess .htaccess
+cp app/config/tidesight.example.toml tidesight.toml</code></pre></div>
+              <p class="small"><a href="https://github.com/mayerwin/Tidesight/blob/main/docs/deploy-dreamhost.md">The step-by-step deployment guide →</a></p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-text">
+              <h3>Create the first account</h3>
+              <p>The first time the dashboard opens, it asks for a setup code that only someone with access to the server can read, so a bot that finds a new installation first cannot claim it. Invite your team afterwards with one-time links.</p>
+            </div>
+            <figure class="step-shot"><img src="images/setup.png" width="1440" height="900" loading="lazy" alt="The first-account form: the setup code read on the server, a user name and a password"></figure>
+          </li>
+          <li class="step">
+            <div class="step-text">
+              <h3>Add your website</h3>
+              <p>Give its address and a time zone, choose what to record, and paste one line into the <code>&lt;head&gt;</code> of its pages. The dialog says when the first visit arrives.</p>
+              <div class="code"><div class="code-head"><span>HTML, in the &lt;head&gt; of every page</span><button class="copy" type="button" aria-label="Copy the tag">Copy</button></div><pre><code>&lt;script async src="https://stats.example.com/ts.js" data-site="example-com"&gt;&lt;/script&gt;</code></pre></div>
+            </div>
+            <figure class="step-shot"><img src="images/tracking-code.png" width="1440" height="900" loading="lazy" alt="Adding a property: the tracking code to paste, and a box waiting for the first visit"></figure>
+          </li>
+          <li class="step">
+            <div class="step-text">
+              <h3>Watch the tide come in</h3>
+              <p>Visitors appear on the Realtime page within seconds; reports fill in as the cron job runs, every couple of minutes. Custom events take one more line:</p>
+              <div class="code"><div class="code-head"><span>JavaScript</span><button class="copy" type="button" aria-label="Copy the code">Copy</button></div><pre><code>tidesight('track', 'signup', { plan: 'pro' });</code></pre></div>
+            </div>
+            <figure class="step-shot"><img src="images/realtime.png" width="1440" height="900" loading="lazy" alt="The Realtime page with visitors arriving"></figure>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="trust" aria-labelledby="trust-title">
+      <div class="wrap trust-grid">
+        <div>
+          <p class="eyebrow">Privacy</p>
+          <h2 id="trust-title">Your visitors' data stays <em>with you</em>.</h2>
+          <ul class="checks">
+            <li>Stored on your server only; the tracker and the dashboard load nothing from any other host.</li>
+            <li>A privacy mode for strict settings: IP truncation or hashing, retention windows, Do Not Track and Global Privacy Control, no fingerprinting.</li>
+            <li>Tokens, passwords and session ids in URLs are redacted before they leave the browser. Form values are never collected.</li>
+            <li>Every data point has a per-site switch, every behaviour plugin a sampling rate.</li>
+          </ul>
+        </div>
+        <div>
+          <p class="eyebrow">Security</p>
+          <h2>Built for a public endpoint.</h2>
+          <ul class="checks">
+            <li>Body sizes, request rates and daily quotas are bounded; junk traffic gets its own small allowance.</li>
+            <li>Credentials and other sites' cookies are never stored; passwords travel over HTTPS only.</li>
+            <li>A strict Content Security Policy keeps recordings from contacting other hosts.</li>
+            <li>The collectors, the tracker and the dashboard went through adversarial security reviews; every finding was fixed and covered by tests.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="faq" aria-labelledby="faq-title">
+      <div class="wrap narrow">
+        <p class="eyebrow">Questions</p>
+        <h2 id="faq-title">Good to know</h2>
+        <details>
+          <summary>What does it cost?</summary>
+          <p>Nothing: Tidesight is MIT-licensed. You need a host with Python 3.9 or later (FastCGI or CGI) and cron, which most shared hosting plans include, or PHP, Node or Cloudflare Workers for the collector.</p>
+        </details>
+        <details>
+          <summary>How much traffic can it take?</summary>
+          <p>In the hosting test on a shared Dreamhost server, SQLite with write-ahead logging took about 1,800 inserts a second from eight processes at once, with no errors: far more than most websites send. The tracker batches events, and every limit is configurable.</p>
+        </details>
+        <details>
+          <summary>Do I need a cookie banner?</summary>
+          <p>That depends on where you and your visitors are, and on what you switch on. Tidesight records a lot by default; its privacy mode and per-site switches let you match stricter rules. Check your own obligations.</p>
+        </details>
+        <details>
+          <summary>How do updates work?</summary>
+          <p>Once a day, Tidesight looks for a new GitHub release. An admin sees it in the dashboard and clicks Update; the next cron run installs it and keeps the previous version for a rollback. Database migrations run by themselves, and the sites' tracking code never needs to change.</p>
+        </details>
+        <details>
+          <summary>Does the live demo send anything anywhere?</summary>
+          <p>No. It is Tidesight's own dashboard and Python web app, compiled to WebAssembly with Pyodide and running in your browser on made-up data. It is rebuilt every few hours, so its dates are always recent.</p>
+        </details>
+        <details>
+          <summary>Can I query the data myself?</summary>
+          <p>Yes: the dashboard is built on a JSON API that scripts can use too, every report and raw dataset downloads as Excel, CSV, TSV or JSON, and the data are plain SQLite files.</p>
+        </details>
+      </div>
+    </section>
+
+    <section class="cta-band" aria-label="Try Tidesight">
+      <div class="wrap cta-band-row">
+        <div>
+          <h2>Watch your traffic like the tide.</h2>
+          <p>Open the demo, or star the repository to follow new releases.</p>
+        </div>
+        <div class="cta-row">
+          <a class="btn btn-light" href="demo/#/overview?site=demo">Try the live demo <span aria-hidden="true">→</span></a>
+          <a class="gh-btn gh-btn-light" href="https://github.com/mayerwin/Tidesight">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 .2l2.4 4.9 5.4.8-3.9 3.8.9 5.3L8 12.5 3.2 15l.9-5.3L.2 5.9l5.4-.8z"/></svg>
+            <span class="gh-label">Star on GitHub</span>
+            <span class="gh-count" data-gh-stars hidden></span>
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap foot-grid">
+      <div>
+        <a class="brand" href="#top"><svg class="mark" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="15.5" fill="none" stroke="currentColor" stroke-opacity=".45"/><circle cx="17" cy="17" r="4" fill="var(--foam)"/><path d="M3 22c3.5-3 7-3 10.5 0s7 3 10.5 0 7-3 7 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M5 26.5c3-2.4 6-2.4 9 0s6 2.4 9 0 4.5-2 6 0" fill="none" stroke="var(--foam)" stroke-width="1.2" stroke-linecap="round" opacity=".8"/></svg><span>Tidesight</span></a>
+        <p>Open-source, self-hosted web analytics that keeps every hit.</p>
+      </div>
+      <nav aria-label="Product"><h3>Product</h3><a href="demo/#/overview?site=demo">Live demo</a><a href="#features">Features</a><a href="#tour">Tour</a><a href="#start">Get started</a></nav>
+      <nav aria-label="Documentation"><h3>Documentation</h3><a href="https://github.com/mayerwin/Tidesight/blob/main/docs/deploy-dreamhost.md">Deployment</a><a href="https://github.com/mayerwin/Tidesight/blob/main/docs/tracker.md">Tracker</a><a href="https://github.com/mayerwin/Tidesight/blob/main/docs/configuration.md">Configuration</a><a href="https://github.com/mayerwin/Tidesight/blob/main/docs/api.md">API</a></nav>
+      <nav aria-label="Project"><h3>Project</h3><a href="https://github.com/mayerwin/Tidesight">GitHub</a><a href="https://github.com/mayerwin/Tidesight/releases">Releases</a><a href="https://github.com/mayerwin/Tidesight/issues">Issues</a><a href="https://github.com/mayerwin/Tidesight/blob/main/LICENSE">MIT licence</a></nav>
+    </div>
+    <div class="wrap foot-base">
+      <span>© 2026 Erwin Mayer · MIT licence</span>
+      <span>Screens show made-up data. Fonts: Fraunces and IBM Plex (SIL OFL).</span>
+    </div>
+  </footer>
+</body>
+</html>

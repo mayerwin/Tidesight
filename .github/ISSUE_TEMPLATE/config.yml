@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/mayerwin/Tidesight/security/advisories/new
+    about: Privately, please (see SECURITY.md).
+  - name: Try the live demo
+    url: https://mayerwin.github.io/Tidesight/demo/#/overview?site=demo
+    about: The dashboard on made-up data, in your browser.
