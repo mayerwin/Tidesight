@@ -46,7 +46,7 @@ SECURITY_HEADERS = [("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "
                     ("Referrer-Policy", "same-origin"), ("X-Robots-Tag", "noindex, nofollow")]
 COOKIE = "ts_login"
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
-ADMIN_READS = ("properties", "property", "users", "update")
+ADMIN_READS = ("properties", "property", "users", "update", "search_engines", "search_engine_sites")
 REPORT_EXPORTS = ("breakdown", "overview", "goals")
 _COOKIE_PATH = re.compile(r"/[A-Za-z0-9._~%/-]*")  # with fullmatch
 # What the dashboard folder serves (package.json, node_modules and the like are not for anyone).
@@ -828,7 +828,7 @@ def _stream_export(cols: List[str], rows: Iterable[Any], fmt: str) -> Iterable[b
 
 _REASONS = {400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
             409: "Conflict", 413: "Payload Too Large", 415: "Unsupported Media Type", 429: "Too Many Requests",
-            503: "Service Unavailable"}
+            502: "Bad Gateway", 503: "Service Unavailable"}
 
 _app: Optional[App] = None
 

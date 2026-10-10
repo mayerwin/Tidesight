@@ -23,6 +23,7 @@ Tidesight is self-hosted web analytics for any number of sites. A small JavaScri
 | Privacy mode and clean-up jobs | `docs/privacy.md` |
 | Deployment on Dreamhost | `docs/deploy-dreamhost.md` |
 | Connectors (PHP, Node, Worker) and writing another | `docs/connectors.md` |
+| Google Search Console and Bing Webmaster Tools (setup, imports) | `docs/search-engines.md` |
 | Phases, status, open questions | `docs/roadmap.md` |
 
 ## Repository layout
@@ -59,6 +60,8 @@ server/python/
   tidesight/users.py              # people (users.json: hashes, roles), the first account's setup code
   tidesight/webcheck.py           # data inside the website's folder: its .htaccess, the outside download check (cron)
   tidesight/updates.py            # the latest GitHub release (daily), in-place install by cron, rollback
+  tidesight/searchengines.py      # Google Search Console and Bing Webmaster Tools: accounts, imports (cron) into search.db, reports
+  tidesight/rs256.py              # RS256 signatures and JWTs (Google's service accounts), standard library only
   tidesight.fcgi, collect.cgi, passenger_wsgi.py   # hosting entry points (copy into the web directory)
   web.htaccess                    # the web folder's .htaccess: every request to the app
   devserver.py                    # local server (--no-auth, --test-api, --static)

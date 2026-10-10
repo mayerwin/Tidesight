@@ -1,5 +1,5 @@
 // The dashboard in a browser, on demo data: periods and comparisons, filters and segments, report tables and
-// exports, goals, properties, the command palette, signing in, the first account, people, updates, and the public page. No test may
+// exports, goals, search engines, paths, properties, the command palette, signing in, the first account, people, updates, and the public page. No test may
 // leave an error in the page.
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -145,6 +145,46 @@ test('goals: conversions, a goal in every report', async ({ page }) => {
   await expect(page.locator('table.report th', { hasText: 'Conv. rate' })).toBeVisible();
   await page.locator('.chip.goal .chip-x').click();
   await expect(page.locator('.chip.goal')).toHaveCount(0);
+});
+
+test('search engines: queries, the pages a query led to, landing pages with their visits, Bing', async ({ page }) => {
+  await open(page, '#/seo');
+  await expect(page.locator('.tile')).toHaveCount(5);
+  await expect(page.locator('.overview-main path.series')).toHaveCount(1);
+  await expect(page.locator('.seo-top')).toContainText('Pacific Time');
+  const rows = page.locator('.card', { hasText: 'Breakdown' }).locator('tbody tr');
+  await expect(rows.first()).toBeVisible();
+  const query = (await rows.first().locator('td').first().textContent()).trim();
+  await rows.first().click();
+  await expect.poll(() => hashParams(page).get('query')).toBe(query);
+  await expect.poll(() => hashParams(page).get('tab')).toBe('pages');
+  await expect(page.locator('.seo-top .chip')).toContainText(query);
+  await expect(page.locator('th', { hasText: 'Visits' })).toBeVisible();
+  await page.locator('.seo-top .chip-x').click();
+  await expect(page.locator('.seo-top .chip')).toHaveCount(0);
+  await page.locator('.seo-top button', { hasText: 'Bing' }).click();
+  await expect.poll(() => hashParams(page).get('engine')).toBe('bing');
+  await expect(page.locator('.card', { hasText: 'Breakdown' }).getByRole('tab')).toHaveCount(2);
+  // The property's settings: the accounts, step by step, and what this property reads.
+  await open(page, '#/property?site=demo&tab=search');
+  await expect(page.locator('.engine-card')).toHaveCount(2);
+  await expect(page.locator('.engine-card').first()).toContainText('iam.gserviceaccount.com');
+  await expect(page.locator('.engine-card select').first()).toHaveValue('sc-domain:tidewater.example');
+});
+
+test('paths: the flow of pages, and what comes before and after a page', async ({ page }) => {
+  await open(page, '#/paths');
+  await expect(page.locator('svg.sankey .sk-node').first()).toBeVisible();
+  await expect(page.locator('svg.sankey .sk-band').first()).toBeAttached();
+  await page.locator('.paths-bar select').first().selectOption('end');
+  await page.locator('.paths-bar .page-input').fill('/cart');
+  await page.locator('.paths-bar .page-input').press('Enter');
+  await expect.poll(() => hashParams(page).get('anchor')).toBe('end');
+  await expect(page.locator('.card-title', { hasText: 'Paths leading to /cart' })).toBeVisible();
+  await page.locator('svg.sankey .sk-node:not(.other) .sk-hit').first().click();
+  await expect.poll(() => hashParams(page).get('mode')).toBe('transitions');
+  await expect(page.locator('.transition-page')).toContainText('/cart');
+  await expect(page.locator('.transition-views b')).not.toHaveText('0');
 });
 
 test('the export dialog says what each download holds', async ({ page }) => {

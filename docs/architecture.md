@@ -66,6 +66,8 @@ dashboard (static) ──► wsgi.py: sign-in (session cookie, or HTTP Basic for
 | `events.db` | collector (and `load-spool`) | `raw_requests`, `raw_hits`, `rate_limits`, `meta`. The source of truth. |
 | `replay.db` | collector (and `load-spool`) | `chunks`: compressed replay and mouse-movement data. |
 | `derived.db` | jobs | Everything computed: lookups, sessions, pageviews, visitors, rollups, job state. Can be deleted and rebuilt. |
+| `search.db` | jobs | The search engines' figures (Google Search Console, Bing Webmaster Tools): rows per query and page, totals, import state (`docs/search-engines.md`). Not rebuildable: backed up. |
+| `search-engines.json` | dashboard, `jobs.py search` | The Google service account's key and the Bing API key (mode 600, never shown again). |
 | `web.db` | dashboard | Sign-in sessions (token hashes), the sign-in throttle, saved segments, annotations, and the properties whose data `jobs.py cron` is to delete. Deleting it signs everyone out and forgets segments and notes. |
 | `properties.json` | dashboard | The properties added in the dashboard, as `[sites.<id>]` tables (written atomically, under a lock). |
 | `users.json` | the Users page, `jobs.py user`, the first-account form | People who can sign in: password hash and role, merged with the configuration file's `[dashboard] users` (written atomically, under a lock). |

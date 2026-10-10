@@ -112,6 +112,18 @@ Rebuilt from the raw data whenever the pipeline version changes (parsers, geo da
 
 Migration 2 adds `session_key` indexes on the typed tables and `pageviews(site_id, path, day)`. Migration 3 adds `vitals(page_key, metric)` and `errors(page_key, grp)`, used when a re-sent vital or an error count updates its page's row.
 
+## search.db
+
+The search engines' figures (`searchengines.py`, `docs/search-engines.md`), imported by `jobs.py cron`. Raw data from
+elsewhere: never rebuilt, backed up nightly (Google keeps only 16 months).
+
+| Table | Contents |
+|---|---|
+| `search_rows(site_id, engine, day, query, page, clicks, impressions, position)` | Google: one row per day, query and page (rare queries are not given). Bing: per week (the Saturday) and query with `page` `''`, or per week and page with `query` `''`. `position`: the engine's average position for the row. Index `(site_id, engine, day)`. |
+| `search_totals(site_id, engine, day, country, device, clicks, impressions, position)` | Per day, every search included: Google per country (ISO alpha-2, from Search Console's alpha-3) and device; Bing's daily totals with `country` and `device` `''` and no position. |
+| `search_days(site_id, engine, day, fetched_at, final, rows)` | Google's days imported (or found empty), and whether their figures are final (four days on): recent days are fetched again every 6 hours until then. |
+| `search_state(site_id, engine, target, last_run, last_ok, error, error_at, retry_at)` | Each import: the engine's site it reads (`target`; another one clears the property's figures), the last run and success, the last error and when to try again. |
+
 ## web.db
 
 The dashboard's own state, apart from the analytics data (only the Python app reads and writes it).
@@ -126,6 +138,8 @@ The dashboard's own state, apart from the analytics data (only the Python app re
 | `calls(client, minute, n)` | *(migration 3)* Public share-page API calls per client (keyed hash) in the current minute, when each request is its own process (CGI); older minutes are deleted as they pass. |
 | `password_links(token_hash, user, kind, created_by, created_at, expires)` | *(migration 4)* One-time links to choose a password: `invite` or `reset`. Only the SHA-256 of the token; one link per user (a new one replaces it); deleted when used. |
 | `sign_ins(user, at)` | *(migration 4)* Each user's last sign-in, shown on the Users page. |
+
+The search engine accounts connected in the dashboard are in `data_dir/search-engines.json` (`{"format": "tidesight-search-engines/1", "engines": {"google": {client_email, private_key, private_key_id, project_id, added_at, added_by}, "bing": {api_key, added_at, added_by}}}`, mode 600, written atomically under a lock).
 
 Properties added in the dashboard are not in a database: they are `data_dir/properties.json` (`{"format": "tidesight-properties/1", "sites": {id: table}}`), loaded with the configuration file. The people managed in the dashboard (or with `jobs.py user`) are in `data_dir/users.json` (`{"format": "tidesight-users/2", "users": {name: {hash, role, created_at, created_by}}}`, `hash` missing for someone invited who has not chosen a password yet; format 1, `{name: hash}`, is still read), loaded the same way; until the first one exists, `data_dir/setup-code.txt` holds the code that form asks for.
 

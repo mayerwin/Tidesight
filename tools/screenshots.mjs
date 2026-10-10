@@ -118,6 +118,9 @@ try {
     await save(page, 'funnels');
   });
   shot('retention', async (page) => { await go(page, '#/retention?site=harbor'); await save(page, 'retention'); });
+  shot('search-engines', async (page) => { await go(page, '#/seo?site=demo&compare=previous'); await save(page, 'search-engines'); });
+  shot('search-pages', async (page) => { await go(page, '#/seo?site=demo&tab=pages'); await save(page, 'search-pages'); });
+  shot('paths', async (page) => { await go(page, '#/paths?site=demo', 1200); await save(page, 'paths'); });
   shot('performance', async (page) => { // the 60 days of data: Web Vitals improve after the product photos were resized
     const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
     await go(page, '#/performance?site=demo&from=' + day(59) + '&to=' + day(0), 1200);

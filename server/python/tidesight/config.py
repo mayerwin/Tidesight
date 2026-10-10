@@ -157,6 +157,11 @@ SITE_DEFAULTS: Dict[str, Any] = {
     # Stored hits per UTC day; beyond, the site's requests answer 429 until midnight UTC. Off by default: anyone
     # can send hits, so a flood could use the quota up and lock real visitors out (availability over storage).
     "max_hits_per_day": 0,
+    # Search engines (docs/search-engines.md): the Search Console property ("sc-domain:example.com" or
+    # "https://www.example.com/") and the Bing Webmaster Tools site ("https://www.example.com/") whose figures
+    # `jobs.py cron` imports, with the accounts connected in the dashboard. Empty: none.
+    "search_console": "",
+    "bing_site": "",
 }
 
 FEATURE_DEFAULTS: Dict[str, bool] = {

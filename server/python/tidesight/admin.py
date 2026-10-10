@@ -33,7 +33,7 @@ PUBLIC_METRICS = ("visitors", "pageviews", "pages", "sources", "countries", "dev
 # Site settings the dashboard may change (features, privacy and per-feature options besides).
 EDITABLE = ("name", "origins", "timezone", "public", "public_metrics", "share_token", "goals", "max_hits_per_day",
             "exclude_paths", "redact_paths", "redact_params", "search_params", "session_timeout_min", "hash_mode",
-            "spa_replace")
+            "spa_replace", "search_console", "bing_site")
 _TEXT_LISTS = ("exclude_paths", "redact_paths", "redact_params", "search_params")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")  # always with fullmatch (a "$" lets a trailing newline in)
 _TZ_RE = re.compile(r"UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2}")
@@ -131,6 +131,9 @@ class Admin:
             ("POST", "user_link"): self.create_user_link,
             ("GET", "update"): self.get_update, ("POST", "update"): self.request_update,
             ("DELETE", "update"): self.cancel_update,
+            ("GET", "search_engines"): self.get_search_engines, ("PUT", "search_engines"): self.connect_search_engine,
+            ("DELETE", "search_engines"): self.disconnect_search_engine,
+            ("GET", "search_engine_sites"): self.search_engine_sites,
         }.get((method, endpoint))
         if route is None:
             raise ApiError(405 if method != "GET" else 404, "unknown endpoint or method")
@@ -325,6 +328,68 @@ class Admin:
         updates.cancel(self.cfg)
         return updates.state(self.cfg)
 
+    # -- search engines ----------------------------------------------------------------------
+    # The Google and Bing accounts (one each, for every property) are checked with the engine before they are kept;
+    # their keys never come back. Imports run in jobs.py cron (searchengines.py), never in a web request.
+
+    def _require_search_admin(self) -> None:
+        if not self.is_admin:
+            raise ApiError(403, "only admins may connect search engines")
+
+    def _engine(self, params: Dict[str, str], body: Dict[str, Any]) -> str:
+        from .searchengines import ENGINES
+        engine = params.get("engine") or body.get("engine")
+        if engine not in ENGINES:
+            raise ApiError(400, "engine is google or bing")
+        return engine
+
+    def get_search_engines(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        from . import searchengines
+        self._require_search_admin()
+        out = searchengines.describe(searchengines.credentials(self.cfg.data_dir))
+        if params.get("site"):
+            site = self._site(params)
+            out["imports"] = searchengines.status(self.cfg, site.id)
+        return out
+
+    def connect_search_engine(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        from . import searchengines
+        self._require_search_admin()
+        engine = self._engine(params, body)
+        try:
+            found = searchengines.connect_engine(self.cfg, engine, body.get("key"), self.user)
+        except searchengines.SearchEngineError as exc:
+            raise ApiError(400 if exc.kind == "config" else 502, str(exc))
+        except TimeoutError as exc:
+            raise ApiError(503, str(exc))
+        out = searchengines.describe(searchengines.credentials(self.cfg.data_dir))
+        out["sites"] = found["sites"]
+        return out
+
+    def disconnect_search_engine(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        from . import searchengines
+        self._require_search_admin()
+        engine = self._engine(params, body)
+        try:
+            searchengines.disconnect_engine(self.cfg, engine)
+        except (searchengines.SearchEngineError, TimeoutError) as exc:
+            raise ApiError(503, str(exc))
+        return searchengines.describe(searchengines.credentials(self.cfg.data_dir))
+
+    def search_engine_sites(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        """The sites the connected account sees (asked of the engine now)."""
+        from . import searchengines
+        self._require_search_admin()
+        engine = self._engine(params, body)
+        if self.cfg.dashboard["demo"]:  # no call leaves a demo: the sites its properties name
+            setting = searchengines.SETTINGS[engine]
+            return {"sites": [{"url": s.settings[setting], "permission": "siteFullUser"}
+                              for s in self.cfg.sites.values() if s.settings.get(setting)]}
+        try:
+            return {"sites": searchengines.engine_sites(self.cfg, engine)}
+        except searchengines.SearchEngineError as exc:
+            raise ApiError(400 if exc.kind == "config" else 502, str(exc))
+
     # -- properties: reading ------------------------------------------------------------
 
     def list_properties(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
@@ -372,6 +437,7 @@ class Admin:
             "goals": s["goals"], "max_hits_per_day": s["max_hits_per_day"], "exclude_paths": s["exclude_paths"],
             "redact_paths": s["redact_paths"], "redact_params": s["redact_params"], "search_params": s["search_params"],
             "session_timeout_min": s["session_timeout_min"], "hash_mode": s["hash_mode"], "spa_replace": s["spa_replace"],
+            "search_console": s["search_console"], "bing_site": s["bing_site"],
             "features": dict(site.features), "privacy": {k: bool(site.privacy.get(k)) for k in PRIVACY_DEFAULTS},
             "options": {k: v for k, v in site.opts.items() if v != {"sample_rate": 1.0} or k in ("replay", "mouse_moves")},
             "can_edit": self.is_admin and site.managed,
@@ -488,6 +554,9 @@ class Admin:
             tables[site.id] = table
 
         self._save(change)
+        if "search_console" in body or "bing_site" in body:  # the next cron run imports at once
+            from .searchengines import clear_retries
+            clear_retries(self.cfg, site_id=site.id)
         return self._detail(self.cfg.site(site.id))
 
     def delete_property(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
@@ -620,6 +689,12 @@ class Admin:
                     isinstance(v, str) and 0 < len(v.strip()) <= 300 for v in value):
                 raise ApiError(400, "%s: a list of at most 200 texts" % key)
             return [v.strip() for v in value]
+        if key in ("search_console", "bing_site"):
+            from .searchengines import SearchEngineError, check_target
+            try:
+                return check_target("google" if key == "search_console" else "bing", value)
+            except SearchEngineError as exc:
+                raise ApiError(400, str(exc))
         if key in ("hash_mode", "spa_replace"):
             choices = ("route", "all", "off") if key == "hash_mode" else ("path", "all", "off")
             if value not in choices:

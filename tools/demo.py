@@ -224,6 +224,7 @@ class Site:
     broken: Dict[str, str] = {}                                   # paths answering 404, and their titles
     search_path = "/search"
     searches: List[str] = []
+    queries: Dict[str, List[str]] = {}                            # what people search on Google and Bing, per page
     errors: List[Tuple[str, float, Dict[str, Any]]] = []         # (path prefix, chance per page, error)
     rage: List[Tuple[str, str, float]] = []                       # (path prefix, element id, chance per page)
     dead: List[Tuple[str, str, float]] = []
@@ -231,9 +232,10 @@ class Site:
     mouse = ("/",)                                                # pages with mouse movement chunks
 
     def table(self) -> Dict[str, Any]:
-        """The property as properties.json holds it."""
-        return dict({"name": self.name, "origins": [self.origin], "timezone": self.timezone, "goals": self.goals},
-                    **self.settings)
+        """The property as properties.json holds it (linked to its made-up Search Console and Bing sites)."""
+        host = self.origin.split("://", 1)[1]
+        return dict({"name": self.name, "origins": [self.origin], "timezone": self.timezone, "goals": self.goals,
+                     "search_console": "sc-domain:" + host, "bing_site": self.origin + "/"}, **self.settings)
 
     def place_weight(self, city: Tuple) -> float:
         return city[7] * self.countries.get(city[0], 1.0)
@@ -261,6 +263,16 @@ class Shop(Site):
                 "public": True, "public_metrics": ["visitors", "pageviews", "pages", "sources", "countries", "devices", "realtime"]}
     returns = (0.32, 0.12, 0.05)
     searches = ["hooded wetsuit", "5/4", "booties", "wax", "leash", "kids wetsuit", "sunscreen", "fins", "poncho", "4/3 chest zip"]
+    queries = {
+        "/": ["tidewater supply", "tidewater surf shop", "surf shop online", "tidewater supply co"],
+        "/collections/wetsuits": ["wetsuits", "winter wetsuit", "best wetsuit for cold water", "wetsuit sale", "surf wetsuit"],
+        "/products/coldwater-5-4-hooded": ["5/4 hooded wetsuit", "coldwater 5/4", "hooded wetsuit 5mm", "warmest wetsuit"],
+        "/journal/winter-wetsuit-guide": ["what wetsuit thickness for winter", "wetsuit thickness guide", "winter surfing wetsuit",
+                                          "how thick wetsuit 10 degrees"],
+        "/products/reef-safe-sunscreen": ["reef safe sunscreen", "mineral sunscreen surf", "reef safe sunscreen europe"],
+        "/journal/reading-a-surf-forecast": ["how to read a surf forecast", "surf forecast explained", "swell period meaning"],
+        "/products/tide-watch": ["tide watch", "surf watch tides"],
+    }
     broken = {"/products/winter-sale-wetsuit": "Page not found · Tidewater", "/collections/sale": "Page not found · Tidewater"}
     mouse = ("/", "/products/coldwater-5-4-hooded")
 
@@ -452,6 +464,17 @@ class Journal(Site):
         "/stories/the-shaper": ("The last shaper in town", "#6b4f3a,#d8bfa0"),
     }
 
+    queries = {
+        "/": ["saltwater journal", "surf magazine", "surf stories"],
+        "/stories/the-perfect-wave-forecast": ["perfect wave forecast", "best surf forecast", "wave forecast accuracy"],
+        "/stories/reading-the-tides": ["how to read tides", "tides for beginners", "tide chart surfing", "high tide or low tide surfing"],
+        "/stories/cold-water-confidence": ["cold water surfing", "surfing in cold water tips", "cold water shock"],
+        "/stories/surf-trips-portugal": ["surf trip portugal", "portugal surf road trip", "van life portugal surf", "best surf spots portugal"],
+        "/stories/plastic-free-surfing": ["plastic free surfing", "eco surfboard", "sustainable wetsuit"],
+        "/stories/the-shaper": ["surfboard shaper", "hand shaped surfboard"],
+        "/stories/tides-explained": ["tides explained"],
+    }
+
     def __init__(self) -> None:
         nav = [("Stories", "/"), ("Travel", "/topics/travel"), ("Craft", "/topics/craft"), ("Newsletter", "/newsletter")]
         top = header("Saltwater Journal", nav, ("nav-subscribe", "Subscribe", "/newsletter"))
@@ -532,6 +555,14 @@ class Harbor(Site):
     searches = ["webhooks", "sso", "api keys", "export", "slack", "rate limits", "macros", "gdpr"]
     broken = {"/docs/v1/auth": "Not found · Harbor docs"}
     mouse = ("/pricing", "/")
+
+    queries = {
+        "/": ["harbor", "harbor app", "shared inbox for support", "help desk software small team", "zendesk alternative"],
+        "/pricing": ["harbor pricing", "help desk pricing", "harbor app cost"],
+        "/docs/getting-started": ["harbor getting started", "harbor setup", "harbor docs"],
+        "/blog/calm-support": ["calm support", "customer support burnout", "support team workload"],
+        "/docs/api": ["harbor api", "harbor webhooks", "help desk api"],
+    }
 
     def __init__(self) -> None:
         nav = [("Product", "/features"), ("Pricing", "/pricing"), ("Customers", "/customers"), ("Docs", "/docs")]
@@ -1083,6 +1114,110 @@ def live(cfg: Any, now: Optional[int] = None, minutes: int = 30, seed: Optional[
     return count
 
 
+# ---- search engines: what Search Console and Bing Webmaster Tools would say -------------------------------
+
+def search_engines(cfg: Any, sites: List[Site], seed: int) -> Dict[str, int]:
+    """Google's and Bing's figures, made to agree with the organic visits the simulation recorded: clicks a little
+    above the visits, impressions from a click-through rate that falls with the position, positions that improve
+    over the period, queries that bring no click, queries Google keeps to itself, and Google's two-day delay. The
+    accounts are marked as a demo's (they hold no key)."""
+    import sqlite3
+    from datetime import date, timedelta
+    from tidesight import properties
+    from tidesight import searchengines as se
+    from tidesight.enrich.timeutil import local_day
+    rng = random.Random("search-%s" % seed)
+    now = int(time.time() * 1000)
+    latest = local_day(now - 2 * DAY, se.PACIFIC)  # Search Console's latest day
+    final = local_day(now - 4 * DAY, se.PACIFIC)
+    properties.write_json(se.path(cfg.data_dir), {"format": "tidesight-search-engines/1", "updated_at": now, "engines": {
+        "google": {"client_email": "tidesight@tidewater-demo.iam.gserviceaccount.com", "project_id": "tidesight-demo",
+                   "demo": True, "added_at": now - 40 * DAY, "added_by": "maya"},
+        "bing": {"api_key": "demo", "demo": True, "added_at": now - 40 * DAY, "added_by": "maya"}}})
+    derived = sqlite3.connect(os.path.join(cfg.data_dir, "derived.db"))
+    conn = se.open_db(cfg)
+    stats = {"rows": 0}
+
+    def ctr(position: float) -> float:
+        return min(0.6, 0.32 / position ** 0.95)
+
+    def saturday(day: str) -> str:  # Bing's weekly buckets are dated on the Saturday
+        d = date.fromisoformat(day)
+        return (d + timedelta(days=(5 - d.weekday()) % 7)).isoformat()
+
+    conn.execute("BEGIN")
+    for site in sites:
+        organic = derived.execute(
+            "SELECT day, entry_path, source, COUNT(*) FROM sessions WHERE site_id = ? AND medium = 'organic' AND "
+            "source IN ('google', 'bing') AND is_bot = 0 AND site_ok = 1 GROUP BY 1, 2, 3", (site.id,)).fetchall()
+        days = sorted({r[0] for r in organic})
+        brand = site.name.lower().split()[0]
+        usual: Dict[str, float] = {}  # each query's usual position
+        found: Dict[str, Dict[Tuple[str, str, str], List[float]]] = {"google": {}, "bing": {}}  # [clicks, position]
+        for day, path, source, n in organic:
+            engine = "google" if source == "google" else "bing"
+            if engine == "google" and day > latest:
+                continue
+            words = site.queries.get(path) or [site.name.lower()]
+            weights = [1 / (i + 1) ** 1.1 for i in range(len(words))]
+            progress = days.index(day) / max(1, len(days) - 1)
+            for _ in range(max(1, round(n * rng.uniform(1.0, 1.3)))):  # clicks: a little more than the visits
+                q = rng.choices(words, weights)[0]
+                pos = usual.setdefault(q, 1.2 if q.startswith(brand) else rng.uniform(2.5, 14.0))
+                acc = found[engine].setdefault((day, q, site.origin + path), [0, 0.0])
+                acc[0] += 1
+                acc[1] = max(1.0, pos * (1.12 - 0.22 * progress) * rng.uniform(0.92, 1.08))
+            for _ in range(rng.randint(0, 2)):  # searches that show the page and bring no click
+                q = rng.choice(words) + rng.choice([" near me", " review", " 2026", " vs", " best", " cheap", " how to"])
+                found[engine].setdefault((day, q, site.origin + path), [0, rng.uniform(9.0, 40.0)])
+
+        rows, per_day = [], {}  # type: Tuple[List[Tuple], Dict[str, List[float]]]
+        for (day, q, page), (clicks, pos) in found["google"].items():
+            impressions = max(clicks, round(clicks / ctr(pos) * rng.uniform(0.8, 1.2))) if clicks else rng.randint(1, 40)
+            rows.append((site.id, "google", day, q, page, clicks, impressions, round(pos, 2)))
+            d = per_day.setdefault(day, [0, 0, 0.0])
+            d[0], d[1], d[2] = d[0] + clicks, d[1] + impressions, d[2] + pos * impressions
+        conn.executemany("INSERT INTO search_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        top = sorted(site.countries.items(), key=lambda x: -x[1])[:6]
+        weight = sum(w for _, w in top)
+        for day, (clicks, impressions, pw) in per_day.items():  # totals: hidden queries too, per country and device
+            clicks, impressions = clicks * rng.uniform(1.08, 1.2), impressions * rng.uniform(1.15, 1.3)
+            for cc, w in top:
+                for device, dw in (("mobile", 0.52), ("desktop", 0.42), ("tablet", 0.06)):
+                    share = w / weight * dw
+                    conn.execute("INSERT INTO search_totals VALUES (?, 'google', ?, ?, ?, ?, ?, ?)",
+                                 (site.id, day, cc, device, round(clicks * share),
+                                  max(round(clicks * share), round(impressions * share)),
+                                  round(pw / max(1, per_day[day][1]) * rng.uniform(0.85, 1.15), 2)))
+        conn.executemany("INSERT OR REPLACE INTO search_days VALUES (?, 'google', ?, ?, ?, ?)",
+                         [(site.id, d, now, 1 if d <= final else 0, sum(1 for r in rows if r[2] == d)) for d in per_day])
+        conn.executemany("INSERT OR REPLACE INTO search_days VALUES (?, 'google', ?, ?, 1, 0)",
+                         [(site.id, d, now) for d in (local_day(now - k * DAY, se.PACIFIC)
+                                                      for k in range(2, 2 + se.GOOGLE_HISTORY_DAYS)) if d not in per_day])
+
+        # Bing: queries and pages by week, totals by day.
+        weekly: Dict[Tuple[str, str, str], List[float]] = {}
+        daily: Dict[str, List[float]] = {}
+        for (day, q, page), (clicks, pos) in found["bing"].items():
+            impressions = max(clicks, round(clicks / ctr(pos) * rng.uniform(0.8, 1.2))) if clicks else rng.randint(1, 20)
+            for key in ((saturday(day), q, ""), (saturday(day), "", page)):
+                acc = weekly.setdefault(key, [0, 0, 0.0])
+                acc[0], acc[1], acc[2] = acc[0] + clicks, acc[1] + impressions, acc[2] + pos * impressions
+            d = daily.setdefault(day, [0, 0])
+            d[0], d[1] = d[0] + clicks, d[1] + impressions
+        conn.executemany("INSERT INTO search_rows VALUES (?, 'bing', ?, ?, ?, ?, ?, ?)",
+                         [(site.id, w, q, page, c, i, round(pw / i)) for (w, q, page), (c, i, pw) in weekly.items()])
+        conn.executemany("INSERT INTO search_totals VALUES (?, 'bing', ?, '', '', ?, ?, NULL)",
+                         [(site.id, d, c, i) for d, (c, i) in daily.items()])
+        for engine, target in (("google", "sc-domain:" + site.origin.split("://", 1)[1]), ("bing", site.origin + "/")):
+            conn.execute("INSERT OR REPLACE INTO search_state(site_id, engine, target, last_run, last_ok) "
+                         "VALUES (?, ?, ?, ?, ?)", (site.id, engine, target, now - 7 * MINUTE, now - 7 * MINUTE))
+        stats["rows"] += len(rows) + len(weekly)
+    conn.execute("COMMIT")
+    conn.close()
+    derived.close()
+    return stats
+
 # ---- the dashboard side: people, annotations, segments ---------------------------------------------
 
 TEAM = [("maya", "admin", 0.2), ("noah", "admin", 2.5), ("lea", "viewer", 0.9), ("sam", "viewer", 6.0), ("ines", "viewer", None)]
@@ -1161,7 +1296,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         fh.write(CONFIG % {"journal": args.journal_mode, "dashboard": "\n[dashboard]\ndemo = true\n" if args.demo else "",
                            "public_url": 'public_url = "%s"\n' % args.public_url if args.public_url else ""})
     data_dir = os.path.join(out, "data")
-    for name in ("events.db", "replay.db", "derived.db", "web.db", "properties.json", "users.json", "update.json"):
+    for name in ("events.db", "replay.db", "derived.db", "web.db", "search.db", "properties.json", "users.json", "update.json",
+                 "search-engines.json"):
         for suffix in ("", "-wal", "-shm"):
             try:
                 os.remove(os.path.join(data_dir, name + suffix))
@@ -1178,6 +1314,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     from tidesight.enrich import pipeline
     result = pipeline.run(cfg)
     print("enrichment: %d hits, %d sessions in %.1f s" % (result["hits"], result["sessions"], time.time() - t0))
+    print("search engines: %(rows)d rows of made-up Search Console and Bing figures" % search_engines(cfg, sites, args.seed))
     if args.team:
         team(cfg, sites)
     n = live(cfg, sites=[s.id for s in sites], seed=args.seed)

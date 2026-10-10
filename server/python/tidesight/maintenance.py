@@ -21,7 +21,7 @@ from .config import Config
 from .enrich.raw import raw_paths
 from .storage import EVENTS_MIGRATIONS, REPLAY_MIGRATIONS, connect, migrate
 
-DB_FILES = ("events.db", "replay.db", "derived.db")
+DB_FILES = ("events.db", "replay.db", "derived.db", "search.db")
 DAY_MS = 86400000
 
 
@@ -37,6 +37,9 @@ def _db(cfg: Config, name: str, readonly: bool = False) -> Optional[sqlite3.Conn
             migrate(conn, EVENTS_MIGRATIONS)
         elif name == "replay.db":
             migrate(conn, REPLAY_MIGRATIONS)
+        elif name == "search.db":
+            from .searchengines import SEARCH_MIGRATIONS
+            migrate(conn, SEARCH_MIGRATIONS)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -53,12 +56,13 @@ def _utc_day_start(day: str) -> int:
 def backup(cfg: Config, dest: Optional[str] = None, keep: int = 7, with_replay: bool = False,
            with_derived: bool = False, with_archives: bool = False) -> Dict[str, Any]:
     """Consistent online copies (SQLite backup API), gzip-compressed, rotated: the raw data, the dashboard's own
-    data (web.db: segments, notes) and the settings kept in the data directory (properties, users)."""
+    data (web.db: segments, notes), the search engines' figures (search.db: they cannot be fetched again beyond 16
+    months) and the settings kept in the data directory (properties, users, search engine accounts)."""
     root = dest or os.path.join(cfg.data_dir, "backups")
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     target = os.path.join(root, stamp)
     os.makedirs(target, exist_ok=True)
-    names = (["events.db", "web.db"] + (["replay.db"] if with_replay else [])
+    names = (["events.db", "web.db", "search.db"] + (["replay.db"] if with_replay else [])
              + (["derived.db"] if with_derived else []))
     if with_archives:
         names += [os.path.join("archive", os.path.basename(p)) for p in raw_paths(cfg.data_dir)
@@ -81,7 +85,7 @@ def backup(cfg: Config, dest: Optional[str] = None, keep: int = 7, with_replay: 
             shutil.copyfileobj(fin, fout, 1024 * 1024)
         os.remove(tmp)
         done.append({"file": name, "gz_mb": round(os.path.getsize(tmp + ".gz") / 1e6, 2)})
-    for name in ("properties.json", "users.json"):  # written atomically: a plain copy is consistent
+    for name in ("properties.json", "users.json", "search-engines.json"):  # written atomically: a plain copy is consistent
         src_path = os.path.join(cfg.data_dir, name)
         if os.path.exists(src_path):
             shutil.copy2(src_path, os.path.join(target, name))
@@ -352,6 +356,17 @@ def purge_site(cfg: Config, site_id: str, apply: bool = False) -> Dict[str, Any]
                 rows["%s:%s" % (name, table)] = n
         finally:
             conn.close()
+    sconn = _db(cfg, "search.db")
+    if sconn is not None:
+        try:
+            for table in ("search_rows", "search_totals", "search_days", "search_state"):
+                n = count(sconn, table)
+                if apply and n:
+                    _delete_in_batches(sconn, table, "site_id = ?", (site_id,))
+                if n:
+                    rows["search.db:" + table] = n
+        finally:
+            sconn.close()
     rconn = _db(cfg, "replay.db")
     if rconn is not None:
         try:
@@ -480,6 +495,8 @@ EXPORTS = {
     "daily": ("derived.db", "SELECT * FROM daily WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY day"),
     "visitors": ("derived.db", "SELECT * FROM visitors WHERE site_id = ? AND last_seen >= ? AND last_seen < ? "
                                "ORDER BY last_seen"),
+    "search": ("search.db", "SELECT engine, day, query, page, clicks, impressions, position FROM search_rows "
+                            "WHERE site_id = ? AND day BETWEEN ? AND ? ORDER BY engine, day, clicks DESC"),
     "raw": ("events.db", "SELECT h.*, r.ip, r.headers, r.envelope, r.site_status, r.endpoint FROM raw_hits h "
                          "JOIN raw_requests r ON r.id = h.request_id WHERE h.site_id = ? AND h.received_at >= ? "
                          "AND h.received_at < ? ORDER BY h.id"),
@@ -522,6 +539,10 @@ EXPORT_INFO: Dict[str, Dict[str, str]] = {
                  "description": "One row per visitor seen in the period (last visit, UTC days): first and last seen, "
                                 "visits, pageviews, engaged time, user id and linked browser ids.",
                  "count": "SELECT COUNT(*) FROM visitors WHERE site_id = ? AND last_seen >= ? AND last_seen < ?"},
+    "search": {"label": "Search engine queries", "db": "search.db",
+               "description": "One row per engine, day, query and page from Google Search Console and Bing Webmaster "
+                              "Tools: clicks, impressions, average position (Google's days are Pacific Time days).",
+               "count": "SELECT COUNT(*) FROM search_rows WHERE site_id = ? AND day BETWEEN ? AND ?"},
     "raw": {"label": "Raw hits", "db": "events.db",
             "description": "Every hit exactly as received (UTC days), with its request's IP address, headers and "
                            "envelope. Unfiltered and large: for audits, re-processing or moving to another tool.",

@@ -15,6 +15,8 @@
     python -m tidesight.jobs --config … user set NAME [--role viewer] | user link NAME | user remove NAME | user list
     python -m tidesight.jobs --config … setup-link        # the dashboard's first-account form, code filled in
     python -m tidesight.jobs --config … update [--check | --install [VERSION] | --rollback]
+    python -m tidesight.jobs --config … search [status | import | connect google FILE | connect bing KEY | sites ENGINE |
+                                               disconnect ENGINE]
     python -m tidesight.jobs hash-password
 
 Run with server/python on PYTHONPATH (or from that directory).
@@ -75,7 +77,8 @@ def cmd_load_spool(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
 
 def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     """Load the spool (if any), enrich within a time budget, roll up; delete the data of properties deleted in the
-    dashboard; refresh [server] resolved_config_file. Safe to run every minute."""
+    dashboard; import what search engines have new; refresh [server] resolved_config_file. Safe to run every
+    minute."""
     from .enrich import pipeline
     from .maintenance import purge_queued
     out: Dict[str, Any] = {}
@@ -98,6 +101,15 @@ def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         result = webcheck.check(cfg)
         if result.get("exposed") or result.get("unverified") or result.get("warnings"):
             out["web_check"] = result
+    # Google's and Bing's figures, for the properties linked to them: what is due, within a time budget.
+    from . import searchengines
+    try:
+        imported = searchengines.run(cfg, max_seconds=min(30.0, max(5.0, args.max_seconds * 0.6)))
+    except Exception as exc:  # never in the way of what follows (updates)
+        log.exception("search engine import failed")
+        imported = {"error": str(exc)}
+    if imported:
+        out["search_engines"] = imported
     # New releases: looked for once a day; one an admin asked for is installed last, when nothing else runs here.
     from . import updates
     if updates.settle(cfg):  # the code an update installed: as private as the code it replaced
@@ -345,6 +357,43 @@ def cmd_update(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         raise SystemExit("No update: %s" % exc)
 
 
+def cmd_search(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
+    """Search engines (docs/search-engines.md): the accounts, the imports, the sites an account sees."""
+    from . import searchengines as se
+    action = args.action
+    try:
+        if action == "status":
+            out: Dict[str, Any] = {"accounts": se.describe(se.credentials(cfg.data_dir)), "properties": {}}
+            for sid in sorted(cfg.sites):
+                links = {e: cfg.sites[sid].settings[se.SETTINGS[e]] for e in se.ENGINES
+                         if cfg.sites[sid].settings[se.SETTINGS[e]]}
+                if links:
+                    out["properties"][sid] = {"linked": links, "imports": se.status(cfg, sid)}
+            return out
+        if action == "import":
+            return se.run(cfg, max_seconds=args.max_seconds, site_id=args.site, engine=args.engine, force=True)                 or {"nothing": "no property is linked to a connected search engine"}
+        engine = args.engine or (args.values[0] if args.values else None)
+        if engine not in se.ENGINES:
+            raise SystemExit("Name the engine: search %s google|bing" % action)
+        if action == "sites":
+            return {"sites": se.engine_sites(cfg, engine)}
+        if action == "disconnect":
+            return {"disconnected": engine} if se.disconnect_engine(cfg, engine) else {"not_connected": engine}
+        if action == "connect":
+            rest = args.values[1:] if args.values and args.values[0] == engine else args.values
+            if not rest:
+                raise SystemExit("connect google KEY_FILE.json | connect bing API_KEY")
+            value = rest[0]
+            if engine == "google":
+                with open(value, "r", encoding="utf-8") as fh:
+                    value = fh.read()
+            found = se.connect_engine(cfg, engine, value, "jobs.py")
+            return {"connected": engine, "account": se.describe(se.credentials(cfg.data_dir))[engine], **found}
+    except se.SearchEngineError as exc:
+        raise SystemExit("%s: %s" % (se.LABELS.get(args.engine or "", "Search engines"), exc))
+    raise SystemExit("unknown action")
+
+
 def cmd_setup_link(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     """The address that opens the dashboard's first-account form with the setup code filled in."""
     if cfg.dashboard["users"]:
@@ -430,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("export", help="export derived data as CSV or JSON")
     p.add_argument("--site", required=True)
     p.add_argument("--what", default="sessions", choices=["sessions", "pageviews", "events", "visitors", "daily",
-                                                          "errors", "vitals", "clicks", "forms", "raw"])
+                                                          "errors", "vitals", "clicks", "forms", "search", "raw"])
     p.add_argument("--from", dest="start", default=None, help="first day (YYYY-MM-DD)")
     p.add_argument("--to", dest="end", default=None, help="last day (YYYY-MM-DD)")
     p.add_argument("--format", default="csv", choices=["csv", "json", "jsonl"])
@@ -467,6 +516,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--install", nargs="?", const="latest", default=None, help="install a release now (default: the latest)")
     p.add_argument("--rollback", action="store_true", help="go back to the code the last update replaced")
     p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("search", help="search engines: status, import now, connect an account, the sites it sees")
+    p.add_argument("action", choices=["status", "import", "connect", "sites", "disconnect"])
+    p.add_argument("values", nargs="*", help="connect: ENGINE KEY_FILE|API_KEY; sites, disconnect: ENGINE")
+    p.add_argument("--site", default=None, help="import: only this property")
+    p.add_argument("--engine", choices=["google", "bing"], default=None)
+    p.add_argument("--max-seconds", type=float, default=300.0, help="import: time budget (default 300)")
+    p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("setup-link", help="the address of the dashboard's first-account form, setup code included")
     p.set_defaults(func=cmd_setup_link)

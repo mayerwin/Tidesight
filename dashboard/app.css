@@ -477,7 +477,7 @@ input.switch:disabled { opacity: 0.5; cursor: default; }
 
 /* ---- KPI tiles ----------------------------------------------------------- */
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); border-bottom: 1px solid var(--grid); margin: -4px -2px 12px; }
-.tile { text-align: left; border: 0; background: none; padding: 10px 12px 12px; cursor: pointer; border-radius: 8px 8px 0 0; position: relative; color: var(--ink); }
+.tile { display: flex; flex-direction: column; justify-content: flex-start; text-align: left; border: 0; background: none; padding: 10px 12px 12px; cursor: pointer; border-radius: 8px 8px 0 0; position: relative; color: var(--ink); }
 .tile:hover { background: var(--hover); }
 .tile[aria-pressed="true"]::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: -1px; height: 2px; background: var(--s1); border-radius: 2px; }
 .tile-label { color: var(--ink-2); font-size: 12.5px; }
@@ -785,3 +785,48 @@ details.advanced[open] summary { margin-bottom: 12px; }
 .demo-get { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 8px; background: var(--ink); color: var(--surface); font-weight: 600; text-decoration: none; }
 .demo-get .gh-mark { margin: 0; vertical-align: 0; }
 .demo-get:hover { opacity: .9; }
+
+/* ---- search engines ---- */
+.seo-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.seo-top > .note { flex: 1 1 260px; text-align: right; }
+.cell-delta { display: inline-flex; gap: 6px; align-items: baseline; justify-content: flex-end; }
+.page-cell { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; }
+.page-cell .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn.small { padding: 2px; }
+.icon-btn.small svg { width: 14px; height: 14px; }
+.setup-steps { margin: 6px 0 0; padding-left: 22px; display: flex; flex-direction: column; gap: 14px; }
+.setup-steps li::marker { font-weight: 600; color: var(--s1); }
+.setup-steps p { margin: 3px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.5; }
+.setup-steps .input { margin-top: 8px; }
+.key-input { width: 100%; box-sizing: border-box; font-size: 12px; resize: vertical; }
+.row-actions-end { display: flex; justify-content: flex-end; margin-top: 8px; }
+.engine-account { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0 4px; }
+.engine-account .copy-field { min-width: 0; }
+.picker-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.picker-row select { flex: 1 1 220px; min-width: 0; }
+.stack.tight { gap: 6px; margin-top: 8px; }
+.import-status { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+
+/* ---- paths ---- */
+.paths-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.paths-bar .page-input { flex: 1 1 200px; max-width: 360px; min-width: 0; }
+.sankey-scroll { overflow-x: auto; padding-bottom: 6px; }
+.sankey { display: block; }
+.sk-step { font-size: 11px; fill: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.sk-band { opacity: 0.16; transition: opacity 0.12s; }
+.sk-band:hover, .sk-band.on, .sk-band:focus { opacity: 0.42; outline: none; }
+.sk-node { cursor: pointer; }
+.sk-node.other { cursor: default; }
+.sk-node:focus { outline: none; }
+.sk-hit { fill: transparent; pointer-events: all; }
+.sk-node:hover > .sk-bar, .sk-node:focus > .sk-bar { stroke: var(--ink); stroke-width: 1.5; }
+.sk-label { font-size: 12px; fill: var(--ink); }
+.sk-count { fill: var(--muted); font-variant-numeric: tabular-nums; }
+.transition-page { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.transition-page code { font-size: 14px; word-break: break-all; }
+.transition-views b { font-size: 28px; font-weight: 600; }
+.transition-facts { list-style: none; padding: 0; margin: 12px 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.transition-facts b { color: var(--ink); }
+.sub-head { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 16px 0 2px; font-weight: 600; }
+.sub-head:first-child { margin-top: 0; }
+@media (prefers-reduced-motion: reduce) { .sk-band { transition: none; } }

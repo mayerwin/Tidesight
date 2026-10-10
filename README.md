@@ -95,7 +95,13 @@ Visitors appear on the Realtime page within seconds; reports fill in as the cron
 
 <img alt="Realtime: visitors in the last five minutes, pageviews per minute, active pages and referrers" src="docs/images/realtime.png">
 
-### 6. Invite your team, stay up to date
+### 6. See what people searched for
+
+Connect Google Search Console and Bing Webmaster Tools once (free, about ten minutes, step by step in the property's **Search engines** settings: [`docs/search-engines.md`](docs/search-engines.md)), and the **Search engines** report shows the queries that bring visitors, with clicks, impressions and positions, next to the visits, bounce rate and conversions of each landing page.
+
+<img alt="The Search engines report: clicks, impressions, CTR, average position and visits, their trend, and the queries with their changes" src="docs/images/search-engines.png">
+
+### 7. Invite your team, stay up to date
 
 Admins invite people from the **Users** page with one-time links (no email involved) and choose their role: admin or viewer. Once a day Tidesight looks for a new release; an admin clicks **Update**, and the next cron run downloads it, checks it, puts it in place and keeps the previous version for a rollback. The tracking code on your sites never changes: `ts.js` is served by Tidesight, so it follows.
 
@@ -103,7 +109,7 @@ Admins invite people from the **Users** page with one-time links (no email invol
 
 ## The dashboard
 
-Overview, realtime, acquisition (channels, sources, mediums, campaigns, referrers), content (pages, entry and exit pages, titles, error pages), locations, technology, events and their properties, goals and conversions, an explorer for any dimension, funnels, retention cohorts, heatmaps (clicks, rage and dead clicks, mouse, scroll reach), replays, forms, site search, Web Vitals, errors, visits with a timeline, visitor profiles, properties, people and a status page.
+Overview, realtime, acquisition (channels, sources, mediums, campaigns, referrers), search engines (Google Search Console and Bing Webmaster Tools: queries, clicks, impressions, positions, landing pages), content (pages, entry and exit pages, titles, error pages), locations, technology, events and their properties, goals and conversions, an explorer for any dimension, funnels, paths (a flow of the visits' pages, and what comes before and after a page), retention cohorts, heatmaps (clicks, rage and dead clicks, mouse, scroll reach), replays, forms, site search, Web Vitals, errors, visits with a timeline, visitor profiles, properties, people and a status page.
 
 - **Analysis as in the big tools:** compare any period with the previous one, the same days a year before or any range (dashed in charts, changes everywhere); filter every report by any dimension with `is`, `is not`, `contains`, `does not contain`, `starts with`, or with a click on a row; save filters as segments; mark days with annotations; set goals and see their conversions in every report.
 - **Report tables** with server-side sort, search and paging, totals and shares, a second dimension, a column chooser, row actions, up to five rows plotted over time, and every matching row exported to Excel, CSV, TSV or JSON. An export dialog says exactly what each download holds, raw datasets included.
@@ -127,6 +133,11 @@ Overview, realtime, acquisition (channels, sources, mediums, campaigns, referrer
     <td width="50%"><img alt="A funnel from the home page to a product, add to cart, checkout and purchase" src="docs/images/funnels.png"></td>
   </tr>
   <tr><td align="center">Visit timeline</td><td align="center">Funnels</td></tr>
+  <tr>
+    <td width="50%"><img alt="Paths: a flow of the visits' first four pages, with bands from page to page" src="docs/images/paths.png"></td>
+    <td width="50%"><img alt="Search engines report, landing pages: clicks, impressions, CTR and position from Google, with the visits, bounce rate and engaged time Tidesight recorded" src="docs/images/search-pages.png"></td>
+  </tr>
+  <tr><td align="center">Paths</td><td align="center">Search engines and landing pages</td></tr>
   <tr>
     <td width="50%"><img alt="World map shaded by visitors per country, with city markers" src="docs/images/locations.png"></td>
     <td width="50%"><img alt="Core Web Vitals at the 75th percentile, their daily trend and per page" src="docs/images/performance.png"></td>
@@ -199,6 +210,7 @@ Contributors and coding agents: start with [`AGENTS.md`](AGENTS.md) and [`CONTRI
 - [Data-point catalogue](docs/datapoints.md)
 - [Configuration](docs/configuration.md)
 - [Deploying on Dreamhost](docs/deploy-dreamhost.md)
+- [Search engines: Google Search Console and Bing](docs/search-engines.md)
 - [Privacy mode and clean-up jobs](docs/privacy.md)
 - [Connectors and writing a new one](docs/connectors.md)
 - [Roadmap](docs/roadmap.md)

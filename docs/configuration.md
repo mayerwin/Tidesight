@@ -128,6 +128,8 @@ The dashboard signs in with a form and a session cookie (`ts_login`: HttpOnly, `
 | `public_metrics` | `["visitors", "pageviews", "pages", "sources", "countries", "devices"]` | What the public page shows (`events` and `realtime` can be added). |
 | `share_token` | `""` | When set, the public page requires `?t=<token>`. |
 | `max_hits_per_day` | `0` (off) | Stored hits per UTC day; beyond it, requests for the site answer 429 until midnight UTC. Off by default: anyone can send hits, so a flood could use the quota up and lock real visitors out for the rest of the day. Set it when bounded storage matters more than availability. |
+| `search_console` | `""` | The Search Console property whose figures `jobs.py cron` imports, as Search Console names it: `"sc-domain:example.com"` (a domain property) or `"https://www.example.com/"` (a URL prefix). Needs the Google account connected in the dashboard or with `jobs.py search connect google` (`docs/search-engines.md`). |
+| `bing_site` | `""` | The Bing Webmaster Tools site imported likewise, e.g. `"https://www.example.com/"`. |
 | `goals` | `[]` | Conversions: `[{name = "Signup", type = "event", match = "signup"}, {name = "Thank you", type = "page", match = "/thank-you*"}]`. A visit converts when it sends a custom event, or views a page, matching `match` (`*` matches anything; `?` and `[` are literal). Each goal gets an `id` from its name (or `id = "…"`). Reports then show conversions and conversion rates (`docs/api.md`); the dashboard edits them for its own properties. |
 
 ### Limits and abuse protection

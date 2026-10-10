@@ -1,4 +1,4 @@
-// A property's settings: general, tracking code (with what arrives and what is refused), goals, data collection,
+// A property's settings: general, tracking code (with what arrives and what is refused), goals, search engines, data collection,
 // privacy, public sharing, and deletion. Properties defined in the configuration file are shown read-only.
 import { collectorBase, send } from '../api.js';
 import { card, columnChart, el, icon } from '../charts.js';
@@ -7,11 +7,12 @@ import * as fmt from '../fmt.js';
 import { refreshSites } from '../main.js';
 import { go, hrefFor } from '../state.js';
 import { confirm, copyText, field, segmented, tagInput, toast, toggle } from '../ui.js';
+import { searchEngines } from './property-search.js';
 import { cleanDomain, statusOf, validDomain, zoneSelect } from './properties.js';
 
 const TABS = [
   { key: 'general', label: 'General' }, { key: 'tracking', label: 'Tracking code' }, { key: 'goals', label: 'Goals' },
-  { key: 'collection', label: 'Data collection' }, { key: 'privacy', label: 'Privacy' }, { key: 'sharing', label: 'Sharing' },
+  { key: 'search', label: 'Search engines' }, { key: 'collection', label: 'Data collection' }, { key: 'privacy', label: 'Privacy' }, { key: 'sharing', label: 'Sharing' },
   { key: 'danger', label: 'Delete' },
 ];
 
@@ -101,7 +102,7 @@ export async function render(root, ctx) {
       return null;
     }
   };
-  const view = { general, tracking, goals, collection, privacy, sharing, danger }[tab];
+  const view = { general, tracking, goals, search: searchEngines, collection, privacy, sharing, danger }[tab];
   await view(root, ctx, p, { disabled, save });
 }
 

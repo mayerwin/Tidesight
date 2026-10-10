@@ -22,7 +22,7 @@ export function niceTicks(max, count = 4, integer = false) {
   return ticks;
 }
 
-function observeWidth(container, draw) {
+export function observeWidth(container, draw) {
   let last = 0;
   if (container._ro) container._ro.disconnect();
   const ro = new ResizeObserver(() => {

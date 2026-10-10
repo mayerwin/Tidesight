@@ -47,6 +47,7 @@ MAX_DECODED_PER_CALL = 128 * 1024 * 1024
 MAX_OBJECTS_PER_CALL = 600000
 MAX_RAW_HIT = 65536  # raw hit payloads larger than this are not decoded for the session timeline
 PUBLIC_MIN_VISITORS = 3  # public rows and buckets with fewer visitors are hidden (no singling out)
+MAX_PATH_SESSIONS = 300000  # visits one paths report reads (beyond, it says it is truncated)
 
 
 def public_dims(site: "SiteConfig") -> set:
@@ -205,7 +206,8 @@ class Api:
         sites = [{"id": s.id, "name": s.name, "label": s.display_name, "domains": site_hosts(s.origins),
                   "timezone": s.timezone, "public": bool(s.settings["public"]), "managed": s.managed,
                   "public_metrics": s.settings["public_metrics"] if s.settings["public"] else [],
-                  "origins": [o for o in s.origins if "*" not in o], "goals": s.settings.get("goals") or []}
+                  "origins": [o for o in s.origins if "*" not in o], "goals": s.settings.get("goals") or [],
+                  "search": {"google": bool(s.settings["search_console"]), "bing": bool(s.settings["bing_site"])}}
                  for s in sorted(self.cfg.sites.values(), key=lambda x: x.display_name.lower())]
         first: Dict[str, str] = {}
         conn = self._conn("derived.db")
@@ -220,7 +222,7 @@ class Api:
             s["first_day"] = first.get(s["id"])
         if public:
             # A public page names its site by its name or id, never by a host name the origins would reveal.
-            sites = [dict(s, origins=[], domains=[], goals=[], label=s["name"] or s["id"]) for s in sites
+            sites = [dict(s, origins=[], domains=[], goals=[], search={}, label=s["name"] or s["id"]) for s in sites
                      if s["id"] == params.get("site")]
             return {"sites": sites, "version": __version__, "repository": __repository__}
         return {"sites": sites, "version": __version__, "repository": __repository__, "freshness": self._freshness()}
@@ -640,6 +642,253 @@ class Api:
                         "from_previous": round(reached[i] / prev, 4) if prev else None,
                         "median_ms": _percentile(times[i], 0.5)})
         return {"steps": out, "sessions_considered": len(timeline)}
+
+    # -- paths ----------------------------------------------------------------------------
+
+    def _sequences(self, conn: sqlite3.Connection, q: Query) -> Iterable[Tuple[List[str], str]]:
+        """Each visit's pages in order (a page seen again at once, a reload, is one step), with its channel."""
+        where, args = q.session_where("s")
+        cur = conn.execute(
+            "SELECT p.session_key, p.path, s.channel FROM pageviews p CROSS JOIN sessions s ON s.session_key = p.session_key "
+            "WHERE p.site_id = ? AND p.day BETWEEN ? AND ? AND " + where + " ORDER BY p.session_key, p.ts, p.seq",
+            [q.site_id, q.start, q.end] + args)
+        key, seq, channel, n = None, [], "", 0
+        for sk, path, ch in cur:
+            if sk != key:
+                if seq:
+                    yield seq, channel
+                n += 1
+                if n > MAX_PATH_SESSIONS:
+                    self._paths_truncated = True
+                    return
+                key, seq, channel = sk, [], ch or "(none)"
+            p = path or "/"
+            if not seq or seq[-1] != p:
+                seq.append(p)
+        if seq:
+            yield seq, channel
+
+    def ep_paths(self, params: Dict[str, str], public: bool) -> Any:
+        """Paths through the site. mode=flow: the first `steps` pages of visits, `width` pages per step (the rest
+        grouped), from their entry, from a page (start), or back from a page (end). mode=transitions: what comes
+        before and after a page (page). Paths ending in * match every path that starts with the rest."""
+        q = self.q(params, public)
+        mode = params.get("mode", "flow")
+        if mode not in ("flow", "transitions"):
+            raise ApiError(400, "mode is flow or transitions")
+        try:
+            steps = max(2, min(8, int(params.get("steps", 4))))
+            width = max(2, min(15, int(params.get("width", 6))))
+        except ValueError:
+            raise ApiError(400, "steps and width are whole numbers")
+
+        def matcher(pattern: Optional[str]) -> Optional[Callable[[str], bool]]:
+            if not pattern:
+                return None
+            pattern = pattern[:2000]
+            if pattern.endswith("*") and "*" not in pattern[:-1]:
+                prefix = pattern[:-1]
+                return lambda p: p.startswith(prefix)
+            return lambda p: p == pattern
+
+        self._paths_truncated = False
+        conn = self.derived()
+        try:
+            if mode == "transitions":
+                page = params.get("page") or ""
+                if not page:
+                    raise ApiError(400, "missing page (a path, e.g. /pricing)")
+                return dict(self._transitions(conn, q, matcher(page), page), truncated=self._paths_truncated)
+            start, end = matcher(params.get("start")), matcher(params.get("end"))
+            if start and end:
+                raise ApiError(400, "a flow starts at a page or ends at one, not both")
+            return dict(self._flow(conn, q, steps, width, start, end), start=params.get("start") or None,
+                        end=params.get("end") or None, truncated=self._paths_truncated)
+        finally:
+            conn.close()
+
+    def _flow(self, conn: sqlite3.Connection, q: Query, steps: int, width: int,
+              start: Optional[Callable[[str], bool]], end: Optional[Callable[[str], bool]]) -> Dict[str, Any]:
+        counts: List[Counter] = [Counter() for _ in range(steps)]
+        ends: List[Counter] = [Counter() for _ in range(steps)]  # visits whose path stops at this step
+        links: Counter = Counter()
+        considered = 0
+        for seq, _channel in self._sequences(conn, q):
+            if start or end:
+                hit = next((i for i, p in enumerate(seq) if (start or end)(p)), None)
+                if hit is None:
+                    continue
+                seq = seq[hit:] if start else list(reversed(seq[:hit + 1]))
+            considered += 1
+            shown = seq[:steps]
+            for i, p in enumerate(shown):
+                counts[i][p] += 1
+            for i in range(len(shown) - 1):
+                links[(i, shown[i], shown[i + 1])] += 1
+            if len(seq) <= steps:
+                ends[len(seq) - 1][seq[-1]] += 1
+        keep = [{p for p, _ in c.most_common(width)} for c in counts]
+        other = "(other pages)"
+
+        def name(i: int, p: str) -> str:
+            return p if p in keep[i] else other
+
+        out_steps = []
+        for i in range(steps):
+            nodes: Dict[str, Dict[str, Any]] = {}
+            for p, n in counts[i].items():
+                node = nodes.setdefault(name(i, p), {"id": "%d|%s" % (i, name(i, p)), "value": name(i, p),
+                                                     "visits": 0, "ends": 0, "other": name(i, p) == other})
+                node["visits"] += n
+                node["ends"] += ends[i].get(p, 0)
+            if other in nodes:
+                nodes[other]["pages"] = sum(1 for p in counts[i] if p not in keep[i])
+            out_steps.append({"nodes": sorted(nodes.values(), key=lambda x: (x["other"], -x["visits"], x["value"]))})
+        merged: Counter = Counter()
+        for (i, a, b), n in links.items():
+            merged[("%d|%s" % (i, name(i, a)), "%d|%s" % (i + 1, name(i + 1, b)))] += n
+        return {"mode": "flow", "direction": "backward" if end else "forward", "sessions": considered,
+                "steps": [s for s in out_steps if s["nodes"]],
+                "links": [{"source": a, "target": b, "visits": n} for (a, b), n in merged.most_common()]}
+
+    def _transitions(self, conn: sqlite3.Connection, q: Query, match: Callable[[str], bool], page: str) -> Dict[str, Any]:
+        before: Counter = Counter()
+        after: Counter = Counter()
+        entrances: Counter = Counter()
+        views = exits = 0
+        for seq, channel in self._sequences(conn, q):
+            for i, p in enumerate(seq):
+                if not match(p):
+                    continue
+                views += 1
+                if i:
+                    before[seq[i - 1]] += 1
+                else:
+                    entrances[channel] += 1
+                if i < len(seq) - 1:
+                    after[seq[i + 1]] += 1
+                else:
+                    exits += 1
+
+        def top(c: Counter, n: int = 15) -> List[Dict[str, Any]]:
+            rows = [{"value": k, "visits": v} for k, v in c.most_common(n)]
+            rest = sum(c.values()) - sum(r["visits"] for r in rows)
+            if rest:
+                rows.append({"value": "(other pages)", "visits": rest, "other": True, "pages": len(c) - len(rows)})
+            return rows
+
+        return {"mode": "transitions", "page": page, "views": views, "entrances": top(entrances),
+                "entrance_total": sum(entrances.values()), "previous": top(before), "next": top(after), "exits": exits}
+
+    # -- search engines --------------------------------------------------------------------
+
+    def ep_seo(self, params: Dict[str, str], public: bool) -> Any:
+        """Google's and Bing's figures for a property (searchengines.py): clicks, impressions, CTR and average
+        position per day, and per query, page, country or device (tab), for one query or page if asked; with the
+        organic visits Tidesight saw from the engine."""
+        from . import searchengines as se
+        q = self.q(params, public)
+        tab = params.get("tab") or "queries"
+        if tab not in se.TABS:
+            raise ApiError(400, "tab is queries, pages, countries or devices")
+        query = (params.get("query") or "")[:se.MAX_TEXT] or None
+        page = (params.get("page") or "")[:se.MAX_TEXT] or None
+        creds = se.credentials(self.cfg.data_dir)
+        conn = se.open_readonly(self.cfg.data_dir)
+        out: Dict[str, Any] = {"from": q.start, "to": q.end, "tab": tab, "query": query, "page": page, "rows": [],
+                               "series": [], "totals": None, "engine": None}
+        try:
+            engines = []
+            for e in se.ENGINES:
+                first, last = se.span(conn, q.site_id, e) if conn is not None else (None, None)
+                engines.append({"id": e, "label": se.LABELS[e], "connected": e in creds,
+                                "linked": bool(q.site.settings.get(se.SETTINGS[e])), "first_day": first, "last_day": last})
+            out["engines"] = engines
+            usable = [x["id"] for x in engines if x["last_day"]]
+            engine = params.get("engine") if params.get("engine") in usable else (usable[0] if usable else None)
+            if engine is None or conn is None:
+                return out
+            out["engine"] = engine
+            args = (conn, q.site_id, engine)
+            totals = se.totals(*args, q.start, q.end, query, page)
+            days = se.series(*args, q.start, q.end, query, page)
+            blank = {"clicks": 0, "impressions": 0, "ctr": None, "position": None}
+            latest = next(x["last_day"] for x in engines if x["id"] == engine)
+            gone = {"clicks": None, "impressions": None, "ctr": None, "position": None}  # not reported yet
+            out["series"] = [dict(days.get(d) or (blank if d <= latest else gone), t=d) for d in _days(q.start, q.end)]
+            cq = q.comparison()
+            prev_q = cq or q.previous()
+            prev = se.totals(*args, prev_q.start, prev_q.end, query, page)
+            if cq is not None:
+                cdays = se.series(*args, cq.start, cq.end, query, page)
+                out["compare"] = {"from": cq.start, "to": cq.end, "totals": prev,
+                                  "series": [dict(cdays.get(d) or blank, t=d) for d in _days(cq.start, cq.end)]}
+            if (tab in ("countries", "devices") and (query or page)) or (engine == "bing" and tab == "pages" and query) \
+                    or (engine == "bing" and tab == "queries" and page):
+                rows, total_rows = [], 0  # the engine does not break these down this way
+            else:
+                rows, total_rows = se.rows(*args, q.start, q.end, tab, query, page, limit=q.limit(1000, 5000))
+            if cq is not None and rows:
+                found = {r["value"]: r for r in se.rows(*args, cq.start, cq.end, tab, query, page,
+                                                         values=[r["value"] for r in rows])[0]}
+                for r in rows:
+                    r["cmp"] = {k: v for k, v in (found.get(r["value"]) or blank).items() if k != "value"}
+            out.update(totals=totals, previous=prev, rows=rows, total_rows=total_rows,
+                       coverage=se.coverage(*args, q.start, q.end, totals["clicks"]) if not (query or page) else None,
+                       days_late=max(0, (datetime.strptime(q.end, "%Y-%m-%d") - datetime.strptime(
+                           next(x["last_day"] for x in engines if x["id"] == engine), "%Y-%m-%d")).days))
+        finally:
+            if conn is not None:
+                conn.close()
+        self._seo_visits(q, out, engine, page, prev_q, params)
+        return out
+
+    def _seo_visits(self, q: Query, out: Dict[str, Any], engine: str, page: Optional[str], prev_q: Query,
+                    params: Dict[str, str]) -> None:
+        """Tidesight's side of the engine's figures: the organic visits from it (in total, and per landing page)."""
+        from . import searchengines as se
+        dconn = self._conn("derived.db")
+        if dconn is None:
+            return
+        goal = q.goal()
+        source = se.SOURCES[engine]
+        try:
+            def visits(qq: Query, path: Optional[str]) -> int:
+                where, args = qq.session_where("s")
+                sql = "SELECT COUNT(*) FROM sessions s WHERE " + where + " AND s.medium = 'organic' AND s.source = ?"
+                args = args + [source]
+                if path is not None:
+                    sql, args = sql + " AND s.entry_path = ?", args + [path]
+                return dconn.execute(sql, args).fetchone()[0]
+
+            path = se.page_path(page) if page else None
+            out["totals"]["visits"] = visits(q, path)
+            out["previous"]["visits"] = visits(prev_q, path)
+            if out["tab"] != "pages" or not out["rows"]:
+                return
+            paths = sorted({se.page_path(r["value"]) for r in out["rows"]})
+            where, args = q.session_where("s")
+            gargs: List[Any] = []
+            conv = ", SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS conversions" % goal_condition(goal, gargs) if goal else ""
+            found: Dict[str, Dict[str, Any]] = {}
+            for i in range(0, len(paths), 500):
+                part = paths[i:i + 500]
+                for r in dconn.execute(
+                        "SELECT s.entry_path AS path, COUNT(*) AS visits, SUM(s.bounce) AS bounces, "
+                        "SUM(s.engaged_ms) AS engaged_ms" + conv + " FROM sessions s WHERE " + where +
+                        " AND s.medium = 'organic' AND s.source = ? AND s.entry_path IN (%s) GROUP BY s.entry_path"
+                        % ",".join("?" * len(part)), gargs + args + [source] + part):
+                    found[r["path"]] = dict(r)
+            for r in out["rows"]:
+                f = found.get(se.page_path(r["value"]))
+                r["path"] = se.page_path(r["value"])
+                r["visits"] = f["visits"] if f else 0
+                r["bounce_rate"] = round(f["bounces"] / f["visits"], 4) if f and f["visits"] else None
+                r["avg_engaged"] = round(f["engaged_ms"] / f["visits"]) if f and f["visits"] else None
+                if goal:
+                    r["conversions"] = f["conversions"] if f else 0
+        finally:
+            dconn.close()
 
     def ep_retention(self, params: Dict[str, str], public: bool) -> Any:
         q = self.q(params, public)
