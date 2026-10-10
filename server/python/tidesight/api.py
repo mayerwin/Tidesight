@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
-from . import __version__, webcheck
+from . import __repository__, __version__, webcheck
 from .config import Config, SiteConfig
 from .enrich.timeutil import local_day, zone
 
@@ -222,8 +222,8 @@ class Api:
             # A public page names its site by its name or id, never by a host name the origins would reveal.
             sites = [dict(s, origins=[], domains=[], goals=[], label=s["name"] or s["id"]) for s in sites
                      if s["id"] == params.get("site")]
-            return {"sites": sites, "version": __version__}
-        return {"sites": sites, "version": __version__, "freshness": self._freshness()}
+            return {"sites": sites, "version": __version__, "repository": __repository__}
+        return {"sites": sites, "version": __version__, "repository": __repository__, "freshness": self._freshness()}
 
     def _freshness(self) -> Dict[str, Any]:
         """When enrichment last ran and when the last hit arrived: the dashboard says how fresh its data is."""

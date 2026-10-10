@@ -7,7 +7,7 @@ Self-hosted web analytics that keeps every raw hit. Traffic ebbs and flows like 
   <img alt="The Tidesight dashboard: overview of a demo site with visitors, visits, pageviews, bounce rate and visit duration compared with the previous 30 days, a traffic chart with the previous period dashed, channels and top pages with their changes" src="docs/images/overview.png">
 </picture>
 
-- **Collect** with a small JavaScript tracker (`ts.js`, about 6 KB gzip) and plugins loaded on demand.
+- **Collect** with a small JavaScript tracker (`ts.js`, about 8 KB gzip) and plugins loaded on demand.
 - **Ingest** with a Python collector that uses only the standard library and appends every hit, raw, to SQLite. It runs on cheap shared hosting: FastCGI or CGI (or Passenger WSGI), cron, no daemons.
 - **Analyse** with re-runnable jobs that derive sessions, geography, devices, bots, channels and visitor identity, and a dashboard on top of a small JSON API.
 
@@ -29,11 +29,12 @@ Every family of data points and every heavy feature has a per-site switch, and b
 
 ## The dashboard
 
-Overview, realtime, acquisition (channels, sources, mediums, campaigns, referrers), content (pages, entry and exit pages, titles, error pages), locations, technology, events and their properties, goals and conversions, an explorer for any dimension, funnels, retention cohorts, heatmaps (clicks, rage and dead clicks, mouse, scroll reach), replays, forms, site search, Web Vitals, errors, visits with a timeline, visitor profiles, properties and a status page.
+Overview, realtime, acquisition (channels, sources, mediums, campaigns, referrers), content (pages, entry and exit pages, titles, error pages), locations, technology, events and their properties, goals and conversions, an explorer for any dimension, funnels, retention cohorts, heatmaps (clicks, rage and dead clicks, mouse, scroll reach), replays, forms, site search, Web Vitals, errors, visits with a timeline, visitor profiles, properties, people and a status page.
 
 - **Analysis as in the big tools:** compare any period with the previous one, the same days a year before or any range (dashed in charts, changes everywhere); filter every report by any dimension with `is`, `is not`, `contains`, `does not contain`, `starts with`, or with a click on a row; save filters as segments; mark days with annotations; set goals and see their conversions in every report.
 - **Report tables** with server-side sort, search and paging, totals and shares, a second dimension, a column chooser, row actions, up to five rows plotted over time, and every matching row exported to Excel, CSV, TSV or JSON. An export dialog says exactly what each download holds, raw datasets included.
 - **Properties managed in the dashboard:** add a site (domains, name, time zone, what to record) and get its tracking code with a live check of the first hit; change its settings, goals, privacy and public page; delete it with or without its data. A property is shown by its name, else by its most precise domain.
+- **People managed in the dashboard:** the first account is created with a setup code read on the server (so a bot finding a new install cannot claim it); admins then invite people with one-time links, set roles (admin or viewer) and send password links to those who forgot theirs. No email involved.
 - Sign-in page, a command palette (Ctrl/⌘ K) and keyboard shortcuts, a freshness indicator, light and dark themes, a table twin for every chart, optional public share pages. Everything it shows comes from a [JSON API](docs/api.md) that scripts can use too.
 
 <table>
@@ -86,7 +87,7 @@ Every command, the page markup (error pages, masking, elements to leave out), si
 
 ## Deploy
 
-On Dreamhost or any host with FastCGI (or plain CGI, or Passenger) and cron, follow [`docs/deploy-dreamhost.md`](docs/deploy-dreamhost.md): check the host with `tools/sqlite_host_test.py`, copy and edit [`config/tidesight.example.toml`](config/tidesight.example.toml), install `passenger_wsgi.py`, and add the cron lines. Updates are a `git pull`: database migrations run automatically, and when the way data is derived changes, the next enrichment rebuilds it from the raw hits.
+On Dreamhost or any host with FastCGI (or plain CGI, or Passenger) and cron, follow [`docs/deploy-dreamhost.md`](docs/deploy-dreamhost.md). Everything lives in one folder, the website's: the code in `app/`, the data in `data/` and the configuration (from [`config/tidesight.example.toml`](config/tidesight.example.toml)), behind an `.htaccess` that sends every request to the app; Tidesight checks from the outside that none of its files can be downloaded. Check the host with `tools/sqlite_host_test.py`, install `tidesight.fcgi` and the `.htaccess`, add the cron lines, and create the first account in the dashboard. Updates come from the dashboard: Tidesight looks for the latest GitHub release once a day, and an admin installs it with a click (the next cron run downloads, checks and swaps it in, keeping the previous code for a rollback); a `git clone` takes a `git pull`. Running processes pick the new code up by themselves, database migrations run automatically, and when the way data is derived changes, the next enrichment rebuilds it from the raw hits. The sites' tracking code never changes: the tracker is served by the Tidesight host, so it follows.
 
 A host that runs PHP but not Python web apps can ingest with the [PHP connector](server/php/README.md) and keep Python for the cron jobs only; [Node](server/node/README.md) and [Cloudflare Workers](server/worker/README.md) work too.
 
@@ -114,12 +115,12 @@ Besides the Python collector, connectors for **PHP**, **Node** and **Cloudflare 
 - **The collector is a public endpoint, so it is bounded:** body sizes and gzip expansion are capped. Each client (an IPv4 address or an IPv6 /64) has per-minute allowances for requests and kilobytes, with separate allowances for recordings. Once a client is over its allowance, its requests are refused before their body is even parsed. Junk traffic (unknown sites, wrong origins, malformed bodies) gets its own small allowance, so it cannot crowd out real data. An optional daily quota per site caps storage, and writes stop with a 503 when disk space runs low. Refusals are counted on the Status page ([details](docs/configuration.md#limits-and-abuse-protection)).
 - **The tracker cannot flood it either:** it caps its own events and uploads per minute, splits batches under the collector's size limit, and backs off on errors. It also trusts nothing on the host page: markup injected into a page cannot redirect it or make it load another script.
 - **No secrets are stored:** credentials and other sites' cookies are redacted from headers. Tokens, passwords, session ids and signatures in URLs are replaced by `redacted` before they leave the browser (and in the `Referer` the collector keeps). Form values are never collected, and session replays mask inputs and rich-text editors.
-- **The dashboard is protected:** people sign in with a form (PBKDF2 hashes, throttled guessing, an HttpOnly `SameSite=Strict` session cookie whose token is stored only as a hash and ends when the password changes); scripts may use HTTP Basic. Every change needs the dashboard's own header and origin, and only `[dashboard] admins` change properties. The API bounds the work hostile data can cause, and the pages have a strict Content Security Policy that keeps recordings from contacting other hosts. Public share pages are optional, token-protected, rate-limited, and never show figures for fewer than 3 visitors.
+- **The dashboard is protected:** people sign in with a form (PBKDF2 hashes, throttled guessing, an HttpOnly `SameSite=Strict` session cookie whose token is stored only as a hash and ends when the password changes); scripts may use HTTP Basic. Passwords travel over HTTPS only. Every change needs the dashboard's own header and origin, and only admins change properties and people. The API bounds the work hostile data can cause, and the pages have a strict Content Security Policy that keeps recordings from contacting other hosts. Public share pages are optional, token-protected, rate-limited, and never show figures for fewer than 3 visitors.
 - **Audited:** the collectors, the tracker and the dashboard went through adversarial security reviews, and every finding was fixed and covered by tests (`docs/roadmap.md`).
 
 ## Status
 
-Every phase of the plan is built and tested: collector, tracker, enrichment, behaviour plugins, session replay, dashboard and API, privacy mode and maintenance jobs, and the PHP, Node and Worker connectors. The hosting test passed on the production Dreamhost account (SQLite with WAL). Still open: the first deployment, and trying the PHP and Worker connectors on live hosts. See [`docs/roadmap.md`](docs/roadmap.md).
+Every phase of the plan is built and tested: collector, tracker, enrichment, behaviour plugins, session replay, dashboard and API, privacy mode and maintenance jobs, and the PHP, Node and Worker connectors. It runs on Dreamhost (FastCGI, SQLite with WAL, everything in one folder). Still open: trying the PHP and Worker connectors on live hosts. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Development
 
@@ -127,7 +128,7 @@ Every phase of the plan is built and tested: collector, tracker, enrichment, beh
 |---|---|
 | Python tests | `python -m pytest` |
 | Tracker build and browser tests | `cd tracker && npm install && npx playwright install chromium && npm test` |
-| Dashboard browser tests | `cd tracker && npm run test:dashboard` (demo data, two local servers) |
+| Dashboard browser tests | `cd tracker && npm run test:dashboard` (demo data, three local servers) |
 | Connector conformance | `TIDESIGHT_CONNECTORS=php python -m pytest server/python/tests/test_conformance.py` |
 
 Contributors and coding agents: start with [`AGENTS.md`](AGENTS.md).
@@ -149,4 +150,4 @@ Contributors and coding agents: start with [`AGENTS.md`](AGENTS.md).
 
 ## Licence
 
-MIT, see [`LICENSE`](LICENSE). Vendored third-party code keeps its own licence: rrweb and rrweb-player (MIT), the Fraunces and IBM Plex fonts (SIL OFL 1.1), and country outlines from Natural Earth via world-atlas (ISC). Geolocation databases are downloaded by the `geo-update` job, never bundled; DB-IP Lite data requires attribution (CC BY 4.0), which the dashboard shows.
+MIT, see [`LICENSE`](LICENSE). Vendored third-party code keeps its own licence: rrweb and rrweb-player (MIT), the Fraunces and IBM Plex fonts (SIL OFL 1.1), country outlines from Natural Earth via world-atlas (ISC), and the GitHub mark from Octicons (MIT). Geolocation databases are downloaded by the `geo-update` job, never bundled; DB-IP Lite data requires attribution (CC BY 4.0), which the dashboard shows.

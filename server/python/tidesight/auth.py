@@ -1,8 +1,9 @@
 """Password hashing, sign-in checks and their throttling (standard library only).
 
-Hashes look like ``pbkdf2_sha256$<iterations>$<salt>$<hash>`` (base64 salt and hash),
-created with ``python -m tidesight.jobs hash-password``. The dashboard signs in with a form (a session cookie,
-see wsgi.py and webdb.py); scripts may send HTTP Basic credentials with each request.
+Hashes look like ``pbkdf2_sha256$<iterations>$<salt>$<hash>`` (base64 salt and hash): users.py keeps those of the
+people managed in the dashboard, and ``python -m tidesight.jobs hash-password`` makes one for the configuration
+file. The dashboard signs in with a form (a session cookie, see wsgi.py and webdb.py); scripts may send HTTP Basic
+credentials with each request.
 """
 
 from __future__ import annotations
@@ -127,8 +128,9 @@ def _dummy_hash() -> str:
 
 
 class SharedThrottle:
-    """A Throttle kept in memory and in web.db at once: blocked when either is. In memory, it costs nothing under
-    Passenger; in web.db, it holds across processes (CGI starts one per request) and restarts."""
+    """A Throttle kept in memory and in web.db at once: blocked when either is. In memory, it costs nothing in a
+    long-lived process (FastCGI, Passenger); in web.db, it holds across processes (CGI starts one per request, FastCGI
+    may run several) and restarts."""
 
     def __init__(self, memory: Throttle, data_dir: str) -> None:
         from .webdb import WebDB

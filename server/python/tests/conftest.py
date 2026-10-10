@@ -161,3 +161,17 @@ def fake_site(cfg: Config, root: str, public_url: str, status: int = 200, health
 
     fetch.asked = asked  # type: ignore[attr-defined]
     return fetch
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """Tests never reach the internet: the release check, downloads and the outside web check get stand-ins
+    (a test that needs them passes its own)."""
+    from tidesight import updates, webcheck
+
+    def offline(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("no network in tests")
+
+    monkeypatch.setattr(updates, "_head", lambda url: (404, None))
+    monkeypatch.setattr(updates, "_download", offline)
+    monkeypatch.setattr(webcheck, "_fetch", offline)

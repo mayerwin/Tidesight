@@ -25,9 +25,9 @@ The visitor id is the backbone of sessions, so there is no switch to turn it off
 Rewrites data already stored. Every step is opt-in; the job is a **dry run unless `--apply` is given**, and with `--apply` it takes a backup first (unless `--no-backup`).
 
 ```sh
-cd ~/tidesight/server/python
-python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml privacy-clean --truncate-ip            # what would change
-python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml privacy-clean --truncate-ip --apply    # do it
+cd ~/stats.example.com/app/server/python
+python3 -m tidesight.jobs --config ~/stats.example.com/tidesight.toml privacy-clean --truncate-ip            # what would change
+python3 -m tidesight.jobs --config ~/stats.example.com/tidesight.toml privacy-clean --truncate-ip --apply    # do it
 ```
 
 | Option | Effect |
@@ -45,7 +45,7 @@ After an `--apply`, `derived.db` is marked stale; the next `enrich` run rebuilds
 Run the retention step from cron to enforce a window continuously:
 
 ```cron
-0 5 * * * cd ~/tidesight/server/python && python3 -m tidesight.jobs -q --config ~/tidesight/tidesight.toml privacy-clean --retention --apply --no-backup
+0 5 * * * cd ~/stats.example.com/app/server/python && python3 -m tidesight.jobs -q --config ~/stats.example.com/tidesight.toml privacy-clean --retention --apply --no-backup
 ```
 
 ## What is never stored
@@ -61,8 +61,8 @@ Run the retention step from cron to enforce a window continuously:
 Find their visitor key in the dashboard (Visitor page) or by user id, then delete the raw hits of the linked visitor ids (`vid_map`), and rebuild:
 
 ```sh
-sqlite3 ~/tidesight-data/events.db "DELETE FROM raw_hits WHERE visitor_id IN ('…','…');"
-python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml enrich --rebuild
+sqlite3 ~/stats.example.com/data/events.db "DELETE FROM raw_hits WHERE visitor_id IN ('…','…');"
+python3 -m tidesight.jobs --config ~/stats.example.com/tidesight.toml enrich --rebuild
 ```
 
 Replay chunks are keyed by `visitor_id` and `session_id` in `replay.db` (`DELETE FROM chunks WHERE visitor_id IN (…)`).
@@ -72,8 +72,8 @@ Replay chunks are keyed by `visitor_id` and `session_id` in `replay.db` (`DELETE
 In the dashboard, Properties → the property → Delete → "Delete its data": the property is removed at once, and the next `jobs.py cron` run deletes everything stored under its id (raw requests and hits, archives included, recordings, derived rows, its segments and notes), in short transactions. From the command line, once the site is no longer configured:
 
 ```sh
-python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml purge-site OLD_ID            # dry run: what would go
-python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml purge-site OLD_ID --apply
+python3 -m tidesight.jobs --config ~/stats.example.com/tidesight.toml purge-site OLD_ID            # dry run: what would go
+python3 -m tidesight.jobs --config ~/stats.example.com/tidesight.toml purge-site OLD_ID --apply
 ```
 
 Backups made before keep the data until they are rotated out.

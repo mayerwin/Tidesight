@@ -1,10 +1,10 @@
 # Tidesight configuration — annotated example.
 #
-# Copy this file (e.g. to ~/tidesight/tidesight.toml), edit it, and point the
-# collector and jobs at it with the TIDESIGHT_CONFIG environment variable or
-# the --config option. Every key is optional: the values shown are the
-# defaults unless a comment says otherwise. Full reference:
-# docs/configuration.md.
+# Copy this file as tidesight.toml into Tidesight's folder (next to app/ and
+# data/: docs/deploy-dreamhost.md), where the web app and the jobs find it; or
+# point them at it with the TIDESIGHT_CONFIG environment variable or --config.
+# Every key is optional: the values shown are the defaults unless a comment
+# says otherwise. Full reference: docs/configuration.md.
 
 [server]
 data_dir = "data"                        # relative to this file; in the website's folder only with web.htaccess
@@ -63,11 +63,11 @@ bot_list = ""                            # optional path to crawler-user-agents.
 internal_ips = []                        # CIDRs flagged as internal traffic (e.g. your office)
 
 [dashboard]
-# Who may sign in (the dashboard's form; scripts may use HTTP Basic). The easy way leaves this table empty:
-#   python -m tidesight.jobs user set admin     (asks for the password; keeps its hash in data_dir/users.json)
-# Users written here win over users.json. Create a hash with:  python -m tidesight.jobs hash-password --user admin
+# Who may sign in (the dashboard's form; scripts may use HTTP Basic). Usually empty: people are managed in the
+# dashboard (the first account with the setup code of data_dir/setup-code.txt, then the Users page), and kept in
+# data_dir/users.json. Users written here win, and are changed here: python -m tidesight.jobs hash-password
 users = {}                               # e.g. { admin = "pbkdf2_sha256$600000$...$..." }
-admins = []                              # who may add, change and delete properties; empty = every user
+admins = []                              # always admins, whatever their role on the Users page
 session_days = 30                        # how long "Keep me signed in" lasts
 
 # Settings applied to every site. Any key below can be overridden per site.

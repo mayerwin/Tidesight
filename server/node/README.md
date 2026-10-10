@@ -15,7 +15,7 @@ The TOML file stays the single source of truth. The Node connector reads its **r
 
 ```sh
 cd server/python
-python -m tidesight.jobs --config ~/tidesight/tidesight.toml config-json --out ~/tidesight/tidesight.json
+python -m tidesight.jobs --config ~/tidesight/tidesight.toml config-json --out ~/tidesight/data/tidesight.json
 ```
 
 The JSON contains the deployment secret (used to hash IPs and allowance keys), so it is written with mode 600; keep it out of the web root. Regenerate it after every TOML change, and after updating Tidesight: a file from an older `config-json` lacks newer keys (the connector then uses their defaults, and each site's features as announced in `public`). The running server notices the new file within 5 seconds and reloads it. If the new file is invalid, it keeps the previous configuration and logs an error.
@@ -25,8 +25,8 @@ The JSON contains the deployment secret (used to hash IPs and allowance keys), s
 ## Running
 
 ```sh
-node --disable-warning=ExperimentalWarning server.mjs --port 8080 --config ~/tidesight/tidesight.json
-# or: TIDESIGHT_CONFIG=~/tidesight/tidesight.json npm start -- --port 8080
+node --disable-warning=ExperimentalWarning server.mjs --port 8080 --config ~/tidesight/data/tidesight.json
+# or: TIDESIGHT_CONFIG=~/tidesight/data/tidesight.json npm start -- --port 8080
 ```
 
 | Option | Default | Meaning |

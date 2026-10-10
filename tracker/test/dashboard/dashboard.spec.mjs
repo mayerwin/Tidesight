@@ -1,7 +1,7 @@
 // The dashboard in a browser, on demo data: periods and comparisons, filters and segments, report tables and
-// exports, goals, properties, the command palette, signing in, the first account, and the public page. No test may
+// exports, goals, properties, the command palette, signing in, the first account, people, updates, and the public page. No test may
 // leave an error in the page.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, test as base } from '@playwright/test';
 
@@ -9,6 +9,7 @@ const OPEN = 'http://127.0.0.1:8795/dashboard/';
 const AUTH = 'http://127.0.0.1:8796/dashboard/';
 const FRESH = 'http://127.0.0.1:8797/dashboard/'; // no user yet (test/dashboard/serve.py)
 const SETUP_CODE = fileURLToPath(new URL('./.data/setup/data/setup-code.txt', import.meta.url));
+const DATA_DIR = fileURLToPath(new URL('./.data/data/', import.meta.url)); // the data of 8795 and 8796
 
 const test = base.extend({
   errors: [async ({ page }, use) => {
@@ -357,9 +358,37 @@ test('users: invite someone, a password link, a role, changing a password, remov
   await again.context.close();
 });
 
+test('admins see a newer release, and its installation', async ({ page }) => {
+  const repo = 'https://github.com/mayerwin/Tidesight';
+  // What jobs.py cron would have found on GitHub, then an installation under way (the files of updates.py).
+  writeFileSync(DATA_DIR + 'update.json', JSON.stringify({ latest: '99.0.0', release_url: repo + '/releases/tag/v99.0.0', checked_at: Date.now(), error: null }));
+  try {
+    await page.goto(AUTH);
+    await page.fill('input[name=username]', 'admin');
+    await page.fill('input[name=password]', 'test-pass');
+    await page.click('button[type=submit]');
+    await expect(page.locator('a.source-link')).toHaveAttribute('href', repo);
+    await expect(page.locator('a.source-link svg.gh-mark')).toBeVisible();
+    await page.locator('#version .update-badge').click();
+    const card = page.locator('section.card', { has: page.locator('h2.card-title', { hasText: /^Updates$/ }) });
+    await expect(card).toContainText('Tidesight 99.0.0 is available');
+    await expect(card.getByRole('link', { name: 'What is new' })).toHaveAttribute('href', repo + '/releases/tag/v99.0.0');
+    await expect(card.getByRole('button', { name: 'Update to 99.0.0' })).toBeDisabled(); // the tests run from a git checkout
+    await expect(card).toContainText('git pull');
+    writeFileSync(DATA_DIR + 'update-request.json', JSON.stringify({ version: '99.0.0', requested_by: 'admin', requested_at: Date.now() - 60000, started_at: Date.now() - 5000 }));
+    await page.reload();
+    await expect(card).toContainText('Installing Tidesight 99.0.0');
+    await expect(card.getByRole('button', { name: 'Cancel' })).toHaveCount(0);
+  } finally {
+    rmSync(DATA_DIR + 'update.json', { force: true });
+    rmSync(DATA_DIR + 'update-request.json', { force: true });
+  }
+});
+
 test('the public page shows its metrics and nothing else', async ({ page }) => {
   await page.goto('http://127.0.0.1:8795/share/demo/');
   await expect(page.locator('.tile')).toHaveCount(2);
   await expect(page.locator('[data-add-filter]')).toHaveCount(0);
   await expect(page.locator('#nav a')).toHaveCount(2);
+  await expect(page.locator('a.source-link')).toBeVisible();
 });

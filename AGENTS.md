@@ -49,11 +49,12 @@ server/python/
   tidesight/enrich/               # pipeline, sessions, identity, rollup, geo/mmdb, ua, bots, sources, db
   tidesight/api.py, query.py, tabular.py  # reports API, filter/breakdown engine, report files (CSV/TSV/JSON/XLSX)
   tidesight/wsgi.py, auth.py, webdb.py    # web app (dashboard + share pages + collector), sign-in sessions, web.db
-  tidesight/admin.py, properties.py       # properties, segments, annotations (properties.json is stdlib-only: config loads it)
+  tidesight/admin.py, properties.py       # properties, people, segments, annotations (properties.json is stdlib-only: config loads it)
   tidesight/jobs.py, maintenance.py    # cron CLI: enrich, rollup, backup, privacy-clean, archive, export…
   tidesight/fcgi.py               # standard-library FastCGI server (mod_fcgid), CGI fallback, code-change restart
   tidesight/users.py              # people (users.json: hashes, roles), the first account's setup code
   tidesight/webcheck.py           # data inside the website's folder: its .htaccess, the outside download check (cron)
+  tidesight/updates.py            # the latest GitHub release (daily), in-place install by cron, rollback
   tidesight.fcgi, collect.cgi, passenger_wsgi.py   # hosting entry points (copy into the web directory)
   web.htaccess                    # the web folder's .htaccess: every request to the app
   devserver.py                    # local server (--no-auth, --test-api, --static)
@@ -130,6 +131,10 @@ These are non-negotiable. The reasoning is in `docs/design.md`.
 - **Tracker:** Playwright on the fixture site covers pageviews, SPA route changes (History API and `#hash` routes), clicks, scroll, Web Vitals, errors, unload delivery, offline retry, and asserts that no exception reaches the host page.
 - **Enrichment:** fixture-based; re-running a job is idempotent and gives the same output.
 - **Connectors:** every connector passes the shared conformance suite.
+
+## Releases
+
+Installations look for new versions in the repository's GitHub releases (`__repository__` in `server/python/tidesight/__init__.py`; the dashboard links to it too). To release: set `__version__` there (`X.Y.Z`), commit, tag `vX.Y.Z`, push the tag and publish a GitHub release for it. `updates.py` installs the tag's source archive and checks that it announces that version. The tracker's own `VERSION` (`tracker/src/core.js`) is separate: bump it with any change to the core, so plugins are fetched afresh.
 
 ## Workflow
 

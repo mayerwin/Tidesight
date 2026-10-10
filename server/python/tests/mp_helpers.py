@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 
 def collector_worker(config_text: str, config_path: str, worker: int, requests: int, out_q: Any) -> None:
-    """Post `requests` batches through a fresh Collector, as one Passenger process would."""
+    """Post `requests` batches through a fresh Collector, as one FastCGI process would."""
     from wsgiref.util import setup_testing_defaults
 
     from tidesight.collect import Collector

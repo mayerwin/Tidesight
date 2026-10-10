@@ -129,6 +129,8 @@ class Admin:
             ("GET", "users"): self.list_users, ("POST", "users"): self.create_user,
             ("PATCH", "user"): self.update_user, ("DELETE", "user"): self.delete_user,
             ("POST", "user_link"): self.create_user_link,
+            ("GET", "update"): self.get_update, ("POST", "update"): self.request_update,
+            ("DELETE", "update"): self.cancel_update,
         }.get((method, endpoint))
         if route is None:
             raise ApiError(405 if method != "GET" else 404, "unknown endpoint or method")
@@ -291,6 +293,37 @@ class Admin:
             self.web.delete_links(name)
             raise ApiError(404, "unknown user")
         return {"name": name, "kind": kind, "token": token, "expires_at": expires}
+
+    # -- updates ----------------------------------------------------------------------------
+    # The latest release is looked for once a day by jobs.py cron; an admin's request to install it is carried out by
+    # the next cron run (updates.py), never in a web request.
+
+    def _require_update_admin(self) -> None:
+        if not self.is_admin:
+            raise ApiError(403, "only admins may update Tidesight")
+
+    def get_update(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        from . import updates
+        self._require_update_admin()
+        return updates.state(self.cfg)
+
+    def request_update(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        from . import updates
+        self._require_update_admin()
+        try:
+            updates.request(self.cfg, body.get("version"), self.user)
+        except updates.UpdateError as exc:
+            raise ApiError(409, str(exc))
+        return updates.state(self.cfg)
+
+    def cancel_update(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        from . import updates
+        self._require_update_admin()
+        req = updates.state(self.cfg)["request"]
+        if req and req.get("started_at"):
+            raise ApiError(409, "the update is being installed: it can no longer be withdrawn")
+        updates.cancel(self.cfg)
+        return updates.state(self.cfg)
 
     # -- properties: reading ------------------------------------------------------------
 

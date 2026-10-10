@@ -1,6 +1,6 @@
 """Tidesight command-line jobs, meant to run from cron.
 
-    python -m tidesight.jobs --config ~/tidesight/tidesight.toml cron          # the usual every-few-minutes run
+    python -m tidesight.jobs --config ~/stats.example.com/tidesight.toml cron    # the usual every-few-minutes run
     python -m tidesight.jobs --config … enrich [--rebuild] [--max-seconds 50]
     python -m tidesight.jobs --config … rollup [--all]
     python -m tidesight.jobs --config … load-spool
@@ -14,6 +14,7 @@
     python -m tidesight.jobs --config … status
     python -m tidesight.jobs --config … user set NAME [--role viewer] | user link NAME | user remove NAME | user list
     python -m tidesight.jobs --config … setup-link        # the dashboard's first-account form, code filled in
+    python -m tidesight.jobs --config … update [--check | --install [VERSION] | --rollback]
     python -m tidesight.jobs hash-password
 
 Run with server/python on PYTHONPATH (or from that directory).
@@ -97,6 +98,15 @@ def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         result = webcheck.check(cfg)
         if result.get("exposed") or result.get("unverified") or result.get("warnings"):
             out["web_check"] = result
+    # New releases: looked for once a day; one an admin asked for is installed last, when nothing else runs here.
+    from . import updates
+    if updates.due(cfg):
+        found = updates.check(cfg)
+        if found.get("available"):
+            out["update_available"] = found["latest"]
+    installed = updates.run_requested(cfg, web_dirs=webcheck.web_folders(cfg))
+    if installed:
+        out["update"] = installed
     return out
 
 
@@ -311,11 +321,33 @@ def _user_link(cfg: Config, name: str) -> Dict[str, Any]:
     return {}
 
 
+def cmd_update(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
+    """Newer releases: look now, install one now (rather than at the next cron run), or go back to the previous."""
+    from . import updates
+    try:
+        if args.rollback:
+            return updates.rollback(cfg)
+        found = updates.check(cfg) if args.check or args.install else updates.state(cfg)
+        if args.install:
+            if args.install == "latest" and not found["latest"]:
+                raise SystemExit("No release to install: %s." % (found["error"] or "none found"))
+            if args.install == "latest" and not found["available"]:
+                raise SystemExit("Tidesight %s is the latest release: nothing to install." % found["current"])
+            version = found["latest"] if args.install == "latest" else args.install
+            done = updates.install_now(cfg, str(version), web_dirs=webcheck.web_folders(cfg))
+            if done.get("error"):
+                raise SystemExit("No update: %s" % done["error"])
+            return done
+        return found
+    except updates.UpdateError as exc:
+        raise SystemExit("No update: %s" % exc)
+
+
 def cmd_setup_link(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     """The address that opens the dashboard's first-account form with the setup code filled in."""
     if cfg.dashboard["users"]:
-        raise SystemExit("Tidesight already has users (jobs.py user list): `user set NAME` adds one or changes a "
-                         "password.")
+        raise SystemExit("Tidesight already has users (jobs.py user list): add people on the dashboard's Users page, "
+                         "or with `user set NAME`.")
     code = users_mod.setup_code(cfg.data_dir)
     if not code:
         raise SystemExit("The setup code could not be written in %s." % cfg.data_dir)
@@ -427,6 +459,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="for set: the role (else unchanged; a new user without one is an admin while [dashboard] "
                         "admins is empty)")
     p.set_defaults(func=cmd_user)
+
+    p = sub.add_parser("update", help="newer releases of Tidesight: show, --check, --install [VERSION], --rollback")
+    p.add_argument("--check", action="store_true", help="ask GitHub for the latest release now")
+    p.add_argument("--install", nargs="?", const="latest", default=None, help="install a release now (default: the latest)")
+    p.add_argument("--rollback", action="store_true", help="go back to the code the last update replaced")
+    p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("setup-link", help="the address of the dashboard's first-account form, setup code included")
     p.set_defaults(func=cmd_setup_link)

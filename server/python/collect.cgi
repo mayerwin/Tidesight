@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""CGI fallback entry point, for hosts without Passenger.
+"""CGI fallback entry point, for hosts that run neither FastCGI (tidesight.fcgi) nor Passenger.
 
 Copy it into the web directory, make it executable (chmod 755) and route requests to it with
-the .htaccess rules in docs/deploy-dreamhost.md. One process per request: slower than Passenger.
+the .htaccess rules in docs/deploy-dreamhost.md. One process per request: slower than FastCGI.
 It finds the code beside it (app/server/python), in ~/tidesight/server/python, or in $TIDESIGHT_CODE,
 and the configuration beside it (tidesight.toml), in ~/tidesight/tidesight.toml, or in $TIDESIGHT_CONFIG.
 """

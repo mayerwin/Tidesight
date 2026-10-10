@@ -138,7 +138,12 @@ def test_first_account_needs_the_setup_code(fresh):
     app, data_dir, _ = fresh
     page = call(app, "GET", "/dashboard/")  # the page loads: it offers to create the first account
     assert page.code == 200 and page.headers["content-type"].startswith("text/html")
-    assert call(app, "GET", "/dashboard/api/me").json() == {"user": None, "setup": True}
+    me = call(app, "GET", "/dashboard/api/me").json()
+    assert me["user"] is None and me["setup"] is True
+    # Where the code is, as its owner types it: from the home folder, never an absolute path (the account's name).
+    from tidesight.wsgi import _home_path
+    assert me["code_file"] == _home_path(users.setup_path(data_dir))
+    assert me["code_file"] is None or (me["code_file"].startswith("~/") and me["code_file"].endswith("/data/setup-code.txt"))
     code = open(users.setup_path(data_dir), encoding="ascii").read().strip()
     assert CODE_RE.match(code)
     if os.name == "posix":
@@ -294,3 +299,11 @@ def test_web_db_is_created_once_when_requests_race(tmp_path):
     for t in threads:
         t.join()
     assert errors == []
+
+
+def test_paths_shown_from_the_home_folder(tmp_path):
+    from tidesight.wsgi import _home_path
+    home = os.path.realpath(os.path.expanduser("~"))
+    assert _home_path(os.path.join(home, "site", "data", "setup-code.txt")) == "~/site/data/setup-code.txt"
+    assert _home_path(os.path.join(os.path.dirname(home), "someone-else", "x.txt")) is None
+    assert _home_path(home) is None

@@ -8,7 +8,7 @@ One TOML file configures the collector, the jobs and the dashboard. Start from `
 
 **Properties added in the dashboard** live in `data_dir/properties.json` (written by the dashboard, in the shape of `[sites.<id>]` tables) and are merged with this file's sites when it loads: a site defined here wins, and stays read-only in the dashboard. The collector picks a change up within 5 seconds (at once in the process that made it; under CGI, at the next request). A broken entry is reported among the warnings and skipped.
 
-**Other connectors** (PHP, Node, Worker) read a resolved JSON version of this file (properties included): `python -m tidesight.jobs --config tidesight.toml config-json --out tidesight.json` (it contains the secret: mode 600, outside the web root). Set `[server] resolved_config_file` and `jobs.py cron` rewrites it whenever the configuration or the properties change.
+**Other connectors** (PHP, Node, Worker) read a resolved JSON version of this file (properties included): `python -m tidesight.jobs --config tidesight.toml config-json --out tidesight.json` (it contains the secret: mode 600, out of the web's reach). Set `[server] resolved_config_file` and `jobs.py cron` rewrites it whenever the configuration or the properties change.
 
 ## `[server]`
 

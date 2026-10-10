@@ -10,7 +10,7 @@ Signing in: the dashboard posts a user name and password to /dashboard/api/login
 (ts_login: HttpOnly, SameSite=Strict, limited to the dashboard's path); scripts may instead send HTTP Basic
 credentials with each request. Every request that changes something must carry an X-Tidesight header, which a
 page on another origin cannot add without a CORS permission this app never gives, and its Origin must be this
-host. Passenger, CGI and the dev server all import `application` from here.
+host. The FastCGI and CGI entry points and Passenger import `application` from here; the dev server, create_app.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ SECURITY_HEADERS = [("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "
                     ("Referrer-Policy", "same-origin"), ("X-Robots-Tag", "noindex, nofollow")]
 COOKIE = "ts_login"
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
-ADMIN_READS = ("properties", "property", "users")
+ADMIN_READS = ("properties", "property", "users", "update")
 REPORT_EXPORTS = ("breakdown", "overview", "goals")
 _COOKIE_PATH = re.compile(r"/[A-Za-z0-9._~%/-]*")  # with fullmatch
 # What the dashboard folder serves (package.json, node_modules and the like are not for anyone).
@@ -92,6 +92,16 @@ def _status(code: int) -> str:
 def _https(environ: Dict[str, Any]) -> bool:
     return (environ.get("wsgi.url_scheme") == "https" or str(environ.get("HTTPS", "")).lower() in ("on", "1")
             or environ.get("HTTP_X_FORWARDED_PROTO", "").split(",")[0].strip().lower() == "https")
+
+
+def _home_path(path: str) -> Optional[str]:
+    """`path` written from the home folder (~/…), or None when it lies elsewhere: an absolute path would show the
+    server's layout and the account's name to anyone."""
+    home = os.path.realpath(os.path.expanduser("~"))
+    real = os.path.realpath(path)
+    if real.startswith(home.rstrip(os.sep) + os.sep):
+        return "~/" + os.path.relpath(real, home).replace(os.sep, "/")
+    return None
 
 
 def _dashboard_path(environ: Dict[str, Any]) -> str:
@@ -545,8 +555,9 @@ class App:
             from . import users
             if users.setup_code(cfg.data_dir) is None:
                 log.error("could not write the setup code in %s", cfg.data_dir)
-            if endpoint == "me":
-                return _json(start_response, "200 OK", {"user": None, "setup": True})
+            if endpoint == "me":  # where the code is, as its owner types it (~/…: the account's name stays private)
+                return _json(start_response, "200 OK", {"user": None, "setup": True,
+                                                        "code_file": _home_path(users.setup_path(cfg.data_dir))})
             return _json(start_response, "403 Forbidden", {"error": "Tidesight has no user yet: create the first one "
                                                            "in the dashboard, with the setup code.", "setup": True})
         user, how, denied = self._authenticate(cfg, environ, start_response)

@@ -38,7 +38,7 @@ The databases hold raw IP addresses and the users' password hashes, so they must
 3. **Files for your account only.** Every file Tidesight writes is readable by your account alone, and the setup below makes `app/`, `data/` and `tidesight.toml` so; on Dreamhost the web server reads files as another user, so it could not hand them out anyway.
 4. **Checked from the outside.** Every 10 minutes the cron job makes sure `public_url` leads to this installation, then puts a file with random content in each of its folders (`data/`, `app/`, the web folder itself) and asks the website for it, as anyone could. If one comes back, the collector and the dashboard stop (`503`, logged, and said in the dashboard) until none does. The dashboard's Status page and `jobs.py status` show the last check, or why it could not conclude.
 
-WordPress keeps its database in MySQL and its secrets in a PHP file that runs rather than downloads; Tidesight's data are plain files, so the protection is verified rather than assumed. The layout of earlier versions, with the code and the data outside the web folder (`~/tidesight`, `~/tidesight-data`), works too: `tidesight.fcgi` finds the code in `~/tidesight/server/python` and the configuration in `~/tidesight/tidesight.toml` when there is none beside it.
+WordPress keeps its database in MySQL and its secrets in a PHP file that runs rather than downloads; Tidesight's data are plain files, so the protection is verified rather than assumed. If you would rather keep Tidesight's files out of the web folder altogether, that works too: the code in `~/tidesight` with `tidesight.toml` beside it, `data_dir` outside the code's folder (`"~/tidesight-data"`, so that updates can replace the code), and only `tidesight.fcgi` and the `.htaccess` in the web folder: `tidesight.fcgi` finds the code in `~/tidesight/server/python` and the configuration in `~/tidesight/tidesight.toml` when there is none beside it.
 
 ## 1. Prepare the account
 
@@ -212,11 +212,18 @@ When the collector shares the site's registrable domain (`stats.example.com` for
 
 ## 9. Updating
 
+Once a day the cron job asks GitHub for Tidesight's latest release. When a newer one exists, admins see **Update** next to the version (bottom left) and on the Status page, with what is new; **Update to …** asks for it, and the next cron run (within a few minutes) installs it: it downloads the release from GitHub over HTTPS, checks it (the version it announces, Python that compiles), puts it in place of `app/` and keeps the old code as `app.previous`. The copies of `tidesight.fcgi` and `.htaccess` in the web folder follow, unless they were edited (the Status page then says so). Nothing else is needed: within seconds, each running FastCGI process notices the new code and makes way for a fresh one (after the request it is answering), database migrations run automatically, and when an update changes how data is derived, the next enrichment rebuilds `derived.db` in the background and swaps it in. The sites' tracking code never changes: `ts.js` comes from this host, so the tracker follows (browsers keep it an hour at most).
+
+From the server instead (same steps, at once):
+
 ```sh
-cd ~/stats.example.com/app && git pull
+cd ~/stats.example.com/app/server/python
+python3 -m tidesight.jobs update --check        # what is available
+python3 -m tidesight.jobs update --install      # install the latest release now
+python3 -m tidesight.jobs update --rollback     # back to the previous code (app.previous)
 ```
 
-That is all: within seconds, each running FastCGI process notices the new code and makes way for a fresh one (after the request it is answering), and the next request starts it. `touch ~/stats.example.com/tidesight.fcgi` does the same on demand. Database migrations run automatically. When an update changes how data is derived, the next enrichment rebuilds `derived.db` in the background and swaps it in. When an update says so, copy `tidesight.fcgi` or `web.htaccess` again (step 4).
+A `git clone` is updated with `cd ~/stats.example.com/app && git pull` instead (the dashboard then only tells you a release exists). `touch ~/stats.example.com/tidesight.fcgi` restarts the processes on demand.
 
 ## CGI (hosts without FastCGI)
 

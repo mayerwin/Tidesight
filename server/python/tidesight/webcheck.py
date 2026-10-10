@@ -101,10 +101,11 @@ def _seen(cfg: Any) -> List[Dict[str, str]]:
             and isinstance(s.get("script_dir"), str)] if isinstance(seen, list) else []
 
 
-def prepare(cfg: Any, document_root: str, script_dir: str) -> None:
-    """With files inside the web server's folder: the data directory's .htaccess (refusing everything), and a note
-    of the web server's folder and of the entry script's for the check (both from the web server, never from the
-    request; once per process, a file is written only when it changes)."""
+def prepare(cfg: Any, document_root: str, script_dir: str, protect: bool = True) -> None:
+    """A note of the web server's folder and of the entry script's (both from the web server, never from the
+    request), for the check and for updates (updates.py refreshes the entry script); with files inside the web
+    server's folder, the data directory's .htaccess (refusing everything). Once per process; a file is written
+    only when it changes."""
     if _done.get(cfg.data_dir) == (document_root, script_dir):
         return
     try:
@@ -115,7 +116,7 @@ def prepare(cfg: Any, document_root: str, script_dir: str) -> None:
                 current: Optional[str] = fh.read()
         except OSError:
             current = None
-        if current != DENY:
+        if protect and current != DENY:
             _write(deny, DENY, 0o644)  # the web server has to read it to obey it
         entry = {"document_root": document_root, "script_dir": script_dir}
         seen = _seen(cfg)
@@ -125,6 +126,11 @@ def prepare(cfg: Any, document_root: str, script_dir: str) -> None:
         _done[cfg.data_dir] = (document_root, script_dir)
     except OSError as exc:
         log.error("could not protect %s: %s", cfg.data_dir, exc)
+
+
+def web_folders(cfg: Any) -> List[str]:
+    """The folders of the entry script (tidesight.fcgi) the web server has run lately."""
+    return list(dict.fromkeys(s["script_dir"] for s in _seen(cfg)))
 
 
 def state(cfg: Any) -> Dict[str, Any]:
@@ -144,14 +150,14 @@ def state(cfg: Any) -> Dict[str, Any]:
 
 def refusal(cfg: Any, environ: Dict[str, Any]) -> Optional[str]:
     """Why the app must not work now (its files can be downloaded), or None. Called for every web request: cheap."""
-    if cfg.server.get("allow_data_in_web_root"):
-        return None
     document_root = environ.get("DOCUMENT_ROOT")
-    found = inside(cfg, document_root)
-    if not found:
+    if not document_root:  # not behind a web server (the dev server)
         return None
     script = environ.get("SCRIPT_FILENAME") or ""
-    prepare(cfg, document_root or "", os.path.dirname(script) if script else document_root or "")
+    found = inside(cfg, document_root)
+    prepare(cfg, document_root, os.path.dirname(script) if script else document_root, protect=bool(found))
+    if not found or cfg.server.get("allow_data_in_web_root"):
+        return None
     st = state(cfg)
     if st.get("exposed") is True:
         return "%s can be downloaded from the web (%s)" % (found[0][0], st.get("url") or "checked by jobs.py cron")

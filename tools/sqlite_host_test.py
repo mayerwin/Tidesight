@@ -10,7 +10,7 @@ Three ways to run it:
 
 * Over SSH (recommended):
       python3 sqlite_host_test.py
-      python3 sqlite_host_test.py --data-dir ~/tidesight-data --procs 8 --rows 2000
+      python3 sqlite_host_test.py --data-dir ~/tidesight-hosttest --procs 8 --rows 2000
       python3 sqlite_host_test.py --json > report.json
 
 * As a CGI script: upload it with execute permission into a web directory,
@@ -1065,14 +1065,14 @@ def recommend(rep):
 
 
 def default_data_dir():
-    return os.path.join(home_dir(), "tidesight-data", "_hosttest")
+    return os.path.join(home_dir(), "tidesight-hosttest")
 
 
 def parse_args(argv):
     import argparse
     ap = argparse.ArgumentParser(description="Tidesight Phase 0 hosting test (SQLite on this host).")
     ap.add_argument("--data-dir", default=default_data_dir(),
-                    help="directory to test (default: ~/tidesight-data/_hosttest)")
+                    help="directory to test (default: ~/tidesight-hosttest)")
     ap.add_argument("--procs", type=int, default=8, help="concurrent writer processes (default 8)")
     ap.add_argument("--rows", type=int, default=2000, help="rows per writer (default 2000)")
     ap.add_argument("--readers", type=int, default=1, help="concurrent reader processes (default 1)")

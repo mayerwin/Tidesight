@@ -2,8 +2,8 @@
 
 Login sessions, the login throttle, saved segments, chart annotations and the queue of sites whose data is to be
 deleted. It is kept apart from the analytics databases: deleting it only logs everyone out and forgets segments
-and notes. Every call opens its own short connection, so it works the same under CGI (one process per request)
-and Passenger.
+and notes. Every call opens its own short connection, so it works the same under CGI (one process per request),
+FastCGI and Passenger.
 """
 
 from __future__ import annotations

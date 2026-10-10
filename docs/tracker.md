@@ -12,6 +12,8 @@ Add one tag to the `<head>` of every page, with your collector's host and the pr
 
 The core (`ts.js`, about 8 KB gzip) records pageviews, SPA route changes, custom events, engagement time and the client context. It then fetches the site's configuration (`/config.js`; a copy kept in localStorage is used for up to a day and refreshed in the background after five minutes) and loads the behaviour plugins the site has switched on and the session is sampled into, from `/ts/<plugin>.js`. Nothing is loaded from any other host.
 
+**Nothing to update on the sites.** The tag never changes: `ts.js` and its plugins are served by the Tidesight host, so updating Tidesight updates the tracker of every site. Browsers keep `ts.js` for an hour at most (plugins are fetched with the core's version in their address, so a new core never meets old plugins), and the site's configuration for five minutes. A tracker still cached from an older version keeps working: collectors accept every version of the protocol forever (`docs/protocol.md`). Only a copy of `ts.js` put on the site itself (`data-api`) has to be replaced by hand.
+
 **One file instead.** `ts.all.js` bundles the core with every plugin except session replay: one request instead of several, at the cost of downloading plugins a site may not use. It takes the same attributes.
 
 **Calls made before the script loads** are queued if the page defines the stub first:

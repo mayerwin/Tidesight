@@ -397,7 +397,8 @@ def test_tidesight_app_answers_and_stores_hits(fastcgi, world):
         conn.close()
     page = s.request("GET", "/dashboard/")  # no user yet: the page offers to create the first one
     assert page.code == 200 and page.headers["content-type"].startswith("text/html")
-    assert s.request("GET", "/dashboard/api/me").json() == {"user": None, "setup": True}
+    me = s.request("GET", "/dashboard/api/me").json()
+    assert me["user"] is None and me["setup"] is True
 
 
 def _entry_env(world: Any, **extra: str) -> Dict[str, str]:

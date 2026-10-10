@@ -42,6 +42,12 @@ export const VIEWS = [
   { id: 'status', title: 'Status', icon: 'M12 3v4M12 17v4M3 12h4M17 12h4M12 15a3 3 0 100-6 3 3 0 000 6z', bar: 'none' },
 ];
 const PUBLIC_VIEWS = new Set(['overview', 'realtime']);
+// The GitHub mark (Octicons' mark-github, MIT licence), drawn inline: nothing is loaded from another host.
+function githubMark() {
+  const svg = s('svg', { viewBox: '0 0 16 16', class: 'gh-mark', 'aria-hidden': 'true', focusable: 'false' });
+  svg.appendChild(s('path', { fill: 'currentColor', d: 'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z' }));
+  return svg;
+}
 const NO_SITE_VIEWS = new Set(['properties', 'users', 'status']);
 
 // ---- rail ------------------------------------------------------------------------------------------
@@ -464,7 +470,7 @@ function signInForm({ fields, submitLabel, busyLabel, check, endpoint, payload, 
 
 // The first account, while Tidesight has no user: the setup code, which Tidesight writes in a file on the server,
 // proves the installation is the visitor's own (bots that find a new site first cannot claim it).
-function showSetup(code = '') {
+function showSetup(code = '', codeFile = null) {
   const codeInput = el('input', { class: 'input mono', name: 'setup-code', value: code, required: true, autocomplete: 'one-time-code',
     spellcheck: 'false', autocapitalize: 'characters', placeholder: 'XXXX-XXXX-XXXX-XXXX', 'aria-label': 'Setup code', 'aria-describedby': 'setup-help' });
   const user = el('input', { class: 'input', name: 'username', required: true, autocomplete: 'username', placeholder: 'admin', 'aria-label': 'User name', 'aria-describedby': 'user-help' });
@@ -472,8 +478,9 @@ function showSetup(code = '') {
   const form = signInForm({
     fields: [
       labelled('Setup code', codeInput, el('span', { class: 'field-help', id: 'setup-help' },
-        'On the server: ', el('code', { text: 'cat ~/tidesight-data/setup-code.txt' }),
-        ' (the file setup-code.txt of Tidesight\'s data directory). It stops working once the account exists.')),
+        ...(codeFile ? ['On the server: ', el('code', { text: 'cat ' + codeFile })]
+          : ['It is in the file ', el('code', { text: 'setup-code.txt' }), ' of Tidesight\'s data directory, on the server']),
+        '. It stops working once the account exists.')),
       labelled('User name', user, el('span', { class: 'field-help', id: 'user-help', text: 'Letters, digits and . _ @ + -' })),
       ...pw.fields],
     submitLabel: 'Create the account', busyLabel: 'Creating the account…', endpoint: 'setup',
@@ -525,7 +532,20 @@ export async function refreshSites() {
   const res = await api('sites', {});
   state.sites = res.sites || [];
   state.version = res.version || '';
+  state.repository = res.repository || '';
   state.freshness = res.freshness || null;
+}
+
+// Admins see when a newer release exists (looked for once a day by jobs.py cron): a link to the Status page.
+function showUpdate() {
+  if (PUBLIC || !(state.me && state.me.admin && state.me.auth !== 'none')) return;
+  api('update').then((up) => {
+    if (!up || !up.available) return;
+    const box = document.getElementById('version');
+    const link = el('a', { class: 'update-badge', href: hrefFor('status') }, el('span', { text: 'Update' }));
+    hint(link, 'Tidesight ' + up.latest + ' is available: see the Status page');
+    box.append(' ', link);
+  }).catch(() => { /* no update information: nothing to say */ });
 }
 
 async function boot() {
@@ -545,19 +565,23 @@ async function boot() {
       document.getElementById('view').replaceChildren(el('div', { class: 'error-box' }, el('strong', { text: 'The dashboard API is not reachable. ' }), el('span', { text: err.message })));
       return;
     }
-    if (state.me && state.me.setup) { showSetup(setupCode); return; }
+    if (state.me && state.me.setup) { showSetup(setupCode, state.me.code_file); return; }
   }
   try {
     await refreshSites();
     document.getElementById('version').textContent = state.version ? 'v' + state.version : '';
+    showUpdate();
   } catch (err) {
     if (err.status === 401) return;
     document.getElementById('view').replaceChildren(el('div', { class: 'error-box' },
       el('strong', { text: 'The dashboard API is not reachable. ' }), el('span', { text: err.message })));
     return;
   }
-  document.getElementById('credit').replaceChildren(
-    document.createTextNode('Tidesight — self-hosted analytics. '),
+  const source = state.repository
+    ? el('a', { class: 'source-link', href: state.repository, rel: 'noopener' }, githubMark(), el('span', { text: 'Tidesight on GitHub' }))
+    : document.createTextNode('Tidesight');
+  document.getElementById('credit').replaceChildren(source,
+    document.createTextNode(' · open-source, self-hosted analytics' + (state.version ? ' (v' + state.version + ')' : '') + '. '),
     el('a', { href: 'https://db-ip.com', rel: 'noopener', text: 'IP geolocation by DB-IP' }),
     document.createTextNode(' where DB-IP data is used (CC BY 4.0).'));
   onReplace(render);

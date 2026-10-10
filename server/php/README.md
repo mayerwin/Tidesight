@@ -37,8 +37,8 @@ TIDESIGHT_CONNECTORS=php python -m pytest server/python/tests/test_conformance.p
 The PHP connector does not read the TOML file. It reads the **resolved configuration** that the Python code produces, with every default and per-site layer already applied, so both connectors always agree:
 
 ```
-cd ~/tidesight/server/python
-python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml config-json --out ~/tidesight/tidesight.json
+cd ~/stats.example.com/app/server/python
+python3 -m tidesight.jobs --config ~/stats.example.com/tidesight.toml config-json --out ~/tidesight-php/tidesight.json
 ```
 
 - Run it again after every change to the TOML file, and after upgrading Tidesight. PHP reads the JSON on every request: no restart is needed. A file written by an older version still works (settings it lacks take their defaults), but it carries no URL redaction patterns, so the Referer is stored unredacted until the file is regenerated.
@@ -47,13 +47,13 @@ python3 -m tidesight.jobs --config ~/tidesight/tidesight.toml config-json --out 
 
 Tell PHP where the file is, in this order of precedence:
 
-1. `define('TIDESIGHT_CONFIG', '/home/USER/tidesight/tidesight.json');` at the top of `index.php` (works everywhere);
+1. `define('TIDESIGHT_CONFIG', '/home/USER/tidesight-php/tidesight.json');` at the top of `index.php` (works everywhere);
 2. the `TIDESIGHT_CONFIG` environment variable (e.g. `SetEnv TIDESIGHT_CONFIG …` in `.htaccess`, `env[TIDESIGHT_CONFIG]` in a PHP-FPM pool, or `fastcgi_param` in nginx), read with `getenv()` or, where the host disables it, from `$_SERVER` and `$_ENV`;
 3. a `tidesight.json` next to `index.php` (in the web root: development only, see below), or next to `tidesight.php` when the library lives outside the web root.
 
 Without a configuration every endpoint answers `503 configuration error` and the reason is logged.
 
-**Nothing of Tidesight's may lie in the web root.** As the Python collector does, the connector refuses to run (`503 configuration error`, the reason logged) when the data directory, the configuration file or the log file is inside the web server's document root (`DOCUMENT_ROOT`), where anyone could download the databases or the secret. Move them; only if the web server is set up to deny those files, set `[server] allow_data_in_web_root = true`.
+**Nothing of Tidesight's may lie in the PHP site's web root.** Unlike the Python app (which allows it behind its `.htaccess` and checks from the outside that nothing can be downloaded), this connector refuses to run (`503 configuration error`, the reason logged) when the data directory, the configuration file or the log file is inside the web server's document root (`DOCUMENT_ROOT`), where anyone could download the databases or the secret. Move them; only if the web server is set up to deny those files, set `[server] allow_data_in_web_root = true`.
 
 ## Deploying on Apache shared hosting
 
