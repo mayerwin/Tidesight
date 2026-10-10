@@ -178,7 +178,7 @@ def _install(dest: str, write: Callable[[IO[bytes]], None]) -> None:
             out.flush()
             os.fsync(out.fileno())
         _verify(temp_path)
-        os.chmod(temp_path, 0o644)
+        os.chmod(temp_path, 0o600)  # like every file Tidesight writes: for this account only
         os.replace(temp_path, dest)
     except BaseException:
         _remove(temp_path)
