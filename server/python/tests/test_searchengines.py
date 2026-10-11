@@ -159,7 +159,7 @@ class FakeGoogle:
             pad = lambda s: s + "=" * (-len(s) % 4)  # noqa: E731
             assert _verify((head + "." + claims).encode(), base64.urlsafe_b64decode(pad(sig)))
             c = json.loads(base64.urlsafe_b64decode(pad(claims)))
-            assert c["scope"] == se.GOOGLE_SCOPE and c["aud"] == se.GOOGLE_TOKEN_URL and c["exp"] > c["iat"]
+            assert c["scope"] in (se.GOOGLE_SCOPE, "https://www.googleapis.com/auth/analytics.readonly") and c["aud"] == se.GOOGLE_TOKEN_URL and c["exp"] > c["iat"]
             return 200, json.dumps({"access_token": "tok", "expires_in": 3599}).encode()
         assert headers["Authorization"] == "Bearer tok"
         if self.deny:

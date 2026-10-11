@@ -46,6 +46,16 @@ async function request(method, endpoint, params, body) {
 }
 
 export const api = (endpoint, params = {}) => request('GET', endpoint, params);
+// A file as the request's body (Plausible's export): the server keeps it and answers JSON.
+export async function upload(endpoint, file, params = {}) {
+  const qs = query(params);
+  const res = await transport(base + endpoint + (qs ? '?' + qs : ''), { method: 'POST', credentials: 'same-origin',
+    headers: { Accept: 'application/json', 'X-Tidesight': '1', 'Content-Type': file.type || 'application/zip' }, body: file });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* not JSON */ }
+  if (!res.ok) throw new ApiError(res.status, (data && data.error) || res.statusText || 'Upload failed', data);
+  return data;
+}
 export const send = (method, endpoint, body = {}, params = {}) => request(method, endpoint, params, body);
 
 // A URL to download (report files, raw exports): plain navigation carries the session cookie.

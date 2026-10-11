@@ -222,7 +222,8 @@ def _google_error(status: int, doc: Any, prefix: str, email: str = "") -> Search
 class Google:
     """Search Console, as a service account (read-only scope)."""
 
-    def __init__(self, cred: Dict[str, Any]) -> None:
+    def __init__(self, cred: Dict[str, Any], scope: str = GOOGLE_SCOPE) -> None:
+        self.scope = scope
         try:
             self.key = rs256.load_private_key(cred.get("private_key") or "")
         except rs256.KeyFormatError as exc:
@@ -236,7 +237,7 @@ class Google:
         now = time.time()
         if self._token and now < self._expires - 60:
             return self._token
-        claims = {"iss": self.email, "scope": GOOGLE_SCOPE, "aud": GOOGLE_TOKEN_URL, "iat": int(now),
+        claims = {"iss": self.email, "scope": self.scope, "aud": GOOGLE_TOKEN_URL, "iat": int(now),
                   "exp": int(now) + 3600}
         assertion = rs256.jwt(self.key, claims, {"kid": self.key_id} if self.key_id else {})
         body = urlencode({"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion})

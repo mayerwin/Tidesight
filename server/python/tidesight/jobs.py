@@ -17,6 +17,8 @@
     python -m tidesight.jobs --config … update [--check | --install [VERSION] | --rollback]
     python -m tidesight.jobs --config … search [status | import | connect google FILE | connect bing KEY | sites ENGINE |
                                                disconnect ENGINE]
+    python -m tidesight.jobs --config … history [list | plausible FILE.zip | ga4 PROPERTY_ID | matomo URL SITE_ID TOKEN |
+                                                run | delete JOB_ID] --site ID [--from DAY] [--to DAY]
     python -m tidesight.jobs hash-password
 
 Run with server/python on PYTHONPATH (or from that directory).
@@ -110,6 +112,15 @@ def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         imported = {"error": str(exc)}
     if imported:
         out["search_engines"] = imported
+    # History imported from another tool: what the dashboard asked for, within a time budget.
+    from . import history
+    try:
+        carried = history.run(cfg, max_seconds=min(25.0, max(5.0, args.max_seconds * 0.5)))
+    except Exception as exc:
+        log.exception("history import failed")
+        carried = {"error": str(exc)}
+    if carried:
+        out["history"] = carried
     # New releases: looked for once a day; one an admin asked for is installed last, when nothing else runs here.
     from . import updates
     if updates.settle(cfg):  # the code an update installed: as private as the code it replaced
@@ -394,6 +405,55 @@ def cmd_search(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     raise SystemExit("unknown action")
 
 
+def cmd_history(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
+    """History imported from Google Analytics 4, Plausible or Matomo (docs/history.md)."""
+    import shutil
+    import secrets
+
+    from . import history, searchengines
+    action, values = args.action, args.values
+    if action == "run":
+        return history.run(cfg, max_seconds=args.max_seconds) or {"nothing": "no import to carry out"}
+    site = cfg.site(args.site or "")
+    if site is None:
+        raise SystemExit("Name the property: --site ID (%s)" % ", ".join(sorted(cfg.sites)))
+    span = {k: v for k, v in (("from", args.start), ("to", args.end)) if v}
+    try:
+        if action == "list":
+            return {"imports": history.jobs(cfg, site.id), "first_tidesight_day": history.first_tidesight_day(
+                cfg.data_dir, site.id)}
+        if action == "delete":
+            if not values or not values[0].isdigit():
+                raise SystemExit("history delete JOB_ID --site ID")
+            return {"deleted": history.delete_job(cfg, site.id, int(values[0]))}
+        if action == "plausible":
+            if not values:
+                raise SystemExit("history plausible EXPORT.zip --site ID")
+            folder = history.uploads_dir(cfg.data_dir)
+            os.makedirs(folder, mode=0o700, exist_ok=True)
+            name = secrets.token_hex(16) + ".zip"
+            shutil.copyfile(values[0], os.path.join(folder, name))
+            job = history.create_job(cfg, site.id, "plausible", dict(span, file=name), "jobs.py")
+        elif action == "ga4":
+            if not values or not values[0].isdigit():
+                raise SystemExit("history ga4 PROPERTY_ID --site ID (the number in GA4's Admin, Property details)")
+            if not searchengines.credentials(cfg.data_dir).get("google"):
+                raise SystemExit("Connect the Google service account first: jobs.py search connect google KEY.json")
+            job = history.create_job(cfg, site.id, "ga4", dict(span, property=values[0]), "jobs.py")
+        elif action == "matomo":
+            if len(values) != 3:
+                raise SystemExit("history matomo URL SITE_ID TOKEN --site ID")
+            found = history.check_matomo(*values)
+            job = history.create_job(cfg, site.id, "matomo", dict(span, url=values[0], id_site=values[1],
+                                                                  token=values[2], name=found["name"]), "jobs.py")
+        else:
+            raise SystemExit("unknown action")
+    except history.HistoryError as exc:
+        raise SystemExit("No import: %s" % exc)
+    done = history.run(cfg, max_seconds=args.max_seconds, job_id=job)
+    return {"job": job, "run": done, "status": next((j for j in history.jobs(cfg, site.id) if j["id"] == job), None)}
+
+
 def cmd_setup_link(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     """The address that opens the dashboard's first-account form with the setup code filled in."""
     if cfg.dashboard["users"]:
@@ -524,6 +584,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--engine", choices=["google", "bing"], default=None)
     p.add_argument("--max-seconds", type=float, default=300.0, help="import: time budget (default 300)")
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("history", help="history imported from Google Analytics 4, Plausible or Matomo")
+    p.add_argument("action", choices=["list", "plausible", "ga4", "matomo", "run", "delete"])
+    p.add_argument("values", nargs="*", help="plausible: EXPORT.zip; ga4: PROPERTY_ID; matomo: URL SITE_ID TOKEN; "
+                                             "delete: JOB_ID")
+    p.add_argument("--site", default=None, help="the property")
+    p.add_argument("--from", dest="start", default=None, help="first day to import (default: the first with data)")
+    p.add_argument("--to", dest="end", default=None, help="last day (default: the day before Tidesight's first)")
+    p.add_argument("--max-seconds", type=float, default=600.0, help="time budget now (the rest in cron)")
+    p.set_defaults(func=cmd_history)
 
     p = sub.add_parser("setup-link", help="the address of the dashboard's first-account form, setup code included")
     p.set_defaults(func=cmd_setup_link)

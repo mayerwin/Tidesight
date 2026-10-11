@@ -93,6 +93,18 @@ export function statTile({ label, value, delta, spark, pressed, onClick, help, c
   return tile;
 }
 
+// What a report says of the history imported from another tool (docs/history.md), or null.
+export function importedNote(info) {
+  if (!info) return null;
+  if (info.applied) {
+    return el('p', { class: 'note imported-note', text: 'Includes the history imported from ' + (info.sources || []).join(' and ') + ', ' + fmt.range(info.from, info.to) +
+      ': daily totals, so a visitor counts once per day.' });
+  }
+  return el('p', { class: 'note imported-note', text: info.reason === 'filters'
+    ? 'The history imported from another tool is left out: filters, segments and goals apply to Tidesight’s own visits only.'
+    : 'The history imported from another tool does not have this breakdown.' });
+}
+
 export function emptyNote(text) {
   return el('div', { class: 'empty', text });
 }

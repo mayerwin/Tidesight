@@ -101,7 +101,11 @@ Connect Google Search Console and Bing Webmaster Tools once (free, about ten min
 
 <img alt="The Search engines report: clicks, impressions, CTR, average position and visits, their trend, and the queries with their changes" src="docs/images/search-engines.png">
 
-### 7. Invite your team, stay up to date
+### 7. Bring your history
+
+Coming from Google Analytics 4, Plausible or Matomo? **Property settings → Import history** brings their daily figures (pages, sources, channels, countries, devices…) into the reports, for the days before Tidesight's own data: [`docs/history.md`](docs/history.md).
+
+### 8. Invite your team, stay up to date
 
 Admins invite people from the **Users** page with one-time links (no email involved) and choose their role: admin or viewer. Once a day Tidesight looks for a new release; an admin clicks **Update**, and the next cron run downloads it, checks it, puts it in place and keeps the previous version for a rollback. The tracking code on your sites never changes: `ts.js` is served by Tidesight, so it follows.
 
@@ -211,6 +215,7 @@ Contributors and coding agents: start with [`AGENTS.md`](AGENTS.md) and [`CONTRI
 - [Configuration](docs/configuration.md)
 - [Deploying on Dreamhost](docs/deploy-dreamhost.md)
 - [Search engines: Google Search Console and Bing](docs/search-engines.md)
+- [Importing history from GA4, Plausible or Matomo](docs/history.md)
 - [Privacy mode and clean-up jobs](docs/privacy.md)
 - [Connectors and writing a new one](docs/connectors.md)
 - [Roadmap](docs/roadmap.md)

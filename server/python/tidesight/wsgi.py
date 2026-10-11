@@ -46,7 +46,7 @@ SECURITY_HEADERS = [("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "
                     ("Referrer-Policy", "same-origin"), ("X-Robots-Tag", "noindex, nofollow")]
 COOKIE = "ts_login"
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
-ADMIN_READS = ("properties", "property", "users", "update", "search_engines", "search_engine_sites")
+ADMIN_READS = ("properties", "property", "users", "update", "search_engines", "search_engine_sites", "history")
 REPORT_EXPORTS = ("breakdown", "overview", "goals")
 _COOKIE_PATH = re.compile(r"/[A-Za-z0-9._~%/-]*")  # with fullmatch
 # What the dashboard folder serves (package.json, node_modules and the like are not for anyone).
@@ -574,6 +574,8 @@ class App:
                 "public_url": cfg.server["public_url"] or None})
         if endpoint == "password":
             return self.change_password(cfg, environ, start_response, user)
+        if endpoint == "history_upload":
+            return self.history_upload(cfg, environ, start_response, method, params, user)
         if endpoint in ADMIN_READS or method in WRITE_METHODS:
             return self.admin(cfg, environ, start_response, method, endpoint, params, user)
         if endpoint == "export":
@@ -614,6 +616,54 @@ class App:
             ERRORS.exception("dashboard change failed on %s %s", method, endpoint)
             return _json(start_response, "500 Internal Server Error", {"error": "internal error"})
         return _json(start_response, "201 Created" if method == "POST" else "200 OK", data)
+
+    def history_upload(self, cfg: Config, environ: Dict[str, Any], start_response: StartResponse, method: str,
+                       params: Dict[str, str], user: str) -> Iterable[bytes]:
+        """Plausible's export (a ZIP, the request's body): kept in data_dir/imports, imported by jobs.py cron."""
+        import secrets
+        import zipfile
+
+        from . import history
+        if method != "POST":
+            return _json(start_response, "405 Method Not Allowed", {"error": "POST the ZIP"})
+        if not self.is_admin(cfg, user):
+            return _json(start_response, "403 Forbidden", {"error": "only admins may import history"})
+        site = cfg.site(params.get("site"))
+        if site is None:
+            return _json(start_response, "404 Not Found", {"error": "unknown property"})
+        span = {k: params[k] for k in ("from", "to") if re.fullmatch(r"\d{4}-\d{2}-\d{2}", params.get(k) or "")}
+        try:
+            length = int(environ.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            length = 0
+        if length > history.MAX_UPLOAD:
+            return _json(start_response, "413 Payload Too Large", {
+                "error": "The file is over %d MB: import it on the server with jobs.py history plausible FILE.zip --site %s"
+                         % (history.MAX_UPLOAD // 2 ** 20, site.id)})
+        if length <= 0:
+            return _json(start_response, "400 Bad Request", {"error": "send the ZIP Plausible exported"})
+        folder = history.uploads_dir(cfg.data_dir)
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        name = secrets.token_hex(16) + ".zip"
+        dest = os.path.join(folder, name)
+        left = length
+        with open(dest, "wb") as fh:
+            while left > 0:
+                chunk = environ["wsgi.input"].read(min(left, 1 << 20))
+                if not chunk:
+                    break
+                fh.write(chunk)
+                left -= len(chunk)
+        try:
+            with zipfile.ZipFile(dest) as z:
+                if "imported_visitors" not in history._plausible_tables(z):
+                    raise zipfile.BadZipFile("no imported_visitors CSV")
+        except (zipfile.BadZipFile, OSError) as exc:
+            os.remove(dest)
+            return _json(start_response, "400 Bad Request", {"error": "This is not Plausible's export (%s): download the "
+                                                             "ZIP from Plausible's Site settings, Imports & Exports." % exc})
+        job = history.create_job(cfg, site.id, "plausible", dict(span, file=name), user)
+        return _json(start_response, "201 Created", {"job": job, "jobs": history.jobs(cfg, site.id)})
 
     def share(self, environ: Dict[str, Any], start_response: StartResponse, path: str) -> Iterable[bytes]:
         cfg = self.holder.get()

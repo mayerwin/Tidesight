@@ -21,7 +21,7 @@ from .config import Config
 from .enrich.raw import raw_paths
 from .storage import EVENTS_MIGRATIONS, REPLAY_MIGRATIONS, connect, migrate
 
-DB_FILES = ("events.db", "replay.db", "derived.db", "search.db")
+DB_FILES = ("events.db", "replay.db", "derived.db", "search.db", "history.db")
 DAY_MS = 86400000
 
 
@@ -40,6 +40,9 @@ def _db(cfg: Config, name: str, readonly: bool = False) -> Optional[sqlite3.Conn
         elif name == "search.db":
             from .searchengines import SEARCH_MIGRATIONS
             migrate(conn, SEARCH_MIGRATIONS)
+        elif name == "history.db":
+            from .history import HISTORY_MIGRATIONS
+            migrate(conn, HISTORY_MIGRATIONS)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -57,12 +60,12 @@ def backup(cfg: Config, dest: Optional[str] = None, keep: int = 7, with_replay: 
            with_derived: bool = False, with_archives: bool = False) -> Dict[str, Any]:
     """Consistent online copies (SQLite backup API), gzip-compressed, rotated: the raw data, the dashboard's own
     data (web.db: segments, notes), the search engines' figures (search.db: they cannot be fetched again beyond 16
-    months) and the settings kept in the data directory (properties, users, search engine accounts)."""
+    months), the history imported from other tools (history.db) and the settings kept in the data directory (properties, users, search engine accounts)."""
     root = dest or os.path.join(cfg.data_dir, "backups")
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     target = os.path.join(root, stamp)
     os.makedirs(target, exist_ok=True)
-    names = (["events.db", "web.db", "search.db"] + (["replay.db"] if with_replay else [])
+    names = (["events.db", "web.db", "search.db", "history.db"] + (["replay.db"] if with_replay else [])
              + (["derived.db"] if with_derived else []))
     if with_archives:
         names += [os.path.join("archive", os.path.basename(p)) for p in raw_paths(cfg.data_dir)
@@ -397,6 +400,8 @@ def purge_site(cfg: Config, site_id: str, apply: bool = False) -> Dict[str, Any]
             if apply:
                 lock.release()
             dconn.close()
+    from . import history
+    rows.update(history.purge_site(cfg, site_id, apply))
     if apply:
         WebDB(cfg.data_dir).delete_site(site_id)
     return out

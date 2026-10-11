@@ -134,6 +134,8 @@ class Admin:
             ("GET", "search_engines"): self.get_search_engines, ("PUT", "search_engines"): self.connect_search_engine,
             ("DELETE", "search_engines"): self.disconnect_search_engine,
             ("GET", "search_engine_sites"): self.search_engine_sites,
+            ("GET", "history"): self.get_history, ("POST", "history"): self.create_history,
+            ("DELETE", "history"): self.delete_history,
         }.get((method, endpoint))
         if route is None:
             raise ApiError(405 if method != "GET" else 404, "unknown endpoint or method")
@@ -389,6 +391,68 @@ class Admin:
             return {"sites": searchengines.engine_sites(self.cfg, engine)}
         except searchengines.SearchEngineError as exc:
             raise ApiError(400 if exc.kind == "config" else 502, str(exc))
+
+    # -- history imported from another tool -----------------------------------------------------------
+    # An admin asks for an import (checked with the tool at once); jobs.py cron carries it out (history.py).
+
+    def get_history(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        from . import history, searchengines
+        self._require_search_admin()
+        site = self._site(params)
+        google = searchengines.describe(searchengines.credentials(self.cfg.data_dir))["google"]
+        return {"jobs": history.jobs(self.cfg, site.id), "first_tidesight_day": history.first_tidesight_day(
+                    self.cfg.data_dir, site.id), "default_to": history.default_last_day(self.cfg.data_dir, site.id),
+                "google": google, "max_upload": history.MAX_UPLOAD}
+
+    def create_history(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        from . import history, searchengines
+        self._require_search_admin()
+        site = self._site(params)
+        source = body.get("source")
+        span = {}
+        for key in ("from", "to"):
+            v = body.get(key)
+            if v:
+                if not isinstance(v, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+                    raise ApiError(400, "%s is a day, YYYY-MM-DD" % key)
+                span[key] = v
+        try:
+            if source == "ga4":
+                prop = str(body.get("property") or "").strip()
+                if prop.lower().startswith("properties/"):
+                    prop = prop[11:]
+                if not re.fullmatch(r"\d{4,15}", prop):
+                    raise ApiError(400, "the GA4 property id is a number (Admin → Property details), not the G-… "
+                                        "measurement id")
+                cred = searchengines.credentials(self.cfg.data_dir).get("google")
+                if not cred or cred.get("demo"):
+                    raise ApiError(409, "connect the Google service account first (the Search engines tab)")
+                client = searchengines.Google(cred, scope=history.GA4_SCOPE)
+                day = history.default_last_day(self.cfg.data_dir, site.id)
+                history._ga4_rows(client, prop, day, day, [], ["sessions"])  # access works: an answer, rows or not
+                job = history.create_job(self.cfg, site.id, "ga4", dict(span, property=prop), self.user)
+            elif source == "matomo":
+                url, id_site, token = (str(body.get(k) or "").strip() for k in ("url", "id_site", "token"))
+                found = history.check_matomo(url, id_site, token)
+                job = history.create_job(self.cfg, site.id, "matomo", dict(span, url=url, id_site=id_site, token=token,
+                                                                         name=found["name"]), self.user)
+            else:
+                raise ApiError(400, "source is ga4 or matomo (Plausible's export is uploaded)")
+        except history.HistoryError as exc:
+            raise ApiError(400 if exc.kind == "config" else 502, str(exc))
+        return {"job": job, "jobs": history.jobs(self.cfg, site.id)}
+
+    def delete_history(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        from . import history
+        self._require_search_admin()
+        site = self._site(params)
+        try:
+            job_id = int(params.get("id", ""))
+        except ValueError:
+            raise ApiError(400, "id is a number")
+        if not history.delete_job(self.cfg, site.id, job_id):
+            raise ApiError(404, "unknown import")
+        return {"deleted": job_id, "jobs": history.jobs(self.cfg, site.id)}
 
     # -- properties: reading ------------------------------------------------------------
 

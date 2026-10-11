@@ -124,6 +124,16 @@ elsewhere: never rebuilt, backed up nightly (Google keeps only 16 months).
 | `search_days(site_id, engine, day, fetched_at, final, rows)` | Google's days imported (or found empty), and whether their figures are final (four days on): recent days are fetched again every 6 hours until then. |
 | `search_state(site_id, engine, target, last_run, last_ok, error, error_at, retry_at)` | Each import: the engine's site it reads (`target`; another one clears the property's figures), the last run and success, the last error and when to try again. |
 
+## history.db
+
+History imported from another tool (`history.py`, `docs/history.md`). Raw data from elsewhere: never rebuilt, backed
+up nightly.
+
+| Table | Contents |
+|---|---|
+| `imported(site_id, day, dim, value, job_id, visitors, visits, pageviews, bounces, duration_s)` | Daily totals in Tidesight's names: `dim` `''` (with `value` `''`) for the day's totals, else `page`, `entry`, `exit`, `source`, `medium`, `campaign`, `channel`, `referrer`, `country`, `region`, `city`, `device`, `browser` or `os` (`(none)` for a value the tool did not know). `duration_s`: the visits' total time in seconds. Primary key `(site_id, dim, day, value)`; index `(job_id, dim, day)`. One import per day: a new import of the same days replaces the older one's rows. |
+| `history_jobs(id, site_id, source, params, status, created_at, created_by, started_at, finished_at, progress, first_day, last_day, rows, error, retry_at)` | Each import: `source` (`ga4`, `plausible`, `matomo`), its parameters (a Matomo token and an uploaded file's name only until it ends), `queued` → `running` → `done` or `failed`, the steps done (`progress`), its days. |
+
 ## web.db
 
 The dashboard's own state, apart from the analytics data (only the Python app reads and writes it).

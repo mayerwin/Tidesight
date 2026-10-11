@@ -5,6 +5,6 @@ only; enrichment jobs may use optional libraries and degrade gracefully
 when they are absent.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 # Where Tidesight is published: the dashboard links to it, and updates.py looks there for new releases.
 __repository__ = "https://github.com/mayerwin/Tidesight"

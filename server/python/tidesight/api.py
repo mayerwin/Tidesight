@@ -30,8 +30,10 @@ from .config import Config, SiteConfig
 from .enrich.timeutil import local_day, zone
 
 from .properties import hosts as site_hosts
-from .query import (DIM_LABELS, MAX_ROW_VALUES, METRIC_LABELS, SESSION_DIMS, ApiError, Query, breakdown, compare_rows, glob_literal,
-                    goal_condition, interval_for, series as time_series, totals as period_totals, value_series)
+from . import history
+from .query import (DEFAULT_SORT, DIM_LABELS, MAX_ROW_VALUES, METRIC_LABELS, SESSION_DIMS, ApiError, Query, breakdown,
+                    compare_rows, glob_literal, goal_condition, interval_for, scope_of, series as time_series,
+                    totals as period_totals, value_series)
 from .webdb import WebDB
 
 PUBLIC_ENDPOINTS = {"overview", "breakdown", "sites", "realtime"}
@@ -218,6 +220,14 @@ class Api:
                 pass
             finally:
                 conn.close()
+        hconn = history.open_readonly(self.cfg.data_dir)
+        if hconn is not None:  # "All time" starts with the history imported from another tool
+            try:
+                for site_id, day in hconn.execute("SELECT site_id, MIN(day) FROM imported WHERE dim = '' GROUP BY site_id"):
+                    if site_id not in first or day < first[site_id]:
+                        first[site_id] = day
+            finally:
+                hconn.close()
         for s in sites:
             s["first_day"] = first.get(s["id"])
         if public:
@@ -306,6 +316,12 @@ class Api:
             conn.close()
         out: Dict[str, Any] = {"site": q.site_id, "from": q.start, "to": q.end, "interval": interval, "totals": totals,
                                "previous": prev, "series": series}
+        out["totals"], out["series"], info = self._with_history(q, totals, series, interval, goal)
+        prev_q = cq or q.previous()
+        prev, cmp_series, _ = self._with_history(prev_q, prev, cmp_series, interval, goal)
+        out["previous"] = prev
+        if info:
+            out["imported"] = info
         if cq:
             out["compare"] = {"from": cq.start, "to": cq.end, "totals": prev, "series": cmp_series}
         if goal:
@@ -318,7 +334,7 @@ class Api:
                 few = q.filters and (d.get("visitors") or 0) < PUBLIC_MIN_VISITORS  # filtered: no singling out
                 return {k: (v if k == "t" or not few else 0) for k, v in d.items() if k in keep or k == "t"}
 
-            out.update(totals=shown(totals), previous=shown(prev), series=[shown(p) for p in series])
+            out.update(totals=shown(out["totals"]), previous=shown(prev), series=[shown(p) for p in out["series"]])
         else:
             out["annotations"] = WebDB(self.cfg.data_dir).annotations(q.site_id, q.start, q.end)
         return out
@@ -345,11 +361,30 @@ class Api:
             limit = q.limit(10, 100000 if params.get("format") in ("csv", "tsv", "json", "xlsx") else 1000)
         conn = self.derived()
         try:
-            result = breakdown(conn, q, dim, dim2, sort=sort, desc=desc, limit=limit, offset=offset, search=search,
-                               values_in=values_in, goal=goal)
             cq = None if public else q.comparison()
-            if cq is not None:
-                compare_rows(conn, q, cq, result, dim, dim2, goal, search=search, values_in=values_in)
+            imp = self._history(q, goal, dim, dim2)
+            cimp = self._history(cq, goal, dim, dim2) if cq is not None else None
+            if (imp is not None and imp.active) or (cimp is not None and cimp.active):
+                result = self._merged_breakdown(conn, q, imp, dim, sort, desc, limit, offset, search, values_in)
+                if cq is not None:
+                    other = self._merged_breakdown(conn, cq, cimp, dim, None, True, 10 ** 6, 0, search, values_in)
+                    found = {r["value"]: r for r in other["rows"]}
+                    for r in result["rows"]:
+                        o = found.get(r["value"])
+                        r["cmp"] = {m: (o or {}).get(m) for m in result["metrics"]}
+                    result["cmp_totals"] = other["totals"]
+                    result["compare"] = {"from": cq.start, "to": cq.end}
+            else:
+                result = breakdown(conn, q, dim, dim2, sort=sort, desc=desc, limit=limit, offset=offset, search=search,
+                                   values_in=values_in, goal=goal)
+                if cq is not None:
+                    compare_rows(conn, q, cq, result, dim, dim2, goal, search=search, values_in=values_in)
+            info = imp.info() if imp is not None else None
+            if info:
+                result["imported"] = info
+            for x in (imp, cimp):
+                if x is not None:
+                    x.close()
         finally:
             conn.close()
         if public:
@@ -373,13 +408,74 @@ class Api:
         if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
             raise ApiError(400, "values must be a JSON list of texts")
         interval = interval_for(q, params.get("interval"))
+        dim = params.get("dim", "source")
         conn = self.derived()
         try:
-            out = value_series(conn, q, params.get("dim", "source"), values[:10], params.get("metric", ""), interval)
+            out = value_series(conn, q, dim, values[:10], params.get("metric", ""), interval)
         finally:
             conn.close()
         out["interval"] = interval
+        imp = self._history(q, None, dim, None)
+        if imp is not None:
+            if imp.active and out.get("metric") in ("visitors", "sessions", "pageviews") and interval != "hour":
+                field = {"visitors": "visitors", "sessions": "visits", "pageviews": "pageviews"}[out["metric"]]
+                per: Dict[Tuple[str, str], float] = defaultdict(float)
+                for (day, value), m in imp.daily(dim, [v for v in values[:10]]).items():
+                    per[(history.bucket(day, interval), value)] += m[field]
+                for sr in out["series"]:
+                    sr["values"] = [v + int(per.get((k, sr["value"]), 0)) for v, k in zip(sr["values"], out["keys"])]
+            info = imp.info()
+            if info:
+                out["imported"] = info
+            imp.close()
         return out
+
+    # -- history imported from another tool (history.py) ----------------------------------------------------------
+
+    def _history(self, q: Optional[Query], goal: Optional[Dict[str, Any]], dim: Optional[str],
+                 dim2: Optional[str]) -> Optional["history.Imported"]:
+        """The imported days a report adds, or None. Filters, a goal, bots only, two dimensions or a dimension the
+        other tools do not have: none added (the answer says why)."""
+        if q is None:
+            return None
+        imp = history.Imported(self.cfg, q.site_id, q.start, q.end,
+                               filtered=bool(q.filters) or q.bots == "only" or goal is not None)
+        if imp.active and dim is not None and (dim2 or dim not in history.DIMS):
+            imp.close()
+            imp.reason = "dimension"
+        return imp
+
+    def _with_history(self, q: Query, totals: Dict[str, Any], points: Optional[List[Dict[str, Any]]], interval: str,
+                      goal: Optional[Dict[str, Any]]) -> Tuple[Dict[str, Any], Optional[List[Dict[str, Any]]], Any]:
+        imp = self._history(q, goal, None, None)
+        info = imp.info()
+        if imp.active:
+            totals = history.add_totals(totals, imp.totals())
+            if points is not None:
+                history.add_series(points, interval, imp.daily(""))
+        imp.close()
+        return totals, points, info
+
+    def _merged_breakdown(self, conn: sqlite3.Connection, q: Query, imp: Optional["history.Imported"], dim: str,
+                          sort: Optional[str], desc: bool, limit: int, offset: int, search: Optional[str],
+                          values_in: Optional[Sequence[str]]) -> Dict[str, Any]:
+        """A breakdown with the imported rows added (every row is read, merged, then sorted and paged)."""
+        scope = scope_of([dim])
+        full = breakdown(conn, q, dim, None, limit=10 ** 6, offset=0, search=search, values_in=values_in)
+        rows = full["rows"]
+        if imp is not None and imp.active:
+            rows = history.add_rows(rows, scope, imp.rows(dim, search, values_in))
+        key = sort if sort in full["metrics"] or sort == "value" else DEFAULT_SORT[scope]
+        rows.sort(key=lambda r: r.get("value") or "")
+        if key != "value":
+            present = [r for r in rows if r.get(key) is not None]
+            present.sort(key=lambda r: r[key], reverse=desc)
+            rows = present + [r for r in rows if r.get(key) is None]
+        elif desc:
+            rows.reverse()
+        full.update(rows=rows[offset:offset + limit], totals=history.sum_rows(rows, scope, full.get("totals") or {}),
+                    total_rows=len(rows))
+        return full
 
     def ep_goals(self, params: Dict[str, str], public: bool) -> Any:
         """Each goal's conversions (visits that completed it), converted visitors and rate, with a comparison."""
@@ -944,7 +1040,17 @@ class Api:
                 args)]
         finally:
             conn.close()
-        return {"countries": countries, "points": points}
+        out: Dict[str, Any] = {"countries": countries, "points": points}
+        imp = self._history(q, None, "country", None)
+        if imp.active:  # the map counts the imported days' visitors too (their cities are not placed)
+            merged = history.add_rows(countries, "session", imp.rows("country"))
+            out["countries"] = sorted(({"value": r["value"], "visitors": r["visitors"], "sessions": r["sessions"]}
+                                       for r in merged), key=lambda r: -r["visitors"])
+        info = imp.info()
+        if info:
+            out["imported"] = info
+        imp.close()
+        return out
 
     def ep_performance(self, params: Dict[str, str], public: bool) -> Any:
         q = self.q(params, public)

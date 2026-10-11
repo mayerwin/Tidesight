@@ -5,7 +5,7 @@ import { card, el } from '../charts.js';
 import { DIM_LABEL, labelFor, metric, SCOPE_METRICS, scopeOf } from '../dims.js';
 import { reportTable } from '../table.js';
 import { segmented } from '../ui.js';
-import { trendChart } from '../widgets.js';
+import { importedNote, trendChart } from '../widgets.js';
 
 // tabs: [{dim, label}]; chart: false for a table alone
 export function reportPage(root, ctx, { tabs, chart = true, title, emptyHint, tableSpan = 12 }) {
@@ -31,11 +31,12 @@ export function reportPage(root, ctx, { tabs, chart = true, title, emptyHint, ta
     const box = chartCard.body.firstChild;
     const note = chartCard.body.lastChild;
     try {
-      await trendChart(box, ctx, { metricKey: chartMetric, plotted, dim, interval: p.get('interval') || undefined, height: 220 });
+      const res = await trendChart(box, ctx, { metricKey: chartMetric, plotted, dim, interval: p.get('interval') || undefined, height: 220 });
       if (mine !== chartToken) return;
-      note.textContent = plotted.length
+      const imported = importedNote(res && res.imported);
+      note.textContent = (plotted.length
         ? (explicit ? 'The rows you ticked in the table.' : 'The top ' + plotted.length + ' rows of the table: tick rows to choose others.')
-        : 'All rows together.';
+        : 'All rows together.') + (imported ? ' ' + imported.textContent : '');
     } catch (e) {
       if (mine === chartToken) box.replaceChildren(el('div', { class: 'empty', text: e.message }));
     }

@@ -1218,6 +1218,63 @@ def search_engines(cfg: Any, sites: List[Site], seed: int) -> Dict[str, int]:
     derived.close()
     return stats
 
+# ---- history imported from the shop's previous analytics tool ----------------------------------------
+
+def imported_history(cfg: Any, site: Site, seed: int, days: int = 300) -> int:
+    """Ten months of daily totals before the shop's first day of Tidesight data, as if imported from Plausible
+    (history.py): growing traffic with a weekly rhythm, spread over pages, sources, countries and devices in the
+    proportions the simulation gave."""
+    import sqlite3
+    from datetime import date, timedelta
+    from tidesight import history
+    rng = random.Random("history-%s" % seed)
+    derived = sqlite3.connect(os.path.join(cfg.data_dir, "derived.db"))
+    first = derived.execute("SELECT MIN(day) FROM sessions WHERE site_id = ? AND is_bot = 0", (site.id,)).fetchone()[0]
+    columns = {"entry": "entry_path", "exit": "exit_path", "source": "source", "medium": "medium", "campaign": "campaign",
+               "channel": "channel", "referrer": "referrer_domain", "country": "country", "region": "region_name",
+               "city": "city", "device": "device_type", "browser": "browser", "os": "os"}
+    shares: Dict[str, List[Tuple[str, float]]] = {}
+    for dim, col in columns.items():
+        rows = derived.execute("SELECT COALESCE(%s, '(none)'), COUNT(*) FROM sessions WHERE site_id = ? AND is_bot = 0 "
+                               "AND site_ok = 1 GROUP BY 1 ORDER BY 2 DESC LIMIT 15" % col, (site.id,)).fetchall()
+        total = sum(n for _, n in rows) or 1
+        shares[dim] = [(v, n / total) for v, n in rows]
+    rows = derived.execute("SELECT path, COUNT(*) FROM pageviews WHERE site_id = ? GROUP BY 1 ORDER BY 2 DESC LIMIT 20",
+                           (site.id,)).fetchall()
+    total = sum(n for _, n in rows) or 1
+    pages = [(v, n / total) for v, n in rows]
+    derived.close()
+    conn = history.open_db(cfg)
+    now = int(time.time() * 1000)
+    start = date.fromisoformat(first) - timedelta(days=days)
+    last = (date.fromisoformat(first) - timedelta(days=1)).isoformat()
+    job = conn.execute("INSERT INTO history_jobs(site_id, source, params, status, created_at, created_by, started_at, "
+                       "finished_at, progress, first_day, last_day) VALUES (?, 'plausible', ?, 'done', ?, 'maya', ?, ?, "
+                       "'{}', ?, ?)", (site.id, json.dumps({"name": "tidewater.example"}), now - 50 * DAY,
+                                       now - 50 * DAY, now - 50 * DAY, start.isoformat(), last)).lastrowid
+    w = history.Writer(conn, site.id, job)
+    for k in range(days):
+        d = start + timedelta(days=k)
+        weekly = 0.65 if d.weekday() >= 5 else 1.0
+        visits = max(1, round((12 + 20 * k / days) * weekly * rng.uniform(0.75, 1.25)))
+        day = d.isoformat()
+        w.add(day, "", "", round(visits * 0.84), visits, round(visits * 2.7), round(visits * 0.43), visits * 96)
+        for dim, values in shares.items():
+            for value, share in values:
+                v = round(visits * share * rng.uniform(0.6, 1.4))
+                if v:
+                    w.add(day, dim, value, round(v * 0.86), v, round(v * 2.7), round(v * 0.43), v * 96)
+        views = visits * 2.7
+        for value, share in pages:
+            v = round(views * share * rng.uniform(0.6, 1.4))
+            if v:
+                w.add(day, "page", value, max(1, round(v * 0.7)), max(1, round(v * 0.8)), v)
+    w.flush()
+    conn.execute("UPDATE history_jobs SET rows = ? WHERE id = ?", (w.rows, job))
+    conn.close()
+    return days
+
+
 # ---- the dashboard side: people, annotations, segments ---------------------------------------------
 
 TEAM = [("maya", "admin", 0.2), ("noah", "admin", 2.5), ("lea", "viewer", 0.9), ("sam", "viewer", 6.0), ("ines", "viewer", None)]
@@ -1296,7 +1353,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         fh.write(CONFIG % {"journal": args.journal_mode, "dashboard": "\n[dashboard]\ndemo = true\n" if args.demo else "",
                            "public_url": 'public_url = "%s"\n' % args.public_url if args.public_url else ""})
     data_dir = os.path.join(out, "data")
-    for name in ("events.db", "replay.db", "derived.db", "web.db", "search.db", "properties.json", "users.json", "update.json",
+    for name in ("events.db", "replay.db", "derived.db", "web.db", "search.db", "history.db", "properties.json", "users.json", "update.json",
                  "search-engines.json"):
         for suffix in ("", "-wal", "-shm"):
             try:
@@ -1315,6 +1372,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     result = pipeline.run(cfg)
     print("enrichment: %d hits, %d sessions in %.1f s" % (result["hits"], result["sessions"], time.time() - t0))
     print("search engines: %(rows)d rows of made-up Search Console and Bing figures" % search_engines(cfg, sites, args.seed))
+    for site in sites:
+        if site.id == "demo":
+            print("history: %d days imported before the shop's first day" % imported_history(cfg, site, args.seed))
     if args.team:
         team(cfg, sites)
     n = live(cfg, sites=[s.id for s in sites], seed=args.seed)

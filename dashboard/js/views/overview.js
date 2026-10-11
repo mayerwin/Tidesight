@@ -7,7 +7,7 @@ import { hint } from '../dom.js';
 import { registerReport } from '../export.js';
 import * as fmt from '../fmt.js';
 import { dialog, field, segmented, toast } from '../ui.js';
-import { breakdownCard, bucketFormat, drawTrend, intervalsFor, renderBreakdown, seriesValue, statTile } from '../widgets.js';
+import { breakdownCard, bucketFormat, drawTrend, importedNote, intervalsFor, renderBreakdown, seriesValue, statTile } from '../widgets.js';
 
 const TILES = ['visitors', 'sessions', 'pageviews', 'views_per_session', 'bounce_rate', 'avg_duration'];
 
@@ -57,6 +57,8 @@ export async function render(root, ctx) {
   const chartBox = el('div', { class: 'chart-box' });
   main.body.appendChild(chartBox);
   drawTrend(chartBox, ctx, data, selected, { height: 270, onAnnotate: ctx.public ? null : (t) => annotationsDialog(ctx, data, t) });
+  const imported = importedNote(data.imported);
+  if (imported) main.body.appendChild(imported);
   const f = bucketFormat(data.interval);
   const cols = [{ key: 't', label: { hour: 'Hour', day: 'Day', week: 'Week', month: 'Month' }[data.interval] || 'Period', render: (r) => f.long(r.t), exportValue: (r) => r.t }];
   for (const k of ['visitors', 'sessions', 'pageviews', 'bounce_rate', 'avg_duration', 'avg_engaged'].concat(ctx.goal ? ['conversions'] : [])) {

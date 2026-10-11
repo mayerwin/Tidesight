@@ -7,12 +7,13 @@ import * as fmt from '../fmt.js';
 import { refreshSites } from '../main.js';
 import { go, hrefFor } from '../state.js';
 import { confirm, copyText, field, segmented, tagInput, toast, toggle } from '../ui.js';
+import { historyImports } from './property-history.js';
 import { searchEngines } from './property-search.js';
 import { cleanDomain, statusOf, validDomain, zoneSelect } from './properties.js';
 
 const TABS = [
   { key: 'general', label: 'General' }, { key: 'tracking', label: 'Tracking code' }, { key: 'goals', label: 'Goals' },
-  { key: 'search', label: 'Search engines' }, { key: 'collection', label: 'Data collection' }, { key: 'privacy', label: 'Privacy' }, { key: 'sharing', label: 'Sharing' },
+  { key: 'search', label: 'Search engines' }, { key: 'history', label: 'Import history' }, { key: 'collection', label: 'Data collection' }, { key: 'privacy', label: 'Privacy' }, { key: 'sharing', label: 'Sharing' },
   { key: 'danger', label: 'Delete' },
 ];
 
@@ -102,7 +103,7 @@ export async function render(root, ctx) {
       return null;
     }
   };
-  const view = { general, tracking, goals, search: searchEngines, collection, privacy, sharing, danger }[tab];
+  const view = { general, tracking, goals, search: searchEngines, history: historyImports, collection, privacy, sharing, danger }[tab];
   await view(root, ctx, p, { disabled, save });
 }
 

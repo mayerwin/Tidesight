@@ -73,10 +73,12 @@ rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `re
 
 ## Phase 7 — Beyond the visits 🚧
 
+Released in 0.3.0: search engines, paths, imported history.
+
 - ✅ **Search engines** (2026-10-10): Google Search Console (a service account: its key file, an RS256-signed token, standard library only) and Bing Webmaster Tools (an API key), connected once in a property's settings with step-by-step instructions, each property linked to its Search Console property and Bing site. `jobs.py cron` imports into `search.db`: Google's 16 months of history (newest first, empty days found in one call), its recent days again until final, Bing twice a day; errors recorded and retried. The **Search engines** report: clicks, impressions, CTR, average position with comparisons, per query, page, country and device, a query's pages and a page's queries, and next to each landing page the organic visits Tidesight recorded (bounce rate, engaged time, conversions). `docs/search-engines.md`.
 - ✅ **Paths** (2026-10-10): a flow of the visits' first pages (from their entry, from a page, or leading to a page) drawn as a Sankey diagram, and what comes before and after one page (entrances per channel, previous and next pages, exits).
 - ⬜ **Email reports and alerts:** a weekly summary per property; alerts when traffic drops, errors spike or a goal stops converting. Needs SMTP settings (shared hosts usually allow sending through the account's mailbox).
-- ⬜ **Importing history** from GA4, Plausible, Matomo (see below): open question.
+- ✅ **Importing history** (2026-10-10): from Plausible (its CSV export, uploaded or given to `jobs.py`), Google Analytics 4 (the Data API, with the search engines' service account) and Matomo (its Reporting API, with a token forgotten afterwards), as one-shot jobs carried out by `jobs.py cron` step by step. Daily totals per page, entry and exit page, source, medium, campaign, channel, referrer, country, region, city, device, browser and system, in Tidesight's names, in `history.db`; the reports add them for the days before the property's first day of Tidesight data (not with filters, goals or two dimensions, and say so). `docs/history.md`.
 - ⬜ **Cross-domain visitors:** one visitor across `site-a.com` and `shop-b.com` (a linker parameter on links between listed domains, as GA4 does, read by the tracker and checked by enrichment).
 - ⬜ **Server-side events:** an endpoint with a per-property secret key for backends (purchases, sign-ups, webhooks), joined to the visit when the request carries the visitor id (GA4's Measurement Protocol).
 - ⬜ **Consent mode:** the tracker waits for `tidesight('consent', …)` before setting identifiers, and records cookieless, unlinked pageviews meanwhile.
@@ -89,6 +91,5 @@ rrweb recorder (vendored, lazy-loaded when sampled in), compressed chunks in `re
 
 ## Open questions
 
-1. **Importing history:** imported figures are daily aggregates (per page, source, country, device…), never visits, so they would live in their own table and the reports would add them for the days before Tidesight's first (filters across dimensions cannot apply to them, as in Plausible). One-shot imports from stable formats keep the upkeep low: Plausible's CSV export (also what other tools produce), GA4 through its Data API (the service-account code of the search engines), Matomo's Reporting API. Universal Analytics' data no longer exists (Google deleted it in 2024).
-2. **Roles:** admins and viewers exist; would a role limited to some properties help?
-3. **Public stats pages:** which metrics should be public by default, per site?
+1. **Roles:** admins and viewers exist; would a role limited to some properties help?
+2. **Public stats pages:** which metrics should be public by default, per site?

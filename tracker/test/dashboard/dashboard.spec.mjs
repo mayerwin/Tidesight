@@ -172,6 +172,16 @@ test('search engines: queries, the pages a query led to, landing pages with thei
   await expect(page.locator('.engine-card select').first()).toHaveValue('sc-domain:tidewater.example');
 });
 
+test('imported history: listed in the settings, added to the reports before Tidesight’s first day', async ({ page }) => {
+  await open(page, '#/property?site=demo&tab=history');
+  await expect(page.locator('.card', { has: page.locator('.card-title', { hasText: 'Import history' }) }).locator('tbody tr')).toContainText('Plausible');
+  await expect(page.locator('.engine-card')).toHaveCount(3);
+  await open(page, '#/overview?period=all');
+  await expect(page.locator('.imported-note')).toContainText('imported from Plausible');
+  await open(page, '#/overview?period=all&filters=' + encodeURIComponent(JSON.stringify([['country', 'is', ['FR']]])));
+  await expect(page.locator('.imported-note')).toContainText('left out');
+});
+
 test('paths: the flow of pages, and what comes before and after a page', async ({ page }) => {
   await open(page, '#/paths');
   await expect(page.locator('svg.sankey .sk-node').first()).toBeVisible();
