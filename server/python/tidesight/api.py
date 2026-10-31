@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 from . import __repository__, __version__, webcheck
 from .config import Config, SiteConfig
 from .enrich.timeutil import local_day, zone
+from .enrich.util import url_parts
 
 from .properties import hosts as site_hosts
 from . import history
@@ -117,10 +118,15 @@ class Budget:
         return _json_or(raw, default)
 
 
-def _path(url: Any) -> str:
+def _path(url: Any, hash_mode: str = "route") -> str:
     """The path of a stored URL ("/" when it has none or does not parse: stored URLs are anyone's data)."""
+    if not isinstance(url, str):
+        return "/"
+    path = url_parts(url, hash_mode)[1]
+    if path:
+        return path
     try:
-        return urlsplit(url).path or "/" if isinstance(url, str) else "/"
+        return urlsplit(url).path or "/"
     except ValueError:
         return "/"
 
@@ -661,6 +667,7 @@ class Api:
         refs: Counter = Counter()
         page_vis: Dict[str, set] = defaultdict(set)
         ref_vis: Dict[str, set] = defaultdict(set)
+        hash_mode = self.cfg.site(site_id).settings.get("hash_mode", "route")
         for r in rows:
             m = (now - r["received_at"]) // 60000
             b = per_min.setdefault(m, {"pageviews": 0, "visitors": set()})
@@ -668,7 +675,7 @@ class Api:
                 b["visitors"].add(r["visitor_id"])
             if r["type"] == "pageview":
                 b["pageviews"] += 1
-                path = _path(r["url"])
+                path = _path(r["url"], hash_mode)
                 pages[path] += 1
                 page_vis[path].add(r["visitor_id"])
                 data = _json_or(r["data"], {})
@@ -686,7 +693,7 @@ class Api:
             refs = Counter({k: v for k, v in refs.items() if "sources" in shown
                             and len(ref_vis[k]) >= PUBLIC_MIN_VISITORS})
         recent = [] if public else [
-            {"type": r["type"], "name": r["name"], "at": r["received_at"], "path": _path(r["url"])}
+            {"type": r["type"], "name": r["name"], "at": r["received_at"], "path": _path(r["url"], hash_mode)}
             for r in rows[:25] if r["type"] not in ("engagement",)]
         return {"active": len(active), "minutes": minutes, "per_minute": series,
                 "pages": [{"value": k, "pageviews": v} for k, v in pages.most_common(10)],
@@ -1199,8 +1206,9 @@ class Api:
         grid = [[0] * cols for _ in range(rows_n)]
         n = 0
         budget = Budget()
+        hash_mode = self.cfg.site_or_default(q.site_id).settings.get("hash_mode", "route")
         for r in rows:
-            if _path(r["url"]) != page:
+            if _path(r["url"], hash_mode) != page:
                 continue
             d = self._decode(r, budget, limit=MAX_MOUSE_DECODED, rrweb=False)
             if not isinstance(d, dict):
@@ -1225,12 +1233,19 @@ class Api:
     def ep_snapshot(self, params: Dict[str, str], public: bool) -> Any:
         q = self.q(params, public)
         page = params.get("page") or "/"
+        hash_mode = self.cfg.site_or_default(q.site_id).settings.get("hash_mode", "route")
         rows = self._chunks("SELECT payload, encoding, url, received_at FROM chunks WHERE site_id = ? AND kind = 'snapshot' "
                             "AND site_ok = 1 ORDER BY id DESC LIMIT 200", (q.site_id,))
         for r in rows:
-            if _path(r["url"]) == page:  # a snapshot is [Meta, FullSnapshot]: nothing more is passed on
-                return {"page": page, "at": r["received_at"], "url": r["url"],
-                        "snapshot": _rrweb_events(self._decode(r))[:2] or None}
+            if _path(r["url"], hash_mode) != page:  # a snapshot is [Meta, FullSnapshot]: nothing more is passed on
+                continue
+            evs = _rrweb_events(self._decode(r))[:2]
+            meta = next((e for e in evs if e.get("type") == 4 and isinstance(e.get("data"), dict)), None)
+            href = meta["data"].get("href") if meta else None
+            if isinstance(href, str) and href and _path(href, hash_mode) != page:
+                continue
+            if evs:
+                return {"page": page, "at": r["received_at"], "url": r["url"], "snapshot": evs}
         return {"page": page, "snapshot": None}
 
     def ep_replays(self, params: Dict[str, str], public: bool) -> Any:

@@ -1,7 +1,7 @@
 // Heatmaps: clicks (and rage/dead clicks), mouse movement and scroll reach over a page.
 // With a DOM snapshot (dom_snapshots feature) clicks are placed on the element they hit, using the stored selector and
 // the position inside the element, so the map survives layout changes. Otherwise the live page is framed
-// (sandboxed, scripts off: viewing never records a visit) and clicks are placed by page coordinates.
+// (sandboxed, named ts-heatmap so the tracker ignores it) and clicks are placed by page coordinates.
 import { card, cssVar, el, table } from '../charts.js';
 import * as fmt from '../fmt.js';
 import { loadPlayer, sanitizeEvents } from '../player.js';
@@ -126,10 +126,10 @@ export async function render(root, ctx) {
   const devSel = el('select', { class: 'input', 'aria-label': 'Device' },
     ...['desktop', 'tablet', 'mobile', 'all'].map((d) => el('option', { value: d, text: d[0].toUpperCase() + d.slice(1), selected: d === device })));
   devSel.addEventListener('change', () => ctx.go('heatmaps', { device: devSel.value }));
-  const scriptsOn = params.get('scripts') === '1';
+  const scriptsOn = params.get('scripts') !== '0';
   const scripts = el('label', { class: 'note', style: { display: 'inline-flex', gap: '6px', alignItems: 'center' } },
     el('input', { type: 'checkbox', checked: scriptsOn }), 'Run the page’s scripts');
-  scripts.querySelector('input').addEventListener('change', (e) => ctx.go('heatmaps', { scripts: e.target.checked ? '1' : null }));
+  scripts.querySelector('input').addEventListener('change', (e) => ctx.go('heatmaps', { scripts: e.target.checked ? null : '0' }));
   const controls = el('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center', marginBottom: '12px' } }, pageSel, devSel);
   c.body.appendChild(controls);
 
@@ -165,14 +165,14 @@ export async function render(root, ctx) {
   if (!snap) {
     const origin = (ctx.siteInfo && ctx.siteInfo.origins && ctx.siteInfo.origins[0]) || '';
     const src = livePageUrl(origin, page);
-    // Scripts run only in a frame of another origin than the dashboard's (it could act as the dashboard).
-    const scriptsAllowed = scriptsOn && src && new URL(src).origin !== location.origin;
+    // Scripts run only in a frame isolated from the dashboard's origin (otherwise it could act as the dashboard).
+    const sameOrigin = src && new URL(src).origin === location.origin;
+    const sandbox = !scriptsOn ? 'allow-same-origin' : sameOrigin ? 'allow-scripts' : 'allow-same-origin allow-scripts';
     if (src) {
-      const frame = el('iframe', { src, width, height, title: 'Page preview', loading: 'lazy',
-        sandbox: scriptsAllowed ? 'allow-same-origin allow-scripts' : 'allow-same-origin', referrerpolicy: 'no-referrer' });
+      const frame = el('iframe', { src, name: 'ts-heatmap', width, height, title: 'Page preview', loading: 'lazy',
+        sandbox, referrerpolicy: 'no-referrer' });
       stage.appendChild(frame);
-      summary.textContent = 'Live page framed at ' + width + 'px · positions by page coordinates' +
-        (scriptsAllowed ? ' · page scripts on (the visit may be recorded)' : '');
+      summary.textContent = 'Live page framed at ' + width + 'px · positions by page coordinates';
       controls.appendChild(scripts);
     } else {
       summary.textContent = origin ? 'This page is not on the site’s origin: showing positions on a blank page'

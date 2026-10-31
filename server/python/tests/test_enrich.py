@@ -491,3 +491,48 @@ def test_flooded_session_is_a_bot_built_once(tmp_path, monkeypatch):
     tr.h.close()
     pipeline.run(cfg)
     assert sessions(cfg)["example/sessFLOOD2"]["hits"] == 150  # not rebuilt for each new hit
+
+
+def test_hash_route_pages_and_modes(tmp_path, monkeypatch):
+    from tidesight.api import Api
+    cfg = make_config(tmp_path)
+    tr = Traffic(cfg, monkeypatch)
+    tr.batch(T0, "visitorHASH01", "sessH1", [
+        pv("h1", "pH1", "https://example.com/#/cours", T0, title="Cours", ns=1, sn=1, pn=1),
+        pv("h2", "pH2", "https://example.com/#/entrainement?mode=exam", T0 + 5000,
+           ref="https://example.com/#/cours", nav="hash", title="Entraînement", sn=1, pn=2),
+        {"t": "click", "id": "hc1", "pid": "pH2", "ts": T0 + 6000, "url": "https://example.com/#/entrainement?mode=exam",
+         "x": 100, "y": 200, "pw": 1000, "ph": 1000, "sel": "button.start", "tag": "button", "txt": "Commencer"},
+        pv("h3", "pH3", "https://example.com/#/", T0 + 10000,
+           ref="https://example.com/#/entrainement?mode=exam", nav="hash", title="Accueil", sn=1, pn=3),
+        pv("h4", "pH4", "https://example.com/#section", T0 + 15000,
+           ref="https://example.com/#/", nav="hash", title="Accueil", sn=1, pn=4),
+    ])
+    tr.h.close()
+    pipeline.run(cfg)
+    s = sessions(cfg)["example/sessH1"]
+    assert (s["entry_path"], s["exit_path"]) == ("/#/cours", "/")
+    api = Api(cfg)
+    rng = {"site": "example", "from": "2026-06-01", "to": "2026-06-02"}
+    pages = {r["value"]: (r["pageviews"], r["entries"], r["exits"])
+             for r in api.call("breakdown", dict(rng, dim="page"))["rows"]}
+    assert pages == {"/": (2, 0, 1), "/#/cours": (1, 1, 0), "/#/entrainement": (1, 0, 0)}
+    entries = {r["value"]: r["sessions"] for r in api.call("breakdown", dict(rng, dim="entry"))["rows"]}
+    assert entries == {"/#/cours": 1}
+    hm = api.call("heatmap", dict(rng, page="/#/entrainement"))
+    assert len(hm["clicks"]) == 1 and hm["selectors"][0]["sel"] == "button.start"
+    monkeypatch.setattr("tidesight.api.time.time", lambda: (T0 + 30000) / 1000.0)
+    rt = api.call("realtime", {"site": "example"})
+    assert {r["value"]: r["pageviews"] for r in rt["pages"]} == {"/": 2, "/#/cours": 1, "/#/entrainement": 1}
+    # Changing hash_mode triggers a derived.db rebuild automatically.
+    cfg.site("example").settings["hash_mode"] = "all"
+    res = pipeline.run(cfg)
+    assert res.get("rebuilt") is True
+    pages_all = {r["value"]: r["pageviews"] for r in api.call("breakdown", dict(rng, dim="page"))["rows"]}
+    assert pages_all == {"/": 1, "/#section": 1, "/#/cours": 1, "/#/entrainement": 1}
+    cfg.site("example").settings["hash_mode"] = "off"
+    res_off = pipeline.run(cfg)
+    assert res_off.get("rebuilt") is True
+    pages_off = {r["value"]: r["pageviews"] for r in api.call("breakdown", dict(rng, dim="page"))["rows"]}
+    assert pages_off == {"/": 4}
+

@@ -52,7 +52,21 @@ def to_str(v: Any, n: int = 500) -> Optional[str]:
     return None
 
 
-def url_parts(url: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+def _route_fragment(frag: str, hash_mode: str) -> Tuple[Optional[str], Optional[str]]:
+    """(fragment_path, fragment_query) when the fragment counts as part of the page path."""
+    if not frag or hash_mode == "off":
+        return None, None
+    if frag.startswith("/") or frag.startswith("!"):
+        head, _, fquery = frag.partition("?")
+        head = head.split("#", 1)[0]
+        return (None if head in ("/", "!", "!/") else head), (fquery or None)
+    if hash_mode == "all":
+        return frag, None
+    return None, None
+
+
+def url_parts(url: Optional[str],
+              hash_mode: str = "route") -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """(host, path, query, fragment) of a URL; tolerant of junk."""
     if not url or not isinstance(url, str):
         return None, None, None, None
@@ -65,7 +79,14 @@ def url_parts(url: Optional[str]) -> Tuple[Optional[str], Optional[str], Optiona
         # A page is an absolute web URL. Anything else (".evil.example/x", "@evil.example") must not become a
         # path: the dashboard joins paths to the site's origin, e.g. to frame the page for a heatmap.
         return None, None, None, None
-    return host, (p.path or "/"), (p.query or None), (p.fragment or None)
+    base_path = p.path or "/"
+    query = p.query or None
+    frag = p.fragment or None
+    frag_path, frag_query = _route_fragment(p.fragment, hash_mode)
+    if frag_query:
+        query = "%s&%s" % (query, frag_query) if query else frag_query
+    path = "%s#%s" % (base_path, frag_path) if frag_path else base_path
+    return host, path, query, frag
 
 
 def b36(n: int) -> str:

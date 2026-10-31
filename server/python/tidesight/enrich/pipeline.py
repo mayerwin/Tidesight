@@ -69,8 +69,9 @@ class Enricher:
         return "|".join(parts)
 
     def _config_fingerprint(self) -> str:
-        """Settings that change derived values (time zones, origins, IP handling, search params)."""
-        sites = {sid: [s.timezone, s.origins, s.settings.get("search_params"), s.settings.get("session_timeout_min")]
+        """Settings that change derived values (time zones, origins, IP handling, search params, hash mode)."""
+        sites = {sid: [s.timezone, s.origins, s.settings.get("search_params"), s.settings.get("session_timeout_min"),
+                       s.settings.get("hash_mode")]
                  for sid, s in sorted(self.cfg.sites.items())}
         e = self.cfg.enrich
         blob = json.dumps([sites, e["ip_header"], e["trusted_proxies"], e["internal_ips"]], sort_keys=True)
@@ -390,7 +391,7 @@ class Enricher:
               skey: str, pkey: Optional[str], ts: int) -> None:
         """Copy a hit into its typed table."""
         day = local_day(ts, site.timezone)
-        _host, path, _q, _h = url_parts(row["url"])
+        _host, path, _q, _h = url_parts(row["url"], site.settings.get("hash_mode", "route"))
         base = (row["hit_id"], row["site_id"], skey, pkey, ts, day, path)
         if htype == "event":
             props = d.get("p") if isinstance(d.get("p"), dict) else None

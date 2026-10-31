@@ -22,7 +22,7 @@ from . import bots, sources
 from .timeutil import local_day, local_hour
 from .util import url_parts
 
-SESSIONS_VERSION = 2
+SESSIONS_VERSION = 3
 
 MAX_SESSION_HITS = 20000
 
@@ -185,8 +185,9 @@ def rebuild_one(conn: sqlite3.Connection, cfg: Config, key: str, reader: Any,
     day = local_day(started, tz)
     screen = "%sx%s" % (ctx["sw"], ctx["sh"]) if ctx.get("sw") and ctx.get("sh") else None
     viewport = "%sx%s" % (ctx["vw"], ctx["vh"]) if ctx.get("vw") and ctx.get("vh") else None
-    _h, entry_path, _q, _f = url_parts(entry_url)
-    exit_path = url_parts(pvs[-1]["url"])[1] if pvs else entry_path
+    hash_mode = site.settings.get("hash_mode", "route")
+    _h, entry_path, _q, _f = url_parts(entry_url, hash_mode)
+    exit_path = url_parts(pvs[-1]["url"], hash_mode)[1] if pvs else entry_path
     values = {
         "session_key": key, "site_id": site_id, "site_ok": min(r["site_ok"] for r in rows), "visitor_key": visitor_key,
         "vid": vid, "uid": uid, "started_at": started, "ended_at": ended, "day": day,
@@ -216,7 +217,7 @@ def rebuild_one(conn: sqlite3.Connection, cfg: Config, key: str, reader: Any,
     }
     conn.execute(_INSERT_SESSION, tuple(values[c] for c in SESSION_COLUMNS))
     conn.execute("INSERT OR IGNORE INTO dirty_days(site_id, day) VALUES (?, ?)", (site_id, day))
-    _rebuild_pageviews(conn, key, site_id, tz, rows, pvs)
+    _rebuild_pageviews(conn, key, site_id, tz, rows, pvs, hash_mode)
     _record_identity_evidence(conn, site_id, vid, uid, values["fp"], values["ck"], pvs)
 
 
@@ -232,7 +233,7 @@ class _Page:
 
 
 def _rebuild_pageviews(conn: sqlite3.Connection, key: str, site_id: str, tz: str, rows: List[sqlite3.Row],
-                       pvs: List[sqlite3.Row]) -> None:
+                       pvs: List[sqlite3.Row], hash_mode: str = "route") -> None:
     pages: Dict[str, _Page] = {}
     for r in rows:
         if not r["page_key"]:
@@ -258,7 +259,7 @@ def _rebuild_pageviews(conn: sqlite3.Connection, key: str, site_id: str, tz: str
         else:
             duration = max(page.last_ts if page.last_ts is not None else pv["ts"], pv["ts"]) - pv["ts"]
         extra = _extra(pv)
-        host, path, query, frag = url_parts(pv["url"])
+        host, path, query, frag = url_parts(pv["url"], hash_mode)
         st = page.status[0] if page.status is not None else extra.get("st")
         conn.execute(
             "INSERT OR REPLACE INTO pageviews(page_key, hit_id, site_id, session_key, ts, day, hour, url, host, path, "

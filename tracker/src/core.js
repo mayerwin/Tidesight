@@ -693,7 +693,7 @@
   Object.keys(cmds).forEach((k) => { if (k[0] !== '_') ts[k] = (...a) => ts(k, ...a); });
   const q = typeof prev === 'function' && Array.isArray(prev.q) ? prev.q : [];
   w.tidesight = ts;
-  if (lsGet('ts_ignore') === '1') silent = 1;
+  if (lsGet('ts_ignore') === '1' || w.name === 'ts-heatmap') silent = 1;
   safe(loadUad)();
   q.forEach((a) => { try { ts.apply(null, a); } catch (e) { log(e); } }); // may include a _config from an early config.js
   if (!cfgLoaded) {

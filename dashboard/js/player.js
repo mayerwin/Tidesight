@@ -37,6 +37,7 @@ export function sanitizeEvents(events) {
       const n = stack.pop();
       if (!n || typeof n !== 'object') continue;
       clean(n.attributes);
+      if (n.tagName === 'noscript') { n.childNodes = []; continue; }
       if (Array.isArray(n.childNodes)) for (let i = 0; i < n.childNodes.length; i++) stack.push(n.childNodes[i]);
     }
   };
