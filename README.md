@@ -107,7 +107,7 @@ Coming from Google Analytics 4, Plausible or Matomo? **Property settings → Imp
 
 ### 8. Invite your team, stay up to date
 
-Admins invite people from the **Users** page with one-time links (no email involved) and choose their role: admin or viewer. Once a day Tidesight looks for a new release; an admin clicks **Update**, and the next cron run downloads it, checks it, puts it in place and keeps the previous version for a rollback. The tracking code on your sites never changes: `ts.js` is served by Tidesight, so it follows.
+Admins invite people from the **Users** page with one-time links (no email involved) and choose their role: admin or viewer. Once a day Tidesight looks for a new release; an admin clicks **Update**, and Tidesight downloads it at once, checks it, puts it in place and keeps the previous version for a rollback. The tracking code on your sites never changes: `ts.js` is served by Tidesight, so it follows.
 
 <img alt="The Users page: people with their roles, an invitation waiting, and their last sign-in" src="docs/images/users.png">
 

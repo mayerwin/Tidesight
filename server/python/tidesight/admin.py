@@ -319,6 +319,7 @@ class Admin:
             updates.request(self.cfg, body.get("version"), self.user)
         except updates.UpdateError as exc:
             raise ApiError(409, str(exc))
+        updates.start_requested(self.cfg)  # at once; else the next cron run
         return updates.state(self.cfg)
 
     def check_update(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:

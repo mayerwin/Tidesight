@@ -14,7 +14,7 @@
     python -m tidesight.jobs --config … status
     python -m tidesight.jobs --config … user set NAME [--role viewer] | user link NAME | user remove NAME | user list
     python -m tidesight.jobs --config … setup-link        # the dashboard's first-account form, code filled in
-    python -m tidesight.jobs --config … update [--check | --install [VERSION] | --rollback]
+    python -m tidesight.jobs --config … update [--check | --install [VERSION] | --requested | --rollback]
     python -m tidesight.jobs --config … search [status | import | connect google FILE | connect bing KEY | sites ENGINE |
                                                disconnect ENGINE]
     python -m tidesight.jobs --config … history [list | plausible FILE.zip | ga4 PROPERTY_ID | matomo URL SITE_ID TOKEN |
@@ -455,6 +455,8 @@ def cmd_update(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     try:
         if args.rollback:
             return updates.rollback(cfg)
+        if args.requested:  # what the dashboard starts when an admin asks for an update (else cron does it)
+            return {"update": updates.run_requested(cfg, web_dirs=webcheck.web_folders(cfg))}
         found = updates.check(cfg) if args.check or args.install else updates.state(cfg)
         if args.install:
             if args.install == "latest" and not found["latest"]:
@@ -678,6 +680,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check", action="store_true", help="ask GitHub for the latest release now")
     p.add_argument("--install", nargs="?", const="latest", default=None, help="install a release now (default: the latest)")
     p.add_argument("--rollback", action="store_true", help="go back to the code the last update replaced")
+    p.add_argument("--requested", action="store_true", help="install the update an admin asked for in the dashboard")
     p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("search", help="search engines: status, import now, connect an account, the sites it sees")

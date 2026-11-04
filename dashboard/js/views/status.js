@@ -74,16 +74,23 @@ function checkNow(refresh) {
   return b;
 }
 
-// Updates: the latest release (looked for once a day by jobs.py cron), and installing it in place. The install is
-// done by the next scheduled job run, never by the web request; the previous code is kept for a rollback.
+// Updates: the latest release (looked for once a day by jobs.py cron), and installing it in place. The install runs in
+// a process of its own, started when an admin asks (else by the next scheduled job run), never in the web request; the
+// previous code is kept for a rollback.
 function updateCard(up, refresh, fetchState) {
   const c = card({ title: 'Updates', span: 12 });
-  const say = (cls, iconName, ...parts) => c.body.appendChild(el('div', { class: 'notice' + cls }, icon(iconName), el('span', {}, ...parts)));
+  // A notice: its text, then its buttons, apart on the right.
+  const say = (cls, iconName, ...parts) => {
+    const buttons = parts.filter((p) => p instanceof HTMLButtonElement);
+    const text = parts.filter((p) => !(p instanceof HTMLButtonElement));
+    return c.body.appendChild(el('div', { class: 'notice' + cls + (buttons.length ? ' has-actions' : '') }, icon(iconName),
+      el('span', {}, ...text), buttons.length ? el('div', { class: 'notice-actions' }, ...buttons) : null));
+  };
   const releases = up.repository ? el('a', { href: up.repository + '/releases', rel: 'noopener', text: 'the releases' }) : 'the releases';
   if (state.version && up.current !== state.version) {  // the server changed version since this page was loaded
     const reload = el('button', { type: 'button', class: 'btn primary small', text: 'Reload' });
     reload.addEventListener('click', () => location.reload());
-    say('', 'check', 'The server now runs Tidesight ' + up.current + ': reload the page to use it. ', reload);
+    say('', 'check', 'The server now runs Tidesight ' + up.current + ': reload the page to use it.', reload);
   }
   const last = up.last_update;
   if (last && last.error) say(' warn', 'alert', 'The update to ' + last.to + ' failed (' + fmt.ago(last.at) + '): ' + last.error + '. Nothing was changed.');
@@ -96,8 +103,8 @@ function updateCard(up, refresh, fetchState) {
     } else {
       const cancel = el('button', { type: 'button', class: 'btn small', text: 'Cancel' });
       cancel.addEventListener('click', async () => { try { await send('DELETE', 'update'); refresh(); } catch (e) { toast(e.message, { kind: 'error' }); } });
-      say('', 'info', 'Tidesight ' + req.version + ' will be installed by the next scheduled job run (within a few minutes)' +
-        (req.requested_by ? ', as ' + req.requested_by + ' asked' : '') + '. ', cancel);
+      say('', 'info', 'Tidesight ' + req.version + ' is about to be installed' + (req.requested_by ? ', as ' + req.requested_by + ' asked' : '') +
+        ' (if it does not start, the next scheduled job run installs it, within a few minutes).', cancel);
     }
     // Look again while it waits or installs, as long as this card is shown, and show how it went.
     let tries = 0;
@@ -105,26 +112,26 @@ function updateCard(up, refresh, fetchState) {
       if (!c.root.isConnected) return;
       let now = null;
       try { now = await fetchState(); } catch (e) { /* the server may be switching to the new code: look again */ }
-      if (settled(now, req) || ++tries > 80) refresh(); else again();
-    }, 15000);
+      if (settled(now, req) || ++tries > 300) refresh(); else again();
+    }, 4000);
     again();
   } else if (up.available) {
     const notes = up.release_url ? el('a', { href: up.release_url, rel: 'noopener', text: 'What is new' }) : null;
     const go = el('button', { type: 'button', class: 'btn primary small', text: 'Update to ' + up.latest, disabled: up.git || null });
     go.addEventListener('click', async () => {
       const ok = await confirm({ title: 'Update Tidesight to ' + up.latest + '?', confirmLabel: 'Update',
-        message: 'The next scheduled job run (within a few minutes) downloads ' + up.latest + ' from GitHub, checks it and puts it in place of ' + up.current +
+        message: 'Tidesight downloads ' + up.latest + ' from GitHub now, checks it and puts it in place of ' + up.current +
           ', which is kept for a rollback (jobs.py update --rollback). Recording goes on meanwhile; this page says when it is done.' });
       if (!ok) return;
       try { await send('POST', 'update', { version: up.latest }); refresh(); } catch (e) { toast(e.message, { kind: 'error' }); }
     });
-    say(' warn', 'info', 'Tidesight ' + up.latest + ' is available: you run ' + up.current + '. ', notes, notes ? ' ' : '', go,
-      up.git ? el('span', { class: 'note', text: ' This installation is a git checkout: update it with git pull.' }) : null);
+    say(' warn', 'info', 'Tidesight ' + up.latest + ' is available: you run ' + up.current + '. ', notes, notes ? '.' : '',
+      up.git ? el('span', { class: 'note', text: ' This installation is a git checkout: update it with git pull.' }) : null, go);
   } else if (up.latest) {
-    say('', 'check', 'Tidesight ' + up.current + ' is the latest release (checked ' + fmt.ago(up.checked_at) + '). ', checkNow(refresh));
+    say('', 'check', 'Tidesight ' + up.current + ' is the latest release (checked ' + fmt.ago(up.checked_at) + ').', checkNow(refresh));
   } else {
     say('', 'info', 'Tidesight ' + up.current + '. ' + (up.error ? up.error.charAt(0).toUpperCase() + up.error.slice(1) + '. ' : 'Not checked yet. '),
-      'New versions are looked for once a day, among ', releases, '. ', checkNow(refresh));
+      'New versions are looked for once a day, among ', releases, '.', checkNow(refresh));
   }
   return c;
 }

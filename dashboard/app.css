@@ -468,6 +468,10 @@ input.switch:disabled { opacity: 0.5; cursor: default; }
 .notice > span { flex: 1; }
 .notice.warn { background: var(--warn-wash); }
 .notice.warn svg { color: var(--s4); }
+.card .notice + .notice { margin-top: 8px; }
+.notice.has-actions { flex-wrap: wrap; row-gap: 8px; }
+.notice.has-actions > span { flex: 1 1 240px; }
+.notice-actions { display: flex; gap: 8px; margin-left: auto; }
 .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
   background: var(--surface-sunk); color: var(--ink-2); white-space: nowrap; }
 .badge.accent { background: var(--wash-strong); color: var(--s1); }

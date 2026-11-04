@@ -38,6 +38,17 @@ def _no_geo_downloads(monkeypatch):
     monkeypatch.setitem(config_mod.ENRICH_DEFAULTS, "geo_refresh_days", 0)
 
 
+from tidesight import updates as _updates  # noqa: E402
+
+REAL_START_REQUESTED = _updates.start_requested
+
+
+@pytest.fixture(autouse=True)
+def _no_update_processes(monkeypatch):
+    """Asking for an update in the dashboard starts its installation in a process of its own: not in tests."""
+    monkeypatch.setattr(_updates, "start_requested", lambda cfg: False)
+
+
 class Response:
     def __init__(self, status: str, headers: List, body: bytes) -> None:
         self.status = status

@@ -292,3 +292,52 @@ def test_cron_repairs_what_an_older_updater_left_open(cfg, tmp_path):
 
 def test_settling_needs_an_update(cfg, tmp_path):
     assert updates.settle(cfg, code_dir=str(tmp_path / "app")) is False
+
+
+def test_an_update_asked_for_starts_at_once(team, tmp_path, monkeypatch):
+    app, data_dir, path, owner = team
+    monkeypatch.setattr(updates, "CODE_DIR", str(tmp_path / "app"))
+    from tidesight.config import load
+    updates.check(load(path), head=lambda url: (302, __repository__ + "/releases/tag/v99.0.0"))
+    started = []
+    monkeypatch.setattr(updates, "start_requested", lambda cfg: started.append(cfg.path) or True)
+    assert api(app, "POST", "update", owner, {"version": "99.0.0"}).code == 201
+    assert started == [path]
+
+
+def test_start_requested_runs_jobs_update_requested_on_its_own(cfg, tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from conftest import REAL_START_REQUESTED as real  # the conftest stand-in replaced it
+    monkeypatch.setattr(updates, "CODE_DIR", str(tmp_path / "app"))
+    calls = []
+
+    class Child:
+        def __init__(self, cmd, **kw):
+            calls.append((cmd, kw))
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", Child)
+    cfg.path = str(tmp_path / "tidesight.toml")
+    assert real(cfg) is True
+    cmd, kw = calls[0]
+    assert cmd == [sys.executable, "-m", "tidesight.jobs", "-q", "--config", os.path.abspath(cfg.path), "update", "--requested"]
+    assert kw["cwd"] == os.path.join(str(tmp_path / "app"), "server", "python")
+    assert kw["stdin"] is subprocess.DEVNULL and kw["stdout"] is subprocess.DEVNULL
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(OSError("no processes")))
+    assert real(cfg) is False  # the next cron run installs it
+    cfg.path = None
+    assert real(cfg) is False
+
+
+def test_jobs_update_requested(cfg, tmp_path, monkeypatch):
+    from tidesight import jobs
+    path = str(tmp_path / "tidesight.toml")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write('[server]\ndata_dir = "%s"\n' % cfg.data_dir.replace("\\", "/"))
+    seen = []
+    monkeypatch.setattr(updates, "run_requested", lambda c, web_dirs=None: seen.append(c.data_dir) or {"to": "9.9.9"})
+    assert jobs.main(["-q", "--config", path, "update", "--requested"]) == 0
+    assert seen == [cfg.data_dir]

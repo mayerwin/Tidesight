@@ -26,6 +26,8 @@ import secrets
 import shutil
 import stat
 import ssl
+import subprocess
+import sys
 import tarfile
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -389,6 +391,30 @@ def run_requested(cfg: Any, web_dirs: Optional[List[str]] = None, download: Opti
             cancel(cfg)
     finally:
         lock.release()
+
+
+_children: List[Any] = []  # installs started by this (long-lived) web process: reaped when the next one starts
+
+
+def start_requested(cfg: Any) -> bool:
+    """Carry out the update an admin just asked for at once, in a process of its own (`jobs.py update --requested`),
+    so the web request answers immediately and the install does not depend on it. False when it cannot be started
+    (no configuration file, or not running under a Python interpreter): the next cron run carries it out, as it does
+    when the process started here is stopped before it begins (the update lock prevents two installs)."""
+    _children[:] = [child for child in _children if child.poll() is None]
+    exe = sys.executable or ""
+    if not cfg.path or "python" not in os.path.basename(exe).lower():
+        return False
+    cmd = [exe, "-m", "tidesight.jobs", "-q", "--config", os.path.abspath(cfg.path), "update", "--requested"]
+    options: Dict[str, Any] = {"start_new_session": True} if os.name == "posix" else {
+        "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)}
+    try:
+        _children.append(subprocess.Popen(cmd, cwd=os.path.join(CODE_DIR, "server", "python"), stdin=subprocess.DEVNULL,
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, **options))
+    except (OSError, ValueError) as exc:
+        log.warning("the update could not be started at once (the next cron run will install it): %s", exc)
+        return False
+    return True
 
 
 def install_now(cfg: Any, version: str, web_dirs: Optional[List[str]] = None, download: Optional[Download] = None,
