@@ -56,6 +56,10 @@ mouse_days = 0
 
 [enrich]
 geo_dir = ""                             # folder with GeoLite2-City.mmdb, GeoLite2-ASN.mmdb, dbip-city-lite.mmdb, ...
+geo_mirror = true                        # GeoLite2 City and user-country from github.com/sapics/ip-location-db, no account
+geo_refresh_days = 14                    # the cron job refreshes the geo databases this often; 0: only geo-update
+# maxmind_account_id = ""                # optional: GeoLite2 from MaxMind itself (free account) instead of the copy
+# maxmind_license_key = ""
 ip_header = "auto"                       # which address is the visitor: "auto", "remote_addr", "x-forwarded-for",
                                          # "x-real-ip", "cf-connecting-ip", "forwarded"
 trusted_proxies = []                     # CIDRs whose forwarding headers are trusted with ip_header = "auto"

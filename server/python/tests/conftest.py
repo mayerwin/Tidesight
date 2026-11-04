@@ -31,6 +31,13 @@ features.dom_snapshots = true
 """
 
 
+@pytest.fixture(autouse=True)
+def _no_geo_downloads(monkeypatch):
+    """The cron job refreshes the geo databases from the internet when due: not in tests, unless one asks."""
+    from tidesight import config as config_mod
+    monkeypatch.setitem(config_mod.ENRICH_DEFAULTS, "geo_refresh_days", 0)
+
+
 class Response:
     def __init__(self, status: str, headers: List, body: bytes) -> None:
         self.status = status

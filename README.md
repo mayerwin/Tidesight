@@ -159,7 +159,7 @@ Overview, realtime, acquisition (channels, sources, mediums, campaigns, referrer
 | **Quality** | Web Vitals (LCP, INP, CLS, FCP, TTFB), Navigation Timing, long tasks, JavaScript and resource errors (de-duplicated). |
 | **Replay** | Session recordings with [rrweb](https://github.com/rrweb-io/rrweb) (sampled, passwords never recorded, inputs masked by default) and DOM snapshots that keep heatmaps accurate when layouts change. |
 | **Server side** | Raw IP and every request header (credentials and other cookies redacted), the raw payload, receive time and client time. |
-| **Derived** | Geolocation (DB-IP Lite, MaxMind GeoLite2 or IPinfo Lite, read by a pure-Python reader), browser, OS and device from the user agent and Client Hints, bot classification, GA4 channel grouping (including AI assistants), a cookieless daily visitor hash, daily rollups. |
+| **Derived** | Geolocation (MaxMind GeoLite2, downloaded without an account; ip-location-db's country check; DB-IP Lite; IPinfo Lite; read by a pure-Python reader), browser, OS and device from the user agent and Client Hints, bot classification, GA4 channel grouping (including AI assistants), a cookieless daily visitor hash, daily rollups. |
 
 Behaviour plugins have a per-site sampling rate. The full catalogue is in [`docs/datapoints.md`](docs/datapoints.md).
 
@@ -226,4 +226,4 @@ Every phase of the plan is built and tested: collector, tracker, enrichment, beh
 
 ## Licence
 
-MIT, see [`LICENSE`](LICENSE). Vendored third-party code keeps its own licence: rrweb and rrweb-player (MIT), the Fraunces and IBM Plex fonts (SIL OFL 1.1), country outlines from Natural Earth via world-atlas (ISC), and the GitHub mark from Octicons (MIT). Geolocation databases are downloaded by the `geo-update` job, never bundled; DB-IP Lite data requires attribution (CC BY 4.0), which the dashboard shows. The website's live demo runs on [Pyodide](https://github.com/pyodide/pyodide) (MPL 2.0), fetched when the website is built.
+MIT, see [`LICENSE`](LICENSE). Vendored third-party code keeps its own licence: rrweb and rrweb-player (MIT), the Fraunces and IBM Plex fonts (SIL OFL 1.1), country outlines from Natural Earth via world-atlas (ISC), and the GitHub mark from Octicons (MIT). Geolocation databases are downloaded by the jobs, never bundled; GeoLite data (CC BY-SA 4.0 and MaxMind's GeoLite EULA) and DB-IP Lite data (CC BY 4.0) require attribution, which the dashboard shows; ip-location-db's user-country is public domain (PDDL). The website's live demo runs on [Pyodide](https://github.com/pyodide/pyodide) (MPL 2.0), fetched when the website is built.

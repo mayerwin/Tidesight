@@ -772,3 +772,124 @@ def test_download_dbip_broken_downloads_leave_no_trace(server, tmp_path, monkeyp
 def test_download_dbip_rejects_bad_arguments(tmp_path, kwargs):
     with pytest.raises(ValueError):
         download_dbip(str(tmp_path), **kwargs)
+
+
+# --- ip-location-db: GeoLite2 City copies and user-country --------------------------------
+
+NOW = 1_800_000_000  # "now" for the age of the copies of GeoLite2
+FRESH = NOW - 3 * 86400
+MIRROR_CITY4 = [
+    (
+        "64.140.144.0/21",
+        {"city": "Papeete", "country_code": "PF", "latitude": -17.5346, "longitude": -149.5703, "postcode": "",
+         "state1": "Iles du Vent", "state2": "", "timezone": "Pacific/Tahiti"},
+    ),
+    (
+        "8.8.8.0/24",
+        {"city": "", "country_code": "US", "latitude": 37.751, "longitude": -97.822, "postcode": "", "state1": "",
+         "state2": "", "timezone": "America/Chicago"},
+    ),
+]
+MIRROR_CITY6 = [
+    (
+        "2a01:cb00::/32",
+        {"city": "Paris", "country_code": "FR", "latitude": 48.8566, "longitude": 2.3522, "postcode": "75001",
+         "state1": "Ile-de-France", "state2": "Paris", "timezone": "Europe/Paris"},
+    ),
+]
+USER_COUNTRY = [
+    ("64.140.144.0/21", {"country": {"iso_code": "PF"}, "country_code": "PF"}),
+    ("2a01:cb00::/32", {"country": {"iso_code": "FR"}, "country_code": "FR"}),
+]
+
+
+def write_mirror(directory: Any, epoch: int = FRESH) -> None:
+    write(directory, "geolite2-city-ipv4.mmdb", MIRROR_CITY4, ip_version=4, database_type="city ipv4",
+          build_epoch=epoch)
+    write(directory, "geolite2-city-ipv6.mmdb", MIRROR_CITY6, database_type="city ipv6", build_epoch=epoch)
+    write(directory, "user-country.mmdb", USER_COUNTRY, database_type="Country (compat=GeoLite2-Country)",
+          build_epoch=epoch)
+
+
+def test_mirror_copies_of_geolite2_city(tmp_path):
+    write_mirror(tmp_path)
+    with GeoLookup(str(tmp_path), now=NOW) as geo:
+        assert sorted((db["provider"], db["kind"]) for db in geo.databases) == [
+            ("iplocdb", "country"), ("maxmind", "city4"), ("maxmind", "city6")]
+        found = geo.lookup("64.140.148.152")
+        assert found["maxmind"] == record(country="PF", region_name="Iles du Vent", city="Papeete", lat=-17.5346,
+                                          lon=-149.5703, tz="Pacific/Tahiti", network="64.140.144.0/21")
+        assert found["iplocdb"]["country"] == "PF"
+        assert geo.lookup("2a01:cb00::1")["maxmind"]["city"] == "Paris"  # the IPv6 file
+        # Empty strings are unknowns.
+        assert geo.lookup("8.8.8.8")["maxmind"]["city"] is None
+        assert geo.lookup("8.8.8.8")["maxmind"]["region_name"] is None
+
+
+def test_maxmind_own_city_file_wins_over_the_copies(tmp_path):
+    write_mirror(tmp_path)
+    write(tmp_path, "GeoLite2-City.mmdb", MAXMIND_CITY, database_type="GeoLite2-City", build_epoch=FRESH)
+    with GeoLookup(str(tmp_path), now=NOW) as geo:
+        assert ("maxmind", "city") in {(db["provider"], db["kind"]) for db in geo.databases}
+        assert not {db["kind"] for db in geo.databases} & {"city4", "city6"}
+
+
+def test_old_copies_of_geolite2_are_not_used(tmp_path, caplog):
+    write_mirror(tmp_path, epoch=NOW - 31 * 86400)
+    with caplog.at_level(logging.WARNING, logger="tidesight.enrich.geo"):
+        with GeoLookup(str(tmp_path), now=NOW) as geo:
+            # user-country is public domain: no age limit.
+            assert [(db["provider"], db["kind"]) for db in geo.databases] == [("iplocdb", "country")]
+    assert "built more than 30 days ago" in caplog.text
+
+
+# --- downloads from ip-location-db ------------------------------------------------------------
+
+MIRROR_FILES_BODIES = {
+    "geolite2-city-ipv4": build_database(MIRROR_CITY4, ip_version=4, build_epoch=7100),
+    "geolite2-city-ipv6": build_database(MIRROR_CITY6, build_epoch=7101),
+    "user-country": build_database(USER_COUNTRY, build_epoch=7102),
+}
+
+
+def serve_mirror(server: Any, bodies: Dict[str, bytes] = MIRROR_FILES_BODIES, sums: Dict[str, str] = None) -> None:
+    import hashlib
+    for name, body in bodies.items():
+        digest = (sums or {}).get(name) or hashlib.sha256(body).hexdigest()
+        server.routes[f"/rel/checksum/{name}.mmdb.sha256"] = (200, {}, (digest + "\n").encode())
+        server.routes[f"/rel/latest/{name}.mmdb"] = (200, {}, body)
+
+
+def test_download_mirror(server, tmp_path):
+    serve_mirror(server)
+    paths = geo_update.download_mirror(str(tmp_path), base_url=server.url + "/rel")
+    assert paths == [str(tmp_path / f"{name}.mmdb") for name in geo_update.MIRROR_FILES]
+    for name, body in MIRROR_FILES_BODIES.items():
+        assert (tmp_path / f"{name}.mmdb").read_bytes() == body
+    assert {entry["authorization"] for entry in server.log} == {None}
+    with GeoLookup(str(tmp_path), now=7200) as geo:
+        assert geo.lookup("64.140.148.152")["maxmind"]["city"] == "Papeete"
+
+
+def test_download_mirror_rejects_a_checksum_mismatch(server, tmp_path):
+    old = build_database(USER_COUNTRY, build_epoch=1)
+    (tmp_path / "user-country.mmdb").write_bytes(old)
+    serve_mirror(server, {"user-country": MIRROR_FILES_BODIES["user-country"]}, {"user-country": "0" * 64})
+    with pytest.raises(GeoUpdateError, match="SHA-256"):
+        geo_update.download_mirror(str(tmp_path), ["user-country"], base_url=server.url + "/rel")
+    assert os.listdir(str(tmp_path)) == ["user-country.mmdb"]
+    assert (tmp_path / "user-country.mmdb").read_bytes() == old
+
+
+def test_download_mirror_reports_every_file(server, tmp_path):
+    serve_mirror(server, {"user-country": MIRROR_FILES_BODIES["user-country"]})
+    with pytest.raises(GeoUpdateError) as caught:
+        geo_update.download_mirror(str(tmp_path), base_url=server.url + "/rel")
+    assert "geolite2-city-ipv4: HTTP 404" in str(caught.value)
+    assert caught.value.updated == [str(tmp_path / "user-country.mmdb")]
+
+
+@pytest.mark.parametrize("kwargs", [{"names": ["dbip-city"]}, {"names": []}, {"base_url": "file:///x"}])
+def test_download_mirror_rejects_bad_arguments(tmp_path, kwargs):
+    with pytest.raises(ValueError):
+        geo_update.download_mirror(str(tmp_path), **kwargs)

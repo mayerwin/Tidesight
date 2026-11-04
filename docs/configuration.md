@@ -79,12 +79,14 @@ Days to keep, applied by `jobs.py privacy-clean --retention --apply`; `0` keeps 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `geo_dir` | `""` → `data_dir/geo` | Folder with `GeoLite2-City.mmdb`, `GeoLite2-ASN.mmdb`, `dbip-city-lite*.mmdb`, `dbip-asn-lite*.mmdb`, `ipinfo_lite.mmdb`… (`jobs.py geo-update` fills it). |
+| `geo_dir` | `""` → `data_dir/geo` | Folder with `GeoLite2-City.mmdb`, `GeoLite2-ASN.mmdb`, `geolite2-city-ipv4.mmdb` and `geolite2-city-ipv6.mmdb` (ip-location-db's copies of GeoLite2 City), `user-country.mmdb`, `dbip-city-lite*.mmdb`, `dbip-asn-lite*.mmdb`, `ipinfo_lite.mmdb`… (the cron job and `jobs.py geo-update` fill it). |
 | `ip_header` | `"auto"` | Which address is the visitor's: `auto` (REMOTE_ADDR, unless it is a trusted or private proxy, or a Cloudflare edge sending `CF-Connecting-IP`), `remote_addr`, `x-forwarded-for`, `x-real-ip`, `cf-connecting-ip`, `true-client-ip`, `forwarded`. |
 | `trusted_proxies` | `[]` | CIDRs whose forwarding headers are trusted with `auto`. |
 | `bot_list` | `""` | Optional `crawler-user-agents.json` with extra bot patterns. |
 | `internal_ips` | `[]` | CIDRs flagged as internal traffic (excluded from reports). |
-| `maxmind_account_id`, `maxmind_license_key` | `""` | For `jobs.py geo-update --source maxmind` (free GeoLite2 account). |
+| `maxmind_account_id`, `maxmind_license_key` | `""` | Optional: download GeoLite2 City and ASN from MaxMind itself (free GeoLite account), instead of ip-location-db's copy. |
+| `geo_mirror` | `true` | Download, without any account, GeoLite2 City (MaxMind's data, republished by [ip-location-db](https://github.com/sapics/ip-location-db) under MaxMind's licence) and ip-location-db's own `user-country` database (public domain). `false`: DB-IP Lite only (plus MaxMind with a licence key). |
+| `geo_refresh_days` | `14` | The cron job refreshes the geo databases this often (a failed refresh is tried again 6 hours later); `0` leaves it to `jobs.py geo-update`. Copies of GeoLite2 City older than 30 days are not used, and are deleted (MaxMind's licence). |
 | `batch_size` | `5000` | Raw hits per enrichment transaction. |
 
 ## `[dashboard]`

@@ -22,13 +22,18 @@ from . import bots, sources
 from .timeutil import local_day, local_hour
 from .util import url_parts
 
-SESSIONS_VERSION = 3
+SESSIONS_VERSION = 4
 
 MAX_SESSION_HITS = 20000
 
 ENGAGED_MS = 10000  # GA4: an engaged session lasts 10 s or more, or has 2+ pageviews
 
+# Location: MaxMind (GeoLite2) first; DB-IP and IPinfo only where they agree with ip-location-db's country.
 GEO_PREFERENCE = ("maxmind", "dbip", "ipinfo")
+# ip-location-db's user-country: a country check built from the networks' own geofeeds and routing data.
+GEO_COUNTRY_CHECK = "iplocdb"
+COUNTRY_KEYS = ("country", "country_name", "continent", "is_eu")
+CITY_KEYS = ("region", "region_name", "city", "postal", "lat", "lon", "accuracy_km", "tz")
 
 SESSION_COLUMNS = (
     "session_key", "site_id", "site_ok", "visitor_key", "vid", "uid", "started_at", "ended_at", "day", "hour", "duration_ms",
@@ -52,24 +57,35 @@ def _extra(row: sqlite3.Row) -> Dict[str, Any]:
 
 
 def best_geo(conn: sqlite3.Connection, ip: Optional[str]) -> Dict[str, Any]:
-    """Merge the providers' answers for an IP: the preferred provider first, gaps filled by others."""
+    """Merge the providers' answers for an IP into one location.
+
+    The country is MaxMind's when it has one. Otherwise it is ip-location-db's, and DB-IP or IPinfo are only
+    believed where they agree with it (DB-IP places some networks where their previous owner was). The city,
+    region and coordinates come from one provider, among those that agree on the country; the network's ASN from
+    the first provider that knows it.
+    """
     if not ip:
         return {}
-    rows = [dict(r) for r in conn.execute("SELECT * FROM ip_geo WHERE ip = ? AND provider != ''", (ip,))]
+    rows = {r["provider"]: dict(r) for r in conn.execute("SELECT * FROM ip_geo WHERE ip = ? AND provider != ''", (ip,))}
     if not rows:
         return {}
-    order = {p: i for i, p in enumerate(GEO_PREFERENCE)}
-    rows.sort(key=lambda r: order.get(r["provider"], 99))
+    check = (rows.get(GEO_COUNTRY_CHECK) or {}).get("country")
+    located = [rows[p] for p in GEO_PREFERENCE if p in rows and rows[p].get("country")]
+    chosen = next((r for r in located if r["provider"] == "maxmind" or not check or r["country"] == check), None)
+    country = chosen["country"] if chosen else check
     out: Dict[str, Any] = {}
-    for r in rows:
-        for k, v in r.items():
-            if v is not None and out.get(k) is None:
-                out[k] = v
-    # City-level fields must come from one provider, or the city may not match the region.
-    city_src = next((r for r in rows if r.get("city")), None)
-    if city_src:
-        for k in ("country", "region", "region_name", "city", "lat", "lon", "tz", "postal"):
+    if country:
+        agree = ([chosen] if chosen else []) + [r for r in located if r is not chosen and r["country"] == country]
+        agree += [r for p, r in rows.items() if p == GEO_COUNTRY_CHECK and r.get("country") == country]
+        for k in COUNTRY_KEYS:
+            out[k] = next((r[k] for r in agree if r.get(k) is not None), None)
+        # City-level fields come from one provider, or the city may not match the region.
+        city_src = next((r for r in agree if r.get("city")), None) or (chosen if chosen else {})
+        for k in CITY_KEYS:
             out[k] = city_src.get(k)
+    for k in ("asn", "as_org", "network"):
+        out[k] = next((rows[p][k] for p in GEO_PREFERENCE + (GEO_COUNTRY_CHECK,) if p in rows and rows[p].get(k) is not None),
+                      None)
     return out
 
 

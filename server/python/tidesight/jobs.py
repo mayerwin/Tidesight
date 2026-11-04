@@ -5,7 +5,7 @@
     python -m tidesight.jobs --config … rollup [--all]
     python -m tidesight.jobs --config … load-spool
     python -m tidesight.jobs --config … backup [--dest DIR] [--keep 7] [--with-replay]
-    python -m tidesight.jobs --config … geo-update [--source dbip|maxmind]
+    python -m tidesight.jobs --config … geo-update [--source dbip|maxmind|ip-location-db]
     python -m tidesight.jobs --config … privacy-clean [--hash-ip|--truncate-ip] [--drop-fingerprint] ... [--apply]
     python -m tidesight.jobs --config … archive --before 2025-01-01 [--apply]
     python -m tidesight.jobs --config … export --site ID --what sessions --from … --to … [--format csv]
@@ -121,6 +121,13 @@ def cmd_cron(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
         carried = {"error": str(exc)}
     if carried:
         out["history"] = carried
+    # The geo databases: refreshed every geo_refresh_days (the next enrichment recomputes locations with them).
+    try:
+        if geo_refresh_due(cfg):
+            out["geo_update"] = geo_refresh(cfg)
+    except Exception as exc:
+        log.exception("geo database refresh failed")
+        out["geo_update"] = {"error": str(exc)}
     # New releases: looked for once a day; one an admin asked for is installed last, when nothing else runs here.
     from . import updates
     if updates.settle(cfg):  # the code an update installed: as private as the code it replaced
@@ -140,13 +147,67 @@ def cmd_backup(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
     return backup(cfg, dest=args.dest, keep=args.keep, with_replay=args.with_replay, with_derived=args.with_derived)
 
 
-def cmd_geo_update(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
-    from .enrich import geo_update
-    dest = cfg.enrich["geo_dir"] or os.path.join(cfg.data_dir, "geo")
+GEO_STATE_FILE = "geo-update.json"
+GEO_RETRY_MS = 6 * 3600 * 1000  # after a failed refresh
+
+
+def _geo_dir(cfg: Config) -> str:
+    return cfg.enrich["geo_dir"] or os.path.join(cfg.data_dir, "geo")
+
+
+def geo_sources(cfg: Config) -> List[str]:
+    """What geo-update downloads by default: MaxMind with a licence key, ip-location-db unless switched off, DB-IP."""
+    e = cfg.enrich
+    return ((["maxmind"] if e["maxmind_license_key"] else []) + (["ip-location-db"] if e["geo_mirror"] else [])
+            + ["dbip"])
+
+
+def geo_refresh_due(cfg: Config, now_ms: Optional[int] = None) -> bool:
+    """True when the last successful refresh is older than geo_refresh_days, a database is missing, or a copy of
+    GeoLite2 is about to be too old to use; never sooner than 6 hours after a failed attempt."""
+    from .enrich import geo
+    days = cfg.enrich["geo_refresh_days"]
+    if not days or days <= 0:
+        return False
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    doc = _read_json(os.path.join(cfg.data_dir, GEO_STATE_FILE))
+    attempted, refreshed = doc.get("attempted_at"), doc.get("refreshed_at")
+    if isinstance(attempted, int) and now_ms - attempted < GEO_RETRY_MS and attempted != refreshed:
+        return False
+    if not isinstance(refreshed, int) or now_ms - refreshed > days * 86400000:
+        return True
+    dest = _geo_dir(cfg)
+    try:
+        names = [n for n in os.listdir(dest) if n.lower().endswith(".mmdb")]
+    except OSError:
+        return True
+    if not names:
+        return True
+    from .enrich import mmdb
+    limit = (geo.MIRROR_MAX_AGE_DAYS - 7) * 86400  # a week ahead, for retries
+    for name in names:
+        if geo.is_mirror_file(name):
+            try:
+                if now_ms / 1000 - mmdb.read_metadata(os.path.join(dest, name)).build_epoch > limit:
+                    return True
+            except (OSError, mmdb.InvalidDatabaseError):
+                return True
+    return False
+
+
+def geo_refresh(cfg: Config, sources: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Download the geo databases of *sources* (default :func:`geo_sources`), then delete copies of GeoLite2 that
+    are too old to use. Remembers the attempt in data_dir/geo-update.json."""
+    from .enrich import geo, geo_update, mmdb
+    dest = _geo_dir(cfg)
     os.makedirs(dest, exist_ok=True)
+    state_path = os.path.join(cfg.data_dir, GEO_STATE_FILE)
+    doc = _read_json(state_path)
+    doc["attempted_at"] = int(time.time() * 1000)
+    _write_json(state_path, doc)  # a cron run that starts meanwhile does not download the same files
+    sources = list(sources or geo_sources(cfg))
     updated: List[str] = []
     errors: List[str] = []
-    sources = [args.source] if args.source else (["maxmind"] if cfg.enrich["maxmind_license_key"] else []) + ["dbip"]
     for source in sources:
         try:
             if source == "maxmind":
@@ -154,15 +215,57 @@ def cmd_geo_update(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
                     raise SystemExit("maxmind needs [enrich] maxmind_account_id and maxmind_license_key")
                 updated += geo_update.download_maxmind(dest, cfg.enrich["maxmind_account_id"],
                                                        cfg.enrich["maxmind_license_key"])
+            elif source == "ip-location-db":
+                # MaxMind's own GeoLite2 City wins over the copy: then only the country check is downloaded.
+                names = [n for n in geo_update.MIRROR_FILES
+                         if not (n.startswith("geolite2-city") and cfg.enrich["maxmind_license_key"])]
+                updated += geo_update.download_mirror(dest, names)
             else:
                 updated += geo_update.download_dbip(dest)
         except geo_update.GeoUpdateError as exc:  # some files may still have been updated
             updated += list(getattr(exc, "updated", []) or [])
             errors.append("%s: %s" % (source, exc))
+    removed: List[str] = []
+    oldest = time.time() - geo.MIRROR_MAX_AGE_DAYS * 86400
+    for name in sorted(os.listdir(dest)):
+        path = os.path.join(dest, name)
+        if not geo.is_mirror_file(name):
+            continue
+        try:
+            stale = mmdb.read_metadata(path).build_epoch < oldest
+        except (OSError, mmdb.InvalidDatabaseError):
+            stale = False
+        if stale:  # MaxMind's licence: old GeoLite data is deleted within 30 days of a newer release
+            os.remove(path)
+            removed.append(path)
+    if not errors:
+        doc["refreshed_at"] = doc["attempted_at"]
+    doc["error"] = "; ".join(errors) or None
+    _write_json(state_path, doc)
     out: Dict[str, Any] = {"updated": updated, "dir": dest}
+    if removed:
+        out["removed"] = removed
     if errors:
         out["errors"] = errors
     return out
+
+
+def _read_json(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_json(path: str, doc: Dict[str, Any]) -> None:
+    from .properties import write_json
+    write_json(path, doc)
+
+
+def cmd_geo_update(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
+    return geo_refresh(cfg, [args.source] if args.source else None)
 
 
 def cmd_privacy_clean(cfg: Config, args: argparse.Namespace) -> Dict[str, Any]:
@@ -517,7 +620,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_backup)
 
     p = sub.add_parser("geo-update", help="download or refresh the geo databases")
-    p.add_argument("--source", choices=["dbip", "maxmind"], default=None)
+    p.add_argument("--source", choices=["dbip", "maxmind", "ip-location-db"], default=None)
     p.set_defaults(func=cmd_geo_update)
 
     p = sub.add_parser("privacy-clean", help="anonymise or drop personal data (dry run unless --apply)")

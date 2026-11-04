@@ -100,6 +100,10 @@ ENRICH_DEFAULTS: Dict[str, Any] = {
     "internal_ips": [],
     "maxmind_account_id": "",
     "maxmind_license_key": "",
+    # Download GeoLite2 City (MaxMind's data, republished by github.com/sapics/ip-location-db) and that project's
+    # user-country database, no account needed.
+    "geo_mirror": True,
+    "geo_refresh_days": 14,  # the cron job refreshes the geo databases this often; 0: only `jobs.py geo-update`
     "batch_size": 5000,
 }
 

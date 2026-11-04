@@ -100,7 +100,7 @@ Rebuilt from the raw data whenever the pipeline version changes (parsers, geo da
 |---|---|
 | `job_state(job, version, last_id, updated_at, info)` | Enrichment watermark (last processed `raw_hits.id`) and version. |
 | `ua` | One row per distinct user agent + Client Hints: browser, OS, device type/brand/model, webview, in-app, bot UA. |
-| `ip_geo(ip, provider, …)` | Geolocation per IP and provider (MaxMind, DB-IP, IPinfo): country, region, city, coordinates, time zone, ASN, network. |
+| `ip_geo(ip, provider, …)` | Geolocation per IP and provider (`maxmind`, `dbip`, `ipinfo`, `iplocdb` for ip-location-db's user-country): country, region, city, coordinates, time zone, ASN, network. A session takes MaxMind's location; without it, the country of `iplocdb`, with DB-IP's or IPinfo's region and city only where they agree on the country. |
 | `requests` | Per raw request: decided client IP and its source header, UA id, cookieless daily hash, clock skew, retry count, internal flag. |
 | `hits` | Per raw hit: session key, page key, effective time (client time corrected for clock skew), duplicate flag, and the fields sessions are built from. |
 | `event_ids`, `px_sessions` | De-duplication of retried events; pixel-hit sessions. |

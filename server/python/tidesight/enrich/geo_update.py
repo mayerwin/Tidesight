@@ -7,7 +7,14 @@ destination folder and moved into place with ``os.replace``. Readers never
 see a partial file, and a failed download leaves the old database in place.
 
 - **MaxMind GeoLite2 / GeoIP2** need an account ID and a license key (free
-  for GeoLite2). The databases must not be redistributed.
+  for GeoLite2).
+- **ip-location-db** (https://github.com/sapics/ip-location-db) needs no key.
+  It republishes GeoLite2 City under MaxMind's GeoLite licence (CC BY-SA 4.0
+  and the GeoLite EULA: credit MaxMind, keep the data up to date, drop old
+  copies within 30 days of a newer release), and publishes its own
+  ``user-country`` database (public domain), built from the networks'
+  geofeeds and routing data. Each file is checked against the project's
+  published SHA-256.
 - **DB-IP Lite** needs no key. Its data is licensed CC BY 4.0, so pages that
   show it must credit DB-IP ("IP Geolocation by DB-IP", https://db-ip.com).
 
@@ -20,6 +27,7 @@ import base64
 import datetime
 import functools
 import gzip
+import hashlib
 import os
 import posixpath
 import re
@@ -32,7 +40,7 @@ from typing import IO, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import mmdb
 
-__all__ = ["GeoUpdateError", "download_dbip", "download_maxmind"]
+__all__ = ["GeoUpdateError", "download_dbip", "download_maxmind", "download_mirror"]
 
 USER_AGENT = "tidesight-geo-update"
 TIMEOUT_SECONDS = 60  # per connection attempt and per read, not for the whole download
@@ -42,6 +50,9 @@ MAX_DATABASE_SIZE = 2 * 1024 ** 3  # refuse anything larger once decompressed
 MAXMIND_BASE_URL = "https://download.maxmind.com"
 DBIP_BASE_URL = "https://download.db-ip.com/free"
 DBIP_KINDS = ("city", "country", "asn")
+MIRROR_BASE_URL = "https://github.com/sapics/ip-location-db/releases/download"
+MIRROR_FILES = ("geolite2-city-ipv4", "geolite2-city-ipv6", "user-country")
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 _EDITION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -143,6 +154,57 @@ def download_dbip(
             updated.append(dest)
     _raise_failures("DB-IP", failures, updated)
     return updated
+
+
+def download_mirror(
+    dest_dir: str,
+    names: Sequence[str] = MIRROR_FILES,
+    base_url: str = MIRROR_BASE_URL,
+) -> List[str]:
+    """Download ip-location-db databases into *dest_dir* as ``<name>.mmdb``.
+
+    Fetches ``{base_url}/latest/{name}.mmdb`` and its checksum
+    ``{base_url}/checksum/{name}.mmdb.sha256``; a file that does not match is
+    not installed. *names* are among :data:`MIRROR_FILES`. Returns the paths
+    that were replaced.
+    """
+    files = [name.lower() for name in _check_names(names, None, "file")]
+    unknown = [name for name in files if name not in MIRROR_FILES]
+    if unknown:
+        raise ValueError(f"unknown ip-location-db file(s) {unknown}; expected some of {MIRROR_FILES}")
+    base = _check_base_url(base_url)
+    os.makedirs(dest_dir, exist_ok=True)
+    updated: List[str] = []
+    failures: List[Tuple[str, BaseException]] = []
+    for name in files:
+        dest = os.path.join(dest_dir, f"{name}.mmdb")
+        try:
+            with _open_url(f"{base}/checksum/{name}.mmdb.sha256") as response:
+                expected = response.read(1024).decode("ascii", "replace").split()
+            if not expected or not _SHA256.match(expected[0]):
+                raise GeoUpdateError("the published checksum is not a SHA-256")
+            with _open_url(f"{base}/latest/{name}.mmdb") as response:
+                _install(dest, functools.partial(_copy_checked, response, expected[0].lower()))
+        except Exception as exc:  # report every file, then raise once
+            failures.append((f"{name}: {_describe(exc, {})}", exc))
+        else:
+            updated.append(dest)
+    _raise_failures("ip-location-db", failures, updated)
+    return updated
+
+
+def _copy_checked(source: IO[bytes], sha256: str, out: IO[bytes]) -> None:
+    """Copy *source* to *out*; raise unless its SHA-256 is *sha256*."""
+    digest = hashlib.sha256()
+
+    class _Hashing:
+        def write(self, chunk: bytes) -> None:
+            digest.update(chunk)
+            out.write(chunk)
+
+    _copy_stream(source, _Hashing())  # type: ignore[arg-type]
+    if digest.hexdigest() != sha256:
+        raise GeoUpdateError("the download does not match its published SHA-256 (try again later)")
 
 
 def _open_url(url: str, authorization: Optional[str] = None) -> Any:

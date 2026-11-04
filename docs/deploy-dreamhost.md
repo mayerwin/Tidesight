@@ -167,13 +167,11 @@ Use the same interpreter in the cron lines below.
 */2 * * * * cd ~/stats.example.com/app/server/python && python3 -m tidesight.jobs -q --config ~/stats.example.com/tidesight.toml cron >> ~/stats.example.com/data/cron.log 2>&1
 # Nightly backup, 14 kept.
 15 3 * * * cd ~/stats.example.com/app/server/python && python3 -m tidesight.jobs -q --config ~/stats.example.com/tidesight.toml backup --keep 14 >> ~/stats.example.com/data/cron.log 2>&1
-# Monthly geo database refresh (DB-IP Lite, plus MaxMind GeoLite2 when a licence key is configured).
-30 4 2 * * cd ~/stats.example.com/app/server/python && python3 -m tidesight.jobs -q --config ~/stats.example.com/tidesight.toml geo-update >> ~/stats.example.com/data/cron.log 2>&1
 # Weekly: optimise the databases.
 45 4 * * 0 cd ~/stats.example.com/app/server/python && python3 -m tidesight.jobs -q --config ~/stats.example.com/tidesight.toml vacuum >> ~/stats.example.com/data/cron.log 2>&1
 ```
 
-Run `geo-update` once by hand right away so the first enrichment has locations. Geolocation by DB-IP (CC BY 4.0) requires the attribution the dashboard shows. For MaxMind, create a free GeoLite2 account and set `maxmind_account_id` and `maxmind_license_key` in `[enrich]`.
+The geo databases need no cron line of their own: the `cron` job downloads them on its first run, then every two weeks (`geo_refresh_days`), and the next enrichment places visitors with them. They are GeoLite2 City (MaxMind's data, republished by [ip-location-db](https://github.com/sapics/ip-location-db)), ip-location-db's `user-country` and DB-IP Lite; no account is needed. To have them at once, run `geo-update` by hand. The dashboard shows the attribution MaxMind's and DB-IP's licences ask for. Installations set up before 0.3.2 may keep their monthly `geo-update` line, or remove it. To download GeoLite2 from MaxMind itself instead, create a free GeoLite account and set `maxmind_account_id` and `maxmind_license_key` in `[enrich]`.
 
 The backup keeps the raw data (`events.db`), the dashboard's own data (`web.db`: saved segments, notes) and the settings of the data directory (`properties.json`, `users.json`); `--with-replay` and `--with-derived` add the other databases.
 

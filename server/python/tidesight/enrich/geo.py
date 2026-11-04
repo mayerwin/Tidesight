@@ -14,18 +14,26 @@ Recognised file names (case-insensitive):
 provider    kind         file names
 ==========  ===========  ==================================================
 maxmind     city         GeoLite2-City.mmdb, GeoIP2-City.mmdb
+maxmind     city4        geolite2-city-ipv4.mmdb (ip-location-db's copy)
+maxmind     city6        geolite2-city-ipv6.mmdb (ip-location-db's copy)
 maxmind     country      GeoLite2-Country.mmdb, GeoIP2-Country.mmdb
 maxmind     asn          GeoLite2-ASN.mmdb, GeoIP2-ISP.mmdb
 dbip        city         dbip-city-lite*.mmdb
 dbip        country      dbip-country-lite*.mmdb
 dbip        asn          dbip-asn-lite*.mmdb
 ipinfo      country_asn  ipinfo_lite.mmdb, ipinfo-lite.mmdb
+iplocdb     country      user-country.mmdb (ip-location-db, public domain)
 ==========  ===========  ==================================================
 
 When several files match the same provider and kind, the one with the newest
 ``build_epoch`` wins. A country database is only used when its provider has
-no city database. A provider's location and ASN answers are merged into one
-record whose keys are :data:`RECORD_KEYS` (None when unknown).
+no city database, and ip-location-db's copies of GeoLite2 City (one file for
+IPv4, one for IPv6, in that project's own layout) only when MaxMind's own
+file is absent. Those copies are ignored once they are older than
+:data:`MIRROR_MAX_AGE_DAYS`: MaxMind's licence asks for old GeoLite data to
+be dropped within 30 days of a newer release. A provider's location and ASN
+answers are merged into one record whose keys are :data:`RECORD_KEYS` (None
+when unknown).
 
 Results depend only on the database files and :data:`GEO_VERSION`, which
 :meth:`GeoLookup.version` combines, so derived rows can be recomputed when
@@ -40,11 +48,12 @@ import ipaddress
 import logging
 import math
 import os
+import time
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from . import mmdb
 
-__all__ = ["GEO_VERSION", "RECORD_KEYS", "GeoLookup", "is_public_ip"]
+__all__ = ["GEO_VERSION", "MIRROR_MAX_AGE_DAYS", "RECORD_KEYS", "GeoLookup", "is_mirror_file", "is_public_ip"]
 
 GEO_VERSION = 1  # bump when the normalisation below changes
 
@@ -82,10 +91,17 @@ _FILE_PATTERNS: Tuple[Tuple[str, str, str], ...] = (
     ("dbip-asn-lite*.mmdb", "dbip", "asn"),
     ("ipinfo_lite.mmdb", "ipinfo", "country_asn"),
     ("ipinfo-lite.mmdb", "ipinfo", "country_asn"),
+    ("geolite2-city-ipv4.mmdb", "maxmind", "city4"),
+    ("geolite2-city-ipv6.mmdb", "maxmind", "city6"),
+    ("user-country.mmdb", "iplocdb", "country"),
 )
 
 # Location kinds come first, so the network of the location answer wins.
-_KIND_ORDER = ("city", "country", "country_asn", "asn")
+_KIND_ORDER = ("city", "city4", "city6", "country", "country_asn", "asn")
+_MIRROR_KINDS = ("city4", "city6")
+# GeoLite data must be dropped within 30 days of a newer release, and MaxMind publishes twice a week: a copy
+# built more than 30 days ago has been outdated for over 26 days.
+MIRROR_MAX_AGE_DAYS = 30
 
 _OPEN_ERRORS = (OSError, ValueError, MemoryError, mmdb.InvalidDatabaseError)
 
@@ -151,10 +167,15 @@ class GeoLookup:
         files: Optional[List[str]] = None,
         *,
         use_mmap: bool = False,
+        now: Optional[float] = None,
     ) -> None:
         self.geo_dir = geo_dir
         self._databases: List[_Database] = []
         candidates = _discover(geo_dir, files)
+        oldest = (time.time() if now is None else now) - MIRROR_MAX_AGE_DAYS * 86400
+        for candidate in [c for c in candidates if c.kind in _MIRROR_KINDS and c.build_epoch < oldest]:
+            logger.warning("geo: ignoring %s: built more than %d days ago", candidate.path, MIRROR_MAX_AGE_DAYS)
+        candidates = [c for c in candidates if c.kind not in _MIRROR_KINDS or c.build_epoch >= oldest]
         for provider in sorted({candidate.provider for candidate in candidates}):
             self._databases.extend(_open_provider(provider, candidates, use_mmap))
         self._by_provider: Dict[str, List[_Database]] = {}
@@ -263,6 +284,12 @@ def _discover(geo_dir: Optional[str], files: Optional[List[str]]) -> List[_Candi
     return candidates
 
 
+def is_mirror_file(path: str) -> bool:
+    """True for ip-location-db's copies of GeoLite2 City, which must be kept up to date."""
+    match = _classify(path)
+    return match is not None and match[1] in _MIRROR_KINDS
+
+
 def _candidate_paths(geo_dir: Optional[str], files: Optional[List[str]]) -> List[Tuple[str, bool]]:
     """``(path, explicitly listed)`` pairs to consider."""
     if files is not None:
@@ -293,8 +320,12 @@ def _open_provider(provider: str, candidates: List[_Candidate], use_mmap: bool) 
     opened: List[_Database] = []
     kinds = {candidate.kind for candidate in candidates if candidate.provider == provider}
     for kind in _KIND_ORDER:
-        if kind not in kinds or (kind == "country" and any(db.kind == "city" for db in opened)):
+        if kind not in kinds:
             continue
+        if kind == "country" and any(db.kind in ("city",) + _MIRROR_KINDS for db in opened):
+            continue
+        if kind in _MIRROR_KINDS and any(db.kind == "city" for db in opened):
+            continue  # MaxMind's own file wins over a copy
         group = [c for c in candidates if c.provider == provider and c.kind == kind]
         group.sort(key=lambda c: (c.build_epoch, os.path.basename(c.path).lower(), c.path), reverse=True)
         for candidate in group:
@@ -411,6 +442,21 @@ def _normalise_location(record: Any) -> Dict[str, Any]:
     }
 
 
+def _normalise_mirror_city(record: Any) -> Dict[str, Any]:
+    """ip-location-db's GeoLite2 City records: a flat map, region names without codes, "" when unknown."""
+    if not isinstance(record, dict):
+        return {}
+    return {
+        "country": _code(record.get("country_code")),
+        "region_name": _text(record.get("state1")),
+        "city": _text(record.get("city")),
+        "postal": _text(record.get("postcode")),
+        "lat": _number(record.get("latitude")),
+        "lon": _number(record.get("longitude")),
+        "tz": _text(record.get("timezone")),
+    }
+
+
 def _normalise_asn(record: Any) -> Dict[str, Any]:
     """GeoLite2-ASN / GeoIP2-ISP / DB-IP ASN Lite records."""
     if not isinstance(record, dict):
@@ -436,6 +482,8 @@ def _normalise_ipinfo(record: Any) -> Dict[str, Any]:
 
 _NORMALISERS: Dict[str, Callable[[Any], Dict[str, Any]]] = {
     "city": _normalise_location,
+    "city4": _normalise_mirror_city,
+    "city6": _normalise_mirror_city,
     "country": _normalise_location,
     "asn": _normalise_asn,
     "country_asn": _normalise_ipinfo,

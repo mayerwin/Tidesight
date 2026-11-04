@@ -594,8 +594,13 @@ async function boot() {
     : document.createTextNode('Tidesight');
   document.getElementById('credit').replaceChildren(source,
     document.createTextNode(' · open-source, self-hosted analytics' + (state.version ? ' (v' + state.version + ')' : '') + '. '),
+    document.createTextNode('Locations from '),
+    el('a', { href: 'https://www.maxmind.com', rel: 'noopener', text: 'GeoLite data created by MaxMind' }),
+    document.createTextNode(' (CC BY-SA 4.0), '),
     el('a', { href: 'https://db-ip.com', rel: 'noopener', text: 'IP geolocation by DB-IP' }),
-    document.createTextNode(' where DB-IP data is used (CC BY 4.0).'));
+    document.createTextNode(' (CC BY 4.0) and '),
+    el('a', { href: 'https://github.com/sapics/ip-location-db', rel: 'noopener', text: 'ip-location-db' }),
+    document.createTextNode(', where their data is used.'));
   onReplace(render);
   window.addEventListener('hashchange', render);
   if (!PUBLIC) {

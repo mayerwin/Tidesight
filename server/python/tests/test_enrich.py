@@ -6,6 +6,7 @@ import gzip
 import json
 import os
 import sqlite3
+import time
 
 import pytest
 
@@ -536,3 +537,128 @@ def test_hash_route_pages_and_modes(tmp_path, monkeypatch):
     pages_off = {r["value"]: r["pageviews"] for r in api.call("breakdown", dict(rng, dim="page"))["rows"]}
     assert pages_off == {"/": 4}
 
+
+
+# --- which provider's location a session gets ---------------------------------------------------
+
+def _geo_rows(tmp_path, rows):
+    from tidesight.enrich.db import open_derived
+    conn = open_derived(str(tmp_path / "derived.db"))
+    for provider, values in rows.items():
+        conn.execute("INSERT INTO ip_geo(ip, provider, country, region, region_name, city, lat, lon, tz, asn, as_org,"
+                     " continent) VALUES ('1.2.3.4', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (provider, values.get("country"), values.get("region"), values.get("region_name"),
+                      values.get("city"), values.get("lat"), values.get("lon"), values.get("tz"), values.get("asn"),
+                      values.get("as_org"), values.get("continent")))
+    return conn
+
+
+JUPITER = {"country": "US", "region": "FL", "region_name": "Florida", "city": "Jupiter", "lat": 26.9,
+           "lon": -80.1, "tz": "America/New_York", "asn": 55943, "as_org": "ONATI", "continent": "NA"}
+PAPEETE = {"country": "PF", "region_name": "Iles du Vent", "city": "Papeete", "lat": -17.5, "lon": -149.6,
+           "tz": "Pacific/Tahiti"}
+
+
+def test_best_geo_maxmind_first(tmp_path):
+    from tidesight.enrich.sessions import best_geo
+    conn = _geo_rows(tmp_path, {"maxmind": PAPEETE, "dbip": JUPITER, "iplocdb": {"country": "PF"}})
+    geo = best_geo(conn, "1.2.3.4")
+    assert (geo["country"], geo["city"], geo["region_name"], geo["tz"]) == ("PF", "Papeete", "Iles du Vent",
+                                                                           "Pacific/Tahiti")
+    assert geo["region"] is None and geo["continent"] is None  # nothing from the provider that disagrees
+    assert (geo["asn"], geo["as_org"]) == (55943, "ONATI")  # the network is the network, wherever it is
+
+
+def test_best_geo_without_maxmind_trusts_the_country_check(tmp_path):
+    from tidesight.enrich.sessions import best_geo
+    conn = _geo_rows(tmp_path, {"dbip": JUPITER, "iplocdb": {"country": "PF"}})
+    geo = best_geo(conn, "1.2.3.4")
+    assert geo["country"] == "PF"
+    assert all(geo[k] is None for k in ("region", "region_name", "city", "lat", "lon", "tz", "continent"))
+    assert geo["asn"] == 55943
+
+
+def test_best_geo_without_maxmind_keeps_dbip_when_it_agrees(tmp_path):
+    from tidesight.enrich.sessions import best_geo
+    conn = _geo_rows(tmp_path, {"dbip": JUPITER, "iplocdb": {"country": "US"}})
+    geo = best_geo(conn, "1.2.3.4")
+    assert (geo["country"], geo["region"], geo["city"], geo["continent"]) == ("US", "FL", "Jupiter", "NA")
+    # No country check for this address (or no user-country file): DB-IP as before.
+    (tmp_path / "x").mkdir()
+    conn = _geo_rows(tmp_path / "x", {"dbip": JUPITER})
+    assert best_geo(conn, "1.2.3.4")["city"] == "Jupiter"
+
+
+def test_best_geo_city_from_another_provider_only_in_the_same_country(tmp_path):
+    from tidesight.enrich.sessions import best_geo
+    country_only = {"country": "PF", "lat": -15.0, "lon": -140.0, "tz": "Pacific/Tahiti"}
+    conn = _geo_rows(tmp_path, {"maxmind": country_only, "dbip": JUPITER})
+    geo = best_geo(conn, "1.2.3.4")
+    assert (geo["country"], geo["city"], geo["lat"]) == ("PF", None, -15.0)
+    (tmp_path / "x").mkdir()
+    conn = _geo_rows(tmp_path / "x", {"maxmind": country_only, "dbip": dict(PAPEETE, region="IDV")})
+    geo = best_geo(conn, "1.2.3.4")
+    assert (geo["country"], geo["city"], geo["region"], geo["lat"]) == ("PF", "Papeete", "IDV", -17.5)
+
+
+# --- refreshing the geo databases from cron ------------------------------------------------------
+
+def test_geo_refresh_due_and_state(tmp_path, monkeypatch):
+    from tidesight import jobs
+    from tidesight.enrich import geo_update
+    cfg = make_config(tmp_path)
+    cfg.enrich["geo_refresh_days"] = 14
+    calls = []
+
+    def fake(name):
+        def download(dest, *args, **kwargs):
+            calls.append(name)
+            if name == "dbip" and fail:
+                raise geo_update.GeoUpdateError("dbip-city-lite: HTTP 503")
+            return [name]
+        return download
+    monkeypatch.setattr(geo_update, "download_mirror", fake("mirror"))
+    monkeypatch.setattr(geo_update, "download_dbip", fake("dbip"))
+    monkeypatch.setattr(geo_update, "download_maxmind", fake("maxmind"))
+    assert jobs.geo_sources(cfg) == ["ip-location-db", "dbip"]
+    assert jobs.geo_refresh_due(cfg)  # never refreshed
+    fail = True
+    out = jobs.geo_refresh(cfg)
+    assert calls == ["mirror", "dbip"] and out["errors"] and out["updated"] == ["mirror"]
+    assert not jobs.geo_refresh_due(cfg)  # a failure is retried 6 hours later
+    assert jobs.geo_refresh_due(cfg, now_ms=int(time.time() * 1000) + 7 * 3600 * 1000)
+    fail = False
+    calls.clear()
+    assert "errors" not in jobs.geo_refresh(cfg)
+    assert not jobs.geo_refresh_due(cfg)
+    assert not jobs.geo_refresh_due(cfg, now_ms=int(time.time() * 1000) + 13 * 86400000)
+    assert jobs.geo_refresh_due(cfg, now_ms=int(time.time() * 1000) + 15 * 86400000)
+    # With a MaxMind licence key: MaxMind's own files, and only the country check from ip-location-db.
+    cfg.enrich.update(maxmind_license_key="k", maxmind_account_id="1")
+    seen = []
+    monkeypatch.setattr(geo_update, "download_mirror", lambda dest, names: seen.append(names) or [])
+    jobs.geo_refresh(cfg)
+    assert seen == [["user-country"]]
+    cfg.enrich.update(maxmind_license_key="", geo_mirror=False)
+    assert jobs.geo_sources(cfg) == ["dbip"]
+    cfg.enrich["geo_refresh_days"] = 0
+    assert not jobs.geo_refresh_due(cfg, now_ms=int(time.time() * 1000) + 99 * 86400000)
+
+
+def test_geo_refresh_deletes_old_copies_of_geolite2(tmp_path, monkeypatch):
+    from tidesight import jobs
+    from tidesight.enrich import geo_update
+    cfg = make_config(tmp_path)
+    geo = tmp_path / "geo"
+    city = [("64.140.144.0/21", {"city": "Papeete", "country_code": "PF"})]
+    write_database(str(geo / "geolite2-city-ipv4.mmdb"), city, ip_version=4, build_epoch=int(time.time()) - 31 * 86400)
+    write_database(str(geo / "user-country.mmdb"), [("64.140.144.0/21", {"country": {"iso_code": "PF"}})],
+                   build_epoch=int(time.time()) - 31 * 86400)
+    for name in ("download_mirror", "download_dbip"):
+        monkeypatch.setattr(geo_update, name, lambda dest, *a, **k: (_ for _ in ()).throw(
+            geo_update.GeoUpdateError("offline")))
+    cfg.enrich["geo_refresh_days"] = 14
+    assert jobs.geo_refresh_due(cfg)
+    out = jobs.geo_refresh(cfg)
+    assert out["removed"] == [str(geo / "geolite2-city-ipv4.mmdb")]
+    assert sorted(os.listdir(str(geo))) == ["GeoLite2-ASN.mmdb", "GeoLite2-City.mmdb", "user-country.mmdb"]
