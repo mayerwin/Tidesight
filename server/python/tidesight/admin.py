@@ -130,7 +130,7 @@ class Admin:
             ("PATCH", "user"): self.update_user, ("DELETE", "user"): self.delete_user,
             ("POST", "user_link"): self.create_user_link,
             ("GET", "update"): self.get_update, ("POST", "update"): self.request_update,
-            ("DELETE", "update"): self.cancel_update,
+            ("DELETE", "update"): self.cancel_update, ("POST", "update_check"): self.check_update,
             ("GET", "search_engines"): self.get_search_engines, ("PUT", "search_engines"): self.connect_search_engine,
             ("DELETE", "search_engines"): self.disconnect_search_engine,
             ("GET", "search_engine_sites"): self.search_engine_sites,
@@ -320,6 +320,15 @@ class Admin:
         except updates.UpdateError as exc:
             raise ApiError(409, str(exc))
         return updates.state(self.cfg)
+
+    def check_update(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
+        """Ask GitHub for the latest release now, rather than at the next daily check (not twice in 30 seconds)."""
+        from . import updates
+        self._require_update_admin()
+        checked = updates.state(self.cfg).get("checked_at")
+        if isinstance(checked, int) and time.time() * 1000 - checked < updates.RECHECK_MIN_MS:
+            return updates.state(self.cfg)
+        return updates.check(self.cfg)
 
     def cancel_update(self, params: Dict[str, str], body: Dict[str, Any]) -> Any:
         from . import updates

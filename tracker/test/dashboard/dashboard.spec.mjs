@@ -436,6 +436,30 @@ test('admins see a newer release, and its installation', async ({ page }) => {
   }
 });
 
+test('admins can look for a newer release at once', async ({ page }) => {
+  const repo = 'https://github.com/mayerwin/Tidesight';
+  // The last daily check found nothing newer (an older release counts as "the latest" for this code).
+  writeFileSync(DATA_DIR + 'update.json', JSON.stringify({ latest: '0.0.1', release_url: repo + '/releases/tag/v0.0.1', checked_at: Date.now() - 3600000, error: null }));
+  try {
+    // What "Check now" would learn from GitHub, without asking it: the endpoint is answered here, the file written.
+    await page.route('**/api/update_check', async (route) => {
+      writeFileSync(DATA_DIR + 'update.json', JSON.stringify({ latest: '99.0.0', release_url: repo + '/releases/tag/v99.0.0', checked_at: Date.now(), error: null }));
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+    });
+    await page.goto(AUTH);
+    await page.fill('input[name=username]', 'admin');
+    await page.fill('input[name=password]', 'test-pass');
+    await page.click('button[type=submit]');
+    await page.goto(AUTH + '#/status');
+    const card = page.locator('section.card', { has: page.locator('h2.card-title', { hasText: /^Updates$/ }) });
+    await expect(card).toContainText('is the latest release (checked 1 h ago)');
+    await card.getByRole('button', { name: 'Check now' }).click();
+    await expect(card).toContainText('Tidesight 99.0.0 is available');
+  } finally {
+    rmSync(DATA_DIR + 'update.json', { force: true });
+  }
+});
+
 test('the read-only demo opens without signing in and changes nothing', async ({ page, errors }) => {
   await page.goto(DEMO + '#/overview');
   await expect(page.locator('.demo-banner')).toContainText('Live demo');

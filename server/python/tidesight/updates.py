@@ -38,6 +38,7 @@ log = logging.getLogger("tidesight.updates")
 STATE_FILE = "update.json"
 REQUEST_FILE = "update-request.json"
 CHECK_EVERY_MS = 24 * 3600 * 1000
+RECHECK_MIN_MS = 30 * 1000  # the dashboard's "Check now": GitHub is not asked twice in this time
 MAX_ARCHIVE = 50 * 1024 * 1024    # bytes downloaded
 MAX_UNPACKED = 300 * 1024 * 1024  # bytes unpacked
 MAX_MEMBERS = 20000

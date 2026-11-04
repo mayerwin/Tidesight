@@ -63,6 +63,17 @@ function settled(now, req) {
   return true;
 }
 
+// "Check now": asks GitHub for the latest release at once, instead of waiting for the daily check.
+function checkNow(refresh) {
+  const b = el('button', { type: 'button', class: 'btn small', text: 'Check now' });
+  b.addEventListener('click', async () => {
+    b.disabled = true;
+    b.textContent = 'Checking…';
+    try { await send('POST', 'update_check'); refresh(); } catch (e) { toast(e.message, { kind: 'error' }); b.disabled = false; b.textContent = 'Check now'; }
+  });
+  return b;
+}
+
 // Updates: the latest release (looked for once a day by jobs.py cron), and installing it in place. The install is
 // done by the next scheduled job run, never by the web request; the previous code is kept for a rollback.
 function updateCard(up, refresh, fetchState) {
@@ -110,10 +121,10 @@ function updateCard(up, refresh, fetchState) {
     say(' warn', 'info', 'Tidesight ' + up.latest + ' is available: you run ' + up.current + '. ', notes, notes ? ' ' : '', go,
       up.git ? el('span', { class: 'note', text: ' This installation is a git checkout: update it with git pull.' }) : null);
   } else if (up.latest) {
-    say('', 'check', 'Tidesight ' + up.current + ' is the latest release (checked ' + fmt.ago(up.checked_at) + ').');
+    say('', 'check', 'Tidesight ' + up.current + ' is the latest release (checked ' + fmt.ago(up.checked_at) + '). ', checkNow(refresh));
   } else {
     say('', 'info', 'Tidesight ' + up.current + '. ' + (up.error ? up.error.charAt(0).toUpperCase() + up.error.slice(1) + '. ' : 'Not checked yet. '),
-      'New versions are looked for once a day, among ', releases, '.');
+      'New versions are looked for once a day, among ', releases, '. ', checkNow(refresh));
   }
   return c;
 }

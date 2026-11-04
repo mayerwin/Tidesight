@@ -162,12 +162,20 @@ def test_admins_ask_for_an_update_in_the_dashboard(team, tmp_path, monkeypatch):
     assert st["current"] == __version__ and st["available"] is False and st["repository"] == __repository__
     updates.check(cfg, head=lambda url: (302, __repository__ + "/releases/tag/v99.0.0"))
     assert api(app, "GET", "update", owner).json()["available"] is True
+    # "Check now": GitHub is asked at once, but not twice in 30 seconds.
+    asked_github = []
+    monkeypatch.setattr(updates, "_head", lambda url: asked_github.append(url) or (302, __repository__ + "/releases/tag/v99.0.0"))
+    assert api(app, "POST", "update_check", owner).json()["latest"] == "99.0.0" and asked_github == []  # just checked
+    monkeypatch.setattr(updates, "RECHECK_MIN_MS", 0)
+    checked = api(app, "POST", "update_check", owner).json()
+    assert checked["available"] is True and asked_github == [__repository__ + "/releases/latest"]
     assert api(app, "POST", "update", owner, {"version": "98.0.0"}).code == 409
     asked = api(app, "POST", "update", owner, {"version": "99.0.0"})
     assert asked.code == 201 and asked.json()["request"]["version"] == "99.0.0"
     assert api(app, "DELETE", "update", owner).json()["request"] is None
     token = api(app, "POST", "users", owner, {"name": "viewer1", "role": "viewer"}).json()["token"]
     viewer = cookie_of(link_call(app, {"token": token, "password": "viewer password"}))
+    assert api(app, "POST", "update_check", viewer).code == 403
     assert api(app, "GET", "update", viewer).code == 403 and api(app, "POST", "update", viewer, {"version": "99.0.0"}).code == 403
     os.makedirs(str(tmp_path / "app" / ".git"))
     refused = api(app, "POST", "update", owner, {"version": "99.0.0"})
